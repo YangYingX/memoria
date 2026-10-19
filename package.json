@@ -1,0 +1,20 @@
+{
+  "name": "memoria",
+  "version": "0.2.2",
+  "private": true,
+  "description": "A local-first personal agent with scoped memories and verifiable experiences.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node scripts/check.js"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.12"
+  }
+}

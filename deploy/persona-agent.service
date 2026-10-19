@@ -1,0 +1,31 @@
+[Unit]
+Description=Memoria
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=persona-agent
+Group=persona-agent
+WorkingDirectory=/opt/persona-agent
+ExecStart=/usr/bin/node /opt/persona-agent/src/server.js
+Environment=NODE_ENV=production
+Environment=PORT=3210
+Environment=PERSONA_DATA_DIR=/var/lib/persona-agent
+Environment=PERSONA_BACKUP_DIR=/var/lib/persona-agent-backups
+StateDirectory=persona-agent persona-agent-backups
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+SendSIGKILL=no
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/persona-agent /var/lib/persona-agent-backups
+
+[Install]
+WantedBy=multi-user.target
