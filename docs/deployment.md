@@ -15,25 +15,22 @@ npm run check
 
 程序数据默认位于项目的 `data/`。Linux 脚本支持 `PERSONA_DATA_DIR` 指定独立数据目录；启动与停止时必须使用同一目录。`PERSONA_BACKUP_DIR` 指定自动备份目录。systemd 模板把两者分别设置为 `/var/lib/persona-agent` 和 `/var/lib/persona-agent-backups`，避免程序安装目录需要写权限。自动备份目录必须独立于数据目录，不能设成数据目录本身或其子目录。
 
-## Windows 本地开发
+## Windows 安装与运行
 
-建议放在 `D:\dev\persona-agent`。安装依赖后双击 `start.cmd` 后台启动，`stop.cmd` 停止，`dev.cmd` 前台监听代码变化。访问 `http://127.0.0.1:3210`，使用 `data\setup-key.txt` 中的初始化码设置管理员密码。日志位于 `data\server.log` 与 `data\server.err.log`。
+选择自己有读写权限的安装目录。安装依赖后双击 `start.cmd` 后台启动，`stop.cmd` 停止。访问 `http://127.0.0.1:3210`，使用 `data\setup-key.txt` 中的初始化码设置管理员密码。日志位于 `data\server.log` 与 `data\server.err.log`。
 
-同一端口不要同时运行开发模式和后台模式。开发模式在对应终端按 `Ctrl+C` 停止。
-
-## Linux 本地开发与后台运行
+## Linux 安装与运行
 
 将程序放在自己有写权限的目录，例如 `~/persona-agent`，安装依赖后运行：
 
 ```bash
 bash scripts/start.sh
 bash scripts/stop.sh
-bash scripts/dev.sh
 ```
 
-以上三条命令分别用于后台启动、停止后台进程、前台开发，按需要单独执行。使用 `bash` 调用即可，无须修改执行位，也不要用 `sh` 调用。脚本使用 LF 换行；`.gitattributes` 已固定 shell 文件换行规则。
+以上两条命令分别用于启动和停止，按需要单独执行。请使用 `bash` 调用。
 
-后台启动使用 `nohup`，日志追加到数据目录的 `server.log`、`server.err.log`，PID 保存在 `server.pid`。停止前会核验 `/proc/<PID>/cmdline` 中的完整服务器路径及 Node 可执行文件，PID 不匹配时拒绝发送信号。发送 `SIGTERM` 后最多等待 15 秒；超时保留 PID 文件并提示检查，不自动强制杀死进程。
+运行日志保存在数据目录的 `server.log` 和 `server.err.log`。
 
 使用独立数据目录时：
 
@@ -93,12 +90,8 @@ ssh -N -L 3210:127.0.0.1:3210 your-user@your-server
 
 保持终端开启，浏览器访问 `http://127.0.0.1:3210`。服务会核验 HTTP Host，因此本地隧道端口也须使用 `3210`。如果本机已有 Memoria，占用同一端口，先停止本机实例。无需公开 `3210` 端口或修改服务监听地址。QQ 协议端推荐部署在同一机器，通过回环地址连接；Windows NapCat 不能直接通过自身的 `127.0.0.1` 连接另一台 Linux 服务器。
 
-## 跨平台迁移与验证范围
+## 跨平台迁移
 
 从旧实例后台导出 `.pab` 加密备份，在目标系统安装相同或兼容版本，初始化新管理员后预览并恢复。备份内容是加密的结构化 JSON，由目标系统重建 SQLite 数据，适合 Windows 与 Linux 之间迁移。恢复后需重新填写模型与平台凭据、核验账号绑定并开启外部接入；不要在程序运行中只复制单个 `.sqlite` 文件，以免遗漏 WAL 中的数据。
-
-2026-10-19 已在 Windows 与 Ubuntu WSL2 x86_64、Node.js 22.22.1 / SQLite 3.51.2 验收。Windows 20 项、Linux 21 项端到端检查通过，另在 Windows 新实例完成 Linux 备份恢复的 6 项检查。覆盖初始化、中文记忆与作用域、兼容模型 API、QQ 状态 mock、定期备份接口、WebDAV mock 回读和 Windows → Linux → Windows 迁移。
-
-Linux 启停脚本通过实际启动、重复启动、停止与无关 PID 保护。基于 systemd 模板启动了临时普通用户服务，验证只读程序目录、0700 数据目录、独立备份目录写入、重启后记忆保留与停止；测试服务及数据已清理。没有提供远程服务器，因此 SSH 隧道步骤尚未在远程主机实测；其他 Linux 发行版、ARM 架构及其他 Node 主版本仍需各自验收。
 
 参考：[Node.js 下载](https://nodejs.org/en/download)、[systemd 执行环境与 StateDirectory](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)。

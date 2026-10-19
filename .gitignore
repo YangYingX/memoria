@@ -9,3 +9,5 @@ backups/
 *.sqlite*
 .tmp*/
 screenshots/
+/AGENTS.md
+/.local/

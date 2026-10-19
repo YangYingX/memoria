@@ -9,4 +9,4 @@ Direct dependencies:
 | @mozilla/readability | 0.6.0 | Apache-2.0 | https://github.com/mozilla/readability |
 | linkedom | 0.18.12 | ISC | https://github.com/WebReflection/linkedom |
 
-The installed dependency tree and exact resolved versions are recorded in `package-lock.json`. Each dependency retains its own copyright and license in `node_modules`; redistribution must retain applicable notices. No source code from the QQ projects discussed during planning has been incorporated into this repository.
+The installed dependency tree and exact resolved versions are recorded in `package-lock.json`. Each dependency retains its own copyright and license in `node_modules`; redistribution must retain applicable notices.
