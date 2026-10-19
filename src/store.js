@@ -434,6 +434,25 @@ export function createStore(dbPath) {
         return true;
       });
     },
+    listRecentReadings(scopes, limit = 3) {
+      if (!Array.isArray(scopes) || scopes.length > 100) invalid('阅读索引须提供最多 100 个明确的可见范围。');
+      const permitted = [...new Set(scopes.map(scopeValue))];
+      limit = integer(limit, '索引条数', 1, 100);
+      if (!permitted.length) return [];
+      // An index requires a successful reading event and its still-visible shelf entry.
+      return all(`WITH readings AS (
+        SELECT m.id AS memoryId, m.title, m.scope, e.type, e.created_at AS readAt, e.rowid AS sequence,
+          ROW_NUMBER() OVER (PARTITION BY m.id ORDER BY e.created_at DESC, e.rowid DESC) AS occurrence
+        FROM events e JOIN memories m ON m.id = json_extract(e.metadata, '$.memoryId')
+        WHERE json_type(e.metadata, '$.memoryId') = 'text'
+          AND e.scope IN (${permitted.map(() => '?').join(',')}) AND m.scope = e.scope
+          AND m.deleted_at IS NULL AND m.source_ref = e.source_ref
+          AND ((e.type = 'reading' AND m.source_type = 'webpage' AND m.category = 'reading')
+            OR (e.type = 'book_reading' AND m.source_type = 'book' AND m.category = 'book-note'))
+      ) SELECT memoryId, title, scope, type, readAt FROM readings WHERE occurrence = 1
+        ORDER BY readAt DESC, sequence DESC LIMIT ?`, ...permitted, limit)
+        .map(item => ({ ...item, title: item.title.slice(0, 120) }));
+    },
     searchMemories(query, scopes, limit = 6) {
       query = text(query, '记忆查询', 8000, { empty: true });
       if (!Array.isArray(scopes) || scopes.length > 100) invalid('记忆查询须提供最多 100 个明确的可见范围。');
