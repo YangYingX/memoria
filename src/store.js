@@ -380,6 +380,17 @@ export function createStore(dbPath) {
     getMemory(id) {
       return memoryRow(get('SELECT * FROM memories WHERE id = ?', identifier(id, '记忆 ID')));
     },
+    getMemorySource(id, scopes) {
+      id = identifier(id, '记忆 ID');
+      if (!Array.isArray(scopes) || scopes.length > 100) invalid('来源查询须提供最多 100 个明确的可见范围。');
+      const permitted = [...new Set(scopes.map(scopeValue))];
+      if (!permitted.length) return null;
+      const source = get(`SELECT e.id AS eventId, e.actor, e.created_at AS createdAt, e.content
+        FROM memories m JOIN events e ON e.id = m.source_ref AND e.scope = m.scope
+        WHERE m.id = ? AND m.deleted_at IS NULL AND m.source_type = 'conversation' AND e.type = 'message'
+          AND m.scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted);
+      return source ? { ...source } : null;
+    },
     saveMemory(input) {
       const fields = memoryFields(input);
       const id = input.id === undefined ? randomUUID() : identifier(input.id, '记忆 ID');
