@@ -109,7 +109,9 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               const requested = new URL(args.url); requested.hash = '';
               if (!permittedUrls.has(requested.href)) throw new Error('只能读取你在本次消息中明确提供的完整网址，请把需要访问的链接发给我。');
               const reading = await readAndRemember(args.url, scope, actor);
-              result = { url: reading.page.url, title: reading.page.title, text: reading.page.text.slice(0, 12000), memoryId: reading.memory.id };
+              const content = reading.memory.content;
+              result = { url: reading.page.url, title: reading.page.title, text: content.slice(0, 12000),
+                memoryId: reading.memory.id, totalLength: content.length, nextOffset: content.length > 12000 ? 12000 : null };
             } else throw new Error('不支持此工具。');
           } catch (error) { result = { error: error.message }; }
           messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });

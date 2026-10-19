@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const LIMITS = { title: 200, memory: 12000, event: 30000, metadata: 16000, sourceRef: 2048 };
+const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 
 function invalid(message) {
   const error = new Error(message);
@@ -272,6 +272,26 @@ export function createStore(dbPath) {
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
         } else insertMemory(memory);
         return memory;
+      });
+    },
+    recordReading({ page, scope, actor = 'owner' }) {
+      record(page, '网页');
+      const fields = memoryFields({ title: text(page.title, '网页标题', 500).slice(0, 150), content: page.text,
+        category: 'reading', scope, sourceType: 'webpage', sourceRef: text(page.url, '网页地址', LIMITS.sourceRef) });
+      const now = new Date().toISOString();
+      const event = { id: randomUUID(), ...eventFields({ type: 'reading', scope: fields.scope, actor,
+        content: fields.content, sourceRef: fields.sourceRef,
+        metadata: { title: page.title, readAt: timestamp(page.readAt, '阅读时间') } }), createdAt: now };
+      return transaction(() => {
+        const existing = memoryRow(get(`SELECT * FROM memories WHERE deleted_at IS NULL AND scope = ?
+          AND source_type = 'webpage' AND category = 'reading' AND source_ref = ? AND title = ? AND content = ?
+          ORDER BY updated_at DESC, rowid DESC LIMIT 1`, fields.scope, fields.sourceRef, fields.title, fields.content));
+        const memory = existing || { id: randomUUID(), ...fields, createdAt: now, updatedAt: now, deletedAt: null };
+        if (!existing) insertMemory(memory);
+        event.metadata.memoryId = memory.id;
+        event.metadata.reusedMemory = Boolean(existing);
+        insertEvent(event);
+        return { memory, eventId: event.id, reusedMemory: Boolean(existing) };
       });
     },
     deleteMemory(id) {

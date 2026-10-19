@@ -440,8 +440,8 @@ $('read-form').addEventListener('submit', event => {
   action($('read-form'), async () => {
     $('read-submit').textContent = '正在阅读…';
     try {
-      const { page, memory } = await api('/api/read', { method: 'POST', data: { url: $('read-url').value.trim(), scope: $('read-scope').value } });
-      const saved = node('p', '已阅读并保存到记忆书架', 'eyebrow');
+      const { page, memory, reusedMemory } = await api('/api/read', { method: 'POST', data: { url: $('read-url').value.trim(), scope: $('read-scope').value } });
+      const saved = node('p', reusedMemory ? '已重新阅读，正文未变化，沿用原有记忆' : '已阅读并保存到记忆书架', 'eyebrow');
       const link = node('a', page.url, 'article-url');
       const url = new URL(page.url);
       if (['http:', 'https:'].includes(url.protocol)) { link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; }

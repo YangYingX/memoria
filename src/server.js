@@ -112,9 +112,7 @@ async function readAndRemember(url, scope, actor = 'owner') {
   readingJobs.add(key); activeMutation++;
   try {
     const page = await readPage(url);
-    const event = store.addEvent({ type: 'reading', scope, actor, content: page.text, sourceRef: page.url, metadata: { title: page.title, readAt: page.readAt } });
-    const memory = store.saveMemory({ title: page.title.slice(0, 150), content: page.text.slice(0, 12000), category: 'reading', scope, sourceType: 'webpage', sourceRef: page.url });
-    return { page, memory, eventId: event.id };
+    return { page, ...store.recordReading({ page, scope, actor }) };
   } finally { readingJobs.delete(key); activeMutation--; }
 }
 
