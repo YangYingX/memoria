@@ -8,7 +8,8 @@ async function responseJson(response) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-export async function requestCompletion({ store, messages, tools, maxTokens = 1500 }) {
+export async function requestCompletion({ store, messages, tools, maxTokens = 1500, signal }) {
+  signal?.throwIfAborted();
   const model = store.getSetting('model');
   if (!model?.apiKey) throw new Error('请先保存模型 API 密钥。');
   const day = new Date().toISOString().slice(0, 10);
@@ -18,7 +19,7 @@ export async function requestCompletion({ store, messages, tools, maxTokens = 15
   store.setSetting('modelUsage', { ...usage, calls: usage.calls + 1 });
   const baseUrl = new URL(model.baseUrl);
   const response = await fetch(`${model.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60000),
+    method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),
     headers: { Authorization: `Bearer ${model.apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: model.model, messages, max_tokens: maxTokens,
       ...(baseUrl.hostname === 'api.deepseek.com' ? { thinking: { type: 'disabled' } } : {}),
@@ -27,6 +28,7 @@ export async function requestCompletion({ store, messages, tools, maxTokens = 15
   });
   if (!response.ok) throw new Error(`模型接口返回 HTTP ${response.status}，请检查服务地址、模型名称、余额和密钥。`);
   const result = await responseJson(response);
+  signal?.throwIfAborted();
   if (!result.choices?.[0]?.message) throw new Error('模型返回格式不兼容 Chat Completions。');
   usage = store.getSetting('modelUsage');
   if (usage.day === day) {

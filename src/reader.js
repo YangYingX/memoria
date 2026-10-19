@@ -49,7 +49,7 @@ function checkedUrl(value) {
   return { url, host };
 }
 
-export function extractArticle(html, url) {
+export function extractArticle(html, url, { maxText = MAX_TEXT } = {}) {
   if (typeof html !== 'string' || Buffer.byteLength(html) > MAX_BYTES) throw new Error('网页正文过大。');
   const { document } = parseHTML(html);
   Object.defineProperty(document, 'documentURI', { value: url, configurable: true });
@@ -61,12 +61,13 @@ export function extractArticle(html, url) {
   }
   return {
     title: (article.title || new URL(url).hostname).trim().slice(0, 500),
-    text: text.slice(0, MAX_TEXT),
+    text: text.slice(0, maxText),
+    truncated: text.length > maxText,
     excerpt: (article.excerpt || text).replace(/\s+/g, ' ').trim().slice(0, 300),
   };
 }
 
-async function requestPage(value, signal, redirects = 0) {
+async function requestPage(value, signal, redirects = 0, maxText = MAX_TEXT) {
   const { url, host } = checkedUrl(value);
   signal.throwIfAborted();
   const addresses = isIP(host)
@@ -108,7 +109,7 @@ async function requestPage(value, signal, redirects = 0) {
   if ([301, 302, 303, 307, 308].includes(status)) {
     response.destroy();
     if (redirects >= 3 || !response.headers.location) throw new Error('网页跳转过多或目标无效。');
-    return requestPage(new URL(response.headers.location, url).href, signal, redirects + 1);
+    return requestPage(new URL(response.headers.location, url).href, signal, redirects + 1, maxText);
   }
   if (status < 200 || status >= 300) {
     response.destroy();
@@ -150,16 +151,18 @@ async function requestPage(value, signal, redirects = 0) {
   catch { throw new Error('网站使用了本阅读器不支持的字符编码。'); }
   let article;
   if (mediaType === 'text/plain') {
-    const text = body.trim().slice(0, MAX_TEXT);
+    const fullText = body.trim();
+    const text = fullText.slice(0, maxText);
     if (!text) throw new Error('网页正文为空，未记录阅读经历。');
-    article = { title: url.hostname, text, excerpt: text.slice(0, 300) };
+    article = { title: url.hostname, text, excerpt: text.slice(0, 300), truncated: fullText.length > maxText };
   } else {
-    article = extractArticle(body, url.href);
+    article = extractArticle(body, url.href, { maxText });
   }
   return { url: url.href, ...article, readAt: new Date().toISOString() };
 }
 
-export async function readPage(url) {
+export async function readPage(url, { maxText = MAX_TEXT } = {}) {
+  if (!Number.isSafeInteger(maxText) || maxText < 1 || maxText > 1000000) throw new Error('正文长度限制无效。');
   const controller = new AbortController();
   let timer;
   const deadline = new Promise((_, reject) => {
@@ -169,6 +172,6 @@ export async function readPage(url) {
       reject(error);
     }, TIMEOUT_MS);
   });
-  try { return await Promise.race([requestPage(url, controller.signal), deadline]); }
+  try { return await Promise.race([requestPage(url, controller.signal, 0, maxText), deadline]); }
   finally { clearTimeout(timer); }
 }

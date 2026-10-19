@@ -1,9 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { imageMimeType } from './images.js';
+import { assertPublicUrl } from './public-fetch.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
+const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
+const BOOK_LIMITS = { chars: 1000000, bytes: 1024 * 1024, total: 5 * 1024 * 1024, count: 10 };
 
 function invalid(message) {
   const error = new Error(message);
@@ -136,6 +140,102 @@ function personaValue(value) {
   };
 }
 
+function expressionOrigin(value) {
+  const origin = text(value, '表情来源会话', 48);
+  if (origin !== 'custom' && !/^qq:(private|group):[1-9]\d{0,19}$/.test(origin)) invalid('表情来源须为管理员上传、明确的 QQ 私聊或群聊。');
+  return origin;
+}
+
+function expressionId(value) {
+  const id = text(value, '表情 ID', 64);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(id)) invalid('表情 ID 格式无效。');
+  return id;
+}
+
+function expressionFields(input) {
+  record(input, '表情');
+  const origin = expressionOrigin(input.origin);
+  const scope = scopeValue(input.scope);
+  const actor = text(input.actor === undefined ? 'owner' : input.actor, '收藏者', 160);
+  const [, kind, account] = origin.split(':');
+  if (origin === 'custom' ? scope !== 'public' || actor !== 'owner'
+    : kind === 'group' ? scope !== `group:${account}` : !['owner', `person:qq:${account}`].includes(scope)) {
+    invalid('表情可见范围与来源会话不一致。');
+  }
+  const image = record(input.image, '表情图片');
+  if (typeof image.dataUrl !== 'string' || image.dataUrl.length > Math.ceil(EXPRESSION_LIMITS.image / 3) * 4 + 40) {
+    invalid('单张表情不能超过 2 MiB。');
+  }
+  const match = image.dataUrl.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/);
+  if (!match) invalid('表情须为 JPEG、PNG、WebP 或 GIF 图片数据。');
+  const bytes = Buffer.from(match[2], 'base64');
+  if (!bytes.length || bytes.length > EXPRESSION_LIMITS.image || bytes.toString('base64') !== match[2]) {
+    invalid('表情编码无效或超过单张 2 MiB 限制。');
+  }
+  let mimeType;
+  try { mimeType = imageMimeType(bytes); } catch { invalid('表情的实际图片格式不受支持。'); }
+  if (mimeType !== image.mimeType || mimeType !== match[1]) invalid('表情的实际图片格式与声明不一致。');
+  return {
+    name: text(input.name, '表情名称', 40), description: text(input.description, '表情描述', 300),
+    scope, origin, mimeType, data: match[2], hash: createHash('sha256').update(bytes).digest('hex'), byteLength: bytes.length,
+    actor,
+  };
+}
+
+function expressionCapacity(items) {
+  if (items.length > EXPRESSION_LIMITS.count) invalid('表情库已达到 64 张上限，请先在后台删除不需要的表情。');
+  let bytes = 0;
+  const origins = new Map();
+  for (const item of items) {
+    bytes += item.byteLength;
+    if (item.origin === 'custom') continue;
+    const count = (origins.get(item.origin) || 0) + 1;
+    if (count > EXPRESSION_LIMITS.perOrigin) invalid('该会话的表情已达到 20 张上限，请先在后台删除不需要的表情。');
+    origins.set(item.origin, count);
+  }
+  if (bytes > EXPRESSION_LIMITS.total) invalid('表情库已达到 8 MiB 容量上限，请先在后台删除不需要的表情。');
+}
+
+const expressionRow = row => row ? ({ id: row.id, name: row.name, description: row.description, scope: row.scope,
+  origin: row.origin, mimeType: row.mime_type, createdAt: row.created_at }) : null;
+const expressionImageRow = row => row ? ({ ...expressionRow(row), dataUrl: `data:${row.mime_type};base64,${row.data}` }) : null;
+
+function bookId(value) {
+  const id = text(value, '书籍 ID', 64);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(id)) invalid('书籍 ID 格式无效。');
+  return id;
+}
+
+function bookFields(input) {
+  record(input, '书籍');
+  const content = text(input.text, '书籍正文', BOOK_LIMITS.chars, { trim: false });
+  if (Buffer.byteLength(content, 'utf8') > BOOK_LIMITS.bytes) invalid('单本书正文不能超过 1 MiB。');
+  let sourceRef = text(input.sourceRef === undefined ? '' : input.sourceRef, '书籍来源', LIMITS.sourceRef, { empty: true });
+  if (sourceRef) {
+    if (/[\u0000-\u001f\u007f]/.test(sourceRef)) invalid('书籍来源不能包含控制字符。');
+    try {
+      const url = assertPublicUrl(sourceRef);
+      if (url.protocol !== 'https:') invalid('在线书籍来源须使用 HTTPS。');
+      sourceRef = url.href;
+    } catch { invalid('书籍来源须为空或不含凭据的公开 HTTPS 地址。'); }
+  }
+  return { title: text(input.title, '书籍标题', 200), sourceRef, text: content };
+}
+
+function bookCapacity(books) {
+  const active = books.filter(book => !book.deletedAt);
+  if (active.length > BOOK_LIMITS.count) invalid('书架最多保存 10 本有效书籍，请先删除不需要的书。');
+  if (active.reduce((sum, book) => sum + Buffer.byteLength(book.text, 'utf8'), 0) > BOOK_LIMITS.total) invalid('书架正文总量不能超过 5 MiB，请先删除不需要的书。');
+}
+
+const bookRow = row => row ? ({ id: row.id, title: row.title, sourceRef: row.source_ref, text: row.text,
+  currentOffset: row.current_offset, createdAt: row.created_at, lastReadAt: row.last_read_at, deletedAt: row.deleted_at }) : null;
+const bookMetadata = book => {
+  if (!book) return null;
+  const { text, ...metadata } = book;
+  return { ...metadata, totalChars: text.length, byteLength: Buffer.byteLength(text, 'utf8') };
+};
+
 const memoryRow = row => row ? {
   id: row.id, title: row.title, content: row.content, category: row.category, scope: row.scope,
   sourceType: row.source_type, sourceRef: row.source_ref,
@@ -191,6 +291,19 @@ export function createStore(dbPath) {
         label TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(platform, user_id)
       );
       CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS expressions (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, scope TEXT NOT NULL,
+        origin TEXT NOT NULL, mime_type TEXT NOT NULL, data TEXT NOT NULL, hash TEXT NOT NULL,
+        byte_length INTEGER NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(origin, hash)
+      );
+      CREATE TABLE IF NOT EXISTS expression_tombstones (
+        origin TEXT NOT NULL, hash TEXT NOT NULL, deleted_at TEXT NOT NULL, PRIMARY KEY(origin, hash)
+      );
+      CREATE TABLE IF NOT EXISTS books (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, source_ref TEXT NOT NULL, text TEXT NOT NULL,
+        current_offset INTEGER NOT NULL, created_at TEXT NOT NULL, last_read_at TEXT, deleted_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS book_tombstones (book_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
     `);
   } catch (error) {
     try { db?.close(); } catch {}
@@ -226,6 +339,15 @@ export function createStore(dbPath) {
   }
   function insertRevision(revision) {
     run('INSERT INTO revisions VALUES (?, ?, ?, ?)', revision.id, revision.memoryId, JSON.stringify(revision.snapshot), revision.createdAt);
+  }
+  function insertExpression(expression) {
+    run('INSERT INTO expressions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', expression.id, expression.name,
+      expression.description, expression.scope, expression.origin, expression.mimeType, expression.data,
+      expression.hash, expression.byteLength, expression.actor, expression.createdAt);
+  }
+  function insertBook(book) {
+    run('INSERT INTO books VALUES (?, ?, ?, ?, ?, ?, ?, ?)', book.id, book.title, book.sourceRef, book.text,
+      book.currentOffset, book.createdAt, book.lastReadAt, book.deletedAt);
   }
   function addRevision(memory, now) {
     insertRevision({ id: randomUUID(), memoryId: memory.id, snapshot: memory, createdAt: now });
@@ -273,6 +395,12 @@ export function createStore(dbPath) {
         } else insertMemory(memory);
         return memory;
       });
+    },
+    hasReadUrl(url, scope = 'owner') {
+      const source = text(url, '网页地址', LIMITS.sourceRef);
+      const visible = scopeValue(scope);
+      // Reading events survive shelf edits/deletion, so autonomous browsing will not re-add deleted articles.
+      return Boolean(get("SELECT 1 FROM events WHERE type = 'reading' AND scope = ? AND source_ref = ? LIMIT 1", visible, source));
     },
     recordReading({ page, scope, actor = 'owner' }) {
       record(page, '网页');
@@ -379,6 +507,96 @@ export function createStore(dbPath) {
       key = text(key, '消息去重标识', 256);
       return run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', key, new Date().toISOString()).changes > 0;
     },
+    hasDelivery(key) {
+      return Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', text(key, '消息去重标识', 256)));
+    },
+    saveExpression(input) {
+      const fields = expressionFields(input);
+      if (input.id !== undefined) invalid('已有表情不能修改来源或可见范围；管理员上传须另建一张表情。');
+      return transaction(() => {
+        if (get('SELECT 1 FROM expression_tombstones WHERE origin = ? AND hash = ?', fields.origin, fields.hash)) {
+          invalid('这张表情已在该会话删除，不会自动重新收藏。');
+        }
+        const previous = get('SELECT * FROM expressions WHERE origin = ? AND hash = ?', fields.origin, fields.hash);
+        if (previous) return expressionRow(previous);
+        expressionCapacity([...all('SELECT origin, byte_length AS byteLength FROM expressions'), fields]);
+        const expression = { id: randomUUID(), ...fields, createdAt: new Date().toISOString() };
+        insertExpression(expression);
+        return expressionRow(get('SELECT * FROM expressions WHERE id = ?', expression.id));
+      });
+    },
+    listExpressions(origin) {
+      return (origin === undefined
+        ? all('SELECT * FROM expressions ORDER BY created_at DESC, rowid DESC')
+        : all('SELECT * FROM expressions WHERE origin = ? ORDER BY created_at DESC, rowid DESC', expressionOrigin(origin))).map(expressionRow);
+    },
+    getExpression(id, origin) {
+      return expressionImageRow(get('SELECT * FROM expressions WHERE id = ? AND origin = ?', expressionId(id), expressionOrigin(origin)));
+    },
+    getExpressionForAdmin(id) {
+      return expressionImageRow(get('SELECT * FROM expressions WHERE id = ?', expressionId(id)));
+    },
+    deleteExpression(id) {
+      id = expressionId(id);
+      return transaction(() => {
+        const previous = get('SELECT origin, hash FROM expressions WHERE id = ?', id);
+        if (!previous) return false;
+        run('INSERT INTO expression_tombstones VALUES (?, ?, ?) ON CONFLICT(origin, hash) DO UPDATE SET deleted_at = excluded.deleted_at',
+          previous.origin, previous.hash, new Date().toISOString());
+        run('DELETE FROM expressions WHERE id = ?', id);
+        return true;
+      });
+    },
+    addBook(input, { deliveryKey } = {}) {
+      const fields = bookFields(input);
+      if (input.id !== undefined) invalid('导入新书不能指定已有书籍 ID。');
+      return transaction(() => {
+        if (deliveryKey && !api.claimDelivery(deliveryKey)) return null;
+        bookCapacity([...all('SELECT * FROM books WHERE deleted_at IS NULL').map(bookRow), fields]);
+        const book = { id: randomUUID(), ...fields, currentOffset: 0, createdAt: new Date().toISOString(), lastReadAt: null, deletedAt: null };
+        insertBook(book);
+        return bookMetadata(book);
+      });
+    },
+    listBooks() {
+      return all('SELECT * FROM books WHERE deleted_at IS NULL ORDER BY created_at, rowid').map(bookRow).map(bookMetadata);
+    },
+    getBook(id) {
+      return bookRow(get('SELECT * FROM books WHERE id = ? AND deleted_at IS NULL', bookId(id)));
+    },
+    deleteBook(id) {
+      id = bookId(id);
+      return transaction(() => {
+        const previous = get('SELECT * FROM books WHERE id = ? AND deleted_at IS NULL', id);
+        if (!previous) return false;
+        const now = new Date().toISOString();
+        run("UPDATE books SET deleted_at = ?, text = '' WHERE id = ?", now, id);
+        run('INSERT INTO book_tombstones VALUES (?, ?) ON CONFLICT(book_id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now);
+        return true;
+      });
+    },
+    recordBookReading(input) {
+      record(input, '读书记录');
+      const id = bookId(input.bookId), note = text(input.note, '读书笔记', 4000);
+      const startOffset = integer(input.startOffset, '阅读起点', 0, BOOK_LIMITS.chars);
+      const endOffset = integer(input.endOffset, '阅读终点', startOffset + 1, BOOK_LIMITS.chars);
+      return transaction(() => {
+        const book = bookRow(get('SELECT * FROM books WHERE id = ? AND deleted_at IS NULL', id));
+        if (!book) invalid('书籍不存在或已经删除。');
+        if (book.currentOffset !== startOffset || endOffset > book.text.length) invalid('阅读位置已变化或超出书籍正文，请重新读取当前进度。');
+        const sourceRef = `book:${id}:${startOffset}-${endOffset}`;
+        if (get("SELECT 1 FROM events WHERE type = 'book_reading' AND source_ref = ? LIMIT 1", sourceRef)) invalid('该书籍片段已有阅读记录，不能重复保存。');
+        const now = new Date().toISOString();
+        const memory = { id: randomUUID(), ...memoryFields({ title: `${book.title.slice(0, 150)} · ${startOffset + 1}–${endOffset}`,
+          content: note, category: 'book-note', scope: 'owner', sourceType: 'book', sourceRef }), createdAt: now, updatedAt: now, deletedAt: null };
+        const event = { id: randomUUID(), ...eventFields({ type: 'book_reading', scope: 'owner', actor: 'scheduler', sourceRef,
+          content: `阅读《${book.title}》第 ${startOffset + 1}–${endOffset} 字，并保存读书笔记。`,
+          metadata: { bookId: id, title: book.title, startOffset, endOffset, totalChars: book.text.length, memoryId: memory.id } }), createdAt: now };
+        insertMemory(memory); insertEvent(event);
+        run('UPDATE books SET current_offset = ?, last_read_at = ? WHERE id = ?', endOffset, now, id);
+        return { book: bookMetadata({ ...book, currentOffset: endOffset, lastReadAt: now }), memory, eventId: event.id };
+      });
+    },
     stats() {
       return {
         memories: get('SELECT COUNT(*) AS count FROM memories WHERE deleted_at IS NULL').count,
@@ -389,7 +607,7 @@ export function createStore(dbPath) {
     },
     exportData() {
       return {
-        schemaVersion: 1, exportedAt: new Date().toISOString(),
+        schemaVersion: 3, exportedAt: new Date().toISOString(),
         persona: personaValue(api.getSetting('persona', null)),
         memories: all('SELECT * FROM memories ORDER BY rowid').map(memoryRow),
         revisions: all('SELECT * FROM revisions ORDER BY rowid').map(revisionRow),
@@ -397,15 +615,24 @@ export function createStore(dbPath) {
         messages: all('SELECT * FROM messages ORDER BY rowid').map(messageRow),
         accounts: all('SELECT * FROM accounts ORDER BY rowid').map(accountRow),
         tombstones: all('SELECT * FROM tombstones ORDER BY rowid').map(row => ({ memoryId: row.memory_id, deletedAt: row.deleted_at })),
+        expressions: all('SELECT * FROM expressions ORDER BY rowid').map(row => ({ ...expressionRow(row), data: row.data,
+          hash: row.hash, byteLength: row.byte_length, actor: row.actor })),
+        expressionTombstones: all('SELECT * FROM expression_tombstones ORDER BY rowid').map(row => ({ origin: row.origin, hash: row.hash, deletedAt: row.deleted_at })),
+        books: all('SELECT * FROM books WHERE deleted_at IS NULL ORDER BY rowid').map(bookRow),
+        bookTombstones: all('SELECT * FROM book_tombstones ORDER BY rowid').map(row => ({ bookId: row.book_id, deletedAt: row.deleted_at })),
       };
     },
     importData(payload) {
       record(payload, '备份');
-      if (payload.schemaVersion !== 1) invalid('不支持此备份版本。');
+      if (![1, 2, 3].includes(payload.schemaVersion)) invalid('不支持此备份版本。');
+      if (payload.schemaVersion >= 2 && (!Array.isArray(payload.expressions) || !Array.isArray(payload.expressionTombstones))) {
+        invalid('版本 2 或 3 备份必须包含表情及表情删除记录数组。');
+      }
+      if (payload.schemaVersion === 3 && !Array.isArray(payload.books)) invalid('版本 3 备份必须包含书籍数组。');
       timestamp(payload.exportedAt, '备份时间');
       const persona = personaValue(payload.persona);
       let total = 0;
-      function rows(name, check) {
+      function rows(name, check, key = clean => clean.id ?? clean.memoryId) {
         if (!Array.isArray(payload[name]) || payload[name].length > 100000) invalid(`备份中的 ${name} 须为最多 100000 项的数组。`);
         total += payload[name].length;
         if (total > 250000) invalid('备份记录总数超过 250000 项。');
@@ -413,7 +640,7 @@ export function createStore(dbPath) {
         return payload[name].map(item => {
           record(item, `备份 ${name} 记录`);
           const clean = check(item);
-          const id = clean.id ?? clean.memoryId;
+          const id = key(clean);
           if (ids.has(id)) invalid(`备份中的 ${name} 存在重复标识。`);
           ids.add(id);
           return clean;
@@ -466,6 +693,44 @@ export function createStore(dbPath) {
         accountKeys.add(key);
       }
       const tombstones = rows('tombstones', item => ({ memoryId: identifier(item.memoryId, '已删除记忆 ID'), deletedAt: timestamp(item.deletedAt, '删除时间') }));
+      const expressions = payload.expressions === undefined ? [] : rows('expressions', item => {
+        requireFields(item, ['name', 'description', 'scope', 'origin', 'mimeType', 'data', 'hash', 'byteLength', 'actor']);
+        if (typeof item.data !== 'string' || item.data.length > Math.ceil(EXPRESSION_LIMITS.image / 3) * 4) invalid('备份表情图片超过单张 2 MiB 限制。');
+        const fields = expressionFields({ ...item, image: { mimeType: item.mimeType, dataUrl: `data:${item.mimeType};base64,${item.data}` } });
+        if (item.hash !== fields.hash || item.byteLength !== fields.byteLength) invalid('备份表情的校验值或大小不一致。');
+        expressionId(item.id);
+        return dated(item, fields);
+      });
+      expressionCapacity(expressions);
+      const expressionKeys = new Set();
+      for (const expression of expressions) {
+        const key = `${expression.origin}:${expression.hash}`;
+        if (expressionKeys.has(key)) invalid('备份包含同一会话的重复表情。');
+        expressionKeys.add(key);
+      }
+      const expressionTombstones = payload.expressionTombstones === undefined ? [] : rows('expressionTombstones', item => {
+        const origin = expressionOrigin(item.origin);
+        if (typeof item.hash !== 'string' || !/^[a-f0-9]{64}$/.test(item.hash)) invalid('备份表情删除记录的校验值无效。');
+        return { origin, hash: item.hash, deletedAt: timestamp(item.deletedAt, '表情删除时间') };
+      }, item => `${item.origin}:${item.hash}`);
+      const books = payload.books === undefined ? [] : rows('books', item => {
+        const fields = ['id', 'title', 'sourceRef', 'text', 'currentOffset', 'createdAt', 'lastReadAt', 'deletedAt'];
+        requireFields(item, fields);
+        if (Object.keys(item).some(key => !fields.includes(key))) invalid('备份书籍包含未知字段。');
+        const clean = { id: bookId(item.id), ...bookFields(item), currentOffset: integer(item.currentOffset, '书籍进度', 0, item.text.length),
+          createdAt: timestamp(item.createdAt, '书籍创建时间'), lastReadAt: item.lastReadAt === null ? null : timestamp(item.lastReadAt, '最后阅读时间'),
+          deletedAt: item.deletedAt === null ? null : timestamp(item.deletedAt, '书籍删除时间') };
+        if ((clean.currentOffset > 0 && !clean.lastReadAt) || (clean.currentOffset === 0 && clean.lastReadAt)) invalid('书籍进度与最后阅读时间不一致。');
+        if ((clean.lastReadAt && clean.lastReadAt < clean.createdAt) || (clean.deletedAt && clean.deletedAt < clean.createdAt)
+          || (clean.deletedAt && clean.lastReadAt && clean.deletedAt < clean.lastReadAt)) invalid('书籍记录时间顺序无效。');
+        return clean;
+      });
+      bookCapacity(books);
+      const bookTombstones = payload.bookTombstones === undefined ? [] : rows('bookTombstones', item => {
+        requireFields(item, ['bookId', 'deletedAt']);
+        if (Object.keys(item).some(key => !['bookId', 'deletedAt'].includes(key))) invalid('书籍删除记录包含未知字段。');
+        return { bookId: bookId(item.bookId), deletedAt: timestamp(item.deletedAt, '书籍删除时间') };
+      }, item => item.bookId);
 
       return transaction(() => {
         // Preserve deletions made after the backup. Restoring an older backup must not resurrect them.
@@ -473,7 +738,16 @@ export function createStore(dbPath) {
         for (const item of [...tombstones, ...memories.filter(memory => memory.deletedAt).map(memory => ({ memoryId: memory.id, deletedAt: memory.deletedAt }))]) {
           if (!deleted.has(item.memoryId) || deleted.get(item.memoryId) < item.deletedAt) deleted.set(item.memoryId, item.deletedAt);
         }
-        db.exec('DELETE FROM revisions; DELETE FROM memories; DELETE FROM events; DELETE FROM messages; DELETE FROM accounts; DELETE FROM tombstones;');
+        const deletedExpressions = new Map(all('SELECT * FROM expression_tombstones').map(row => [`${row.origin}:${row.hash}`, { origin: row.origin, hash: row.hash, deletedAt: row.deleted_at }]));
+        for (const item of expressionTombstones) {
+          const key = `${item.origin}:${item.hash}`;
+          if (!deletedExpressions.has(key) || deletedExpressions.get(key).deletedAt < item.deletedAt) deletedExpressions.set(key, item);
+        }
+        const deletedBooks = new Map(all('SELECT * FROM book_tombstones').map(row => [row.book_id, row.deleted_at]));
+        for (const item of [...bookTombstones, ...books.filter(book => book.deletedAt).map(book => ({ bookId: book.id, deletedAt: book.deletedAt }))]) {
+          if (!deletedBooks.has(item.bookId) || deletedBooks.get(item.bookId) < item.deletedAt) deletedBooks.set(item.bookId, item.deletedAt);
+        }
+        db.exec('DELETE FROM revisions; DELETE FROM memories; DELETE FROM events; DELETE FROM messages; DELETE FROM accounts; DELETE FROM tombstones; DELETE FROM expressions; DELETE FROM expression_tombstones; DELETE FROM books; DELETE FROM book_tombstones;');
         for (const memory of memories) {
           if (deleted.has(memory.id)) {
             memory.deletedAt = deleted.get(memory.id);
@@ -487,6 +761,12 @@ export function createStore(dbPath) {
         // Account mappings remain in the export for review, but must be verified again after restore.
         // In particular, an old backup must not reactivate a revoked owner account.
         for (const [id, deletedAt] of deleted) run('INSERT INTO tombstones VALUES (?, ?)', id, deletedAt);
+        for (const expression of expressions) {
+          if (!deletedExpressions.has(`${expression.origin}:${expression.hash}`)) insertExpression(expression);
+        }
+        for (const item of deletedExpressions.values()) run('INSERT INTO expression_tombstones VALUES (?, ?, ?)', item.origin, item.hash, item.deletedAt);
+        for (const book of books) if (!deletedBooks.has(book.id)) insertBook(book);
+        for (const [id, deletedAt] of deletedBooks) run('INSERT INTO book_tombstones VALUES (?, ?)', id, deletedAt);
         // Credentials, sessions, delivery deduplication, and all other settings stay local.
         if (persona !== null) api.setSetting('persona', persona);
         return api.stats();

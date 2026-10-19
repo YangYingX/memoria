@@ -14,8 +14,8 @@ if [[ -z "$node_path" ]] || ! "$node_path" -e 'const [major, minor] = process.ve
   echo 'Node.js 22.16 or newer is required.' >&2
   exit 1
 fi
-if ! "$node_path" -e 'require.resolve("@mozilla/readability"); require.resolve("linkedom")' >/dev/null 2>&1; then
-  echo 'Dependencies missing. Run npm ci in the project directory first.' >&2
+if ! "$node_path" -e 'require.resolve("@mozilla/readability"); require.resolve("linkedom"); require.resolve("playwright")' >/dev/null 2>&1; then
+  echo 'Dependencies missing. Run npm ci --ignore-scripts in the project directory first.' >&2
   exit 1
 fi
 

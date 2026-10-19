@@ -18,9 +18,8 @@ if (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyCont
 $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
 $version = & $nodePath -p 'process.versions.node'
 if ([version]$version -lt [version]'22.16.0') { throw 'Node.js 22.16 or newer is required.' }
-if (!(Test-Path -LiteralPath (Join-Path $projectDir 'node_modules\@mozilla\readability'))) {
-    throw 'Dependencies missing. Run npm.cmd ci in the project directory first.'
-}
+& $nodePath -e "try { for (const name of ['@mozilla/readability', 'linkedom', 'playwright']) require.resolve(name, { paths: [process.argv[1]] }); } catch { process.exitCode = 1; }" $projectDir > $null
+if ($LASTEXITCODE -ne 0) { throw 'Dependencies missing. Run npm.cmd ci --ignore-scripts in the project directory first.' }
 $env:PORT = '3210'
 $env:PERSONA_DATA_DIR = $dataDir
 $process = Start-Process -FilePath $nodePath -ArgumentList ('"' + $serverPath + '"') -WorkingDirectory $projectDir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $dataDir 'server.log') -RedirectStandardError (Join-Path $dataDir 'server.err.log') -PassThru

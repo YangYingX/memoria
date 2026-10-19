@@ -1,10 +1,10 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
-const labels = { chat: '对话实验室', memories: '记忆书架', reading: '网页阅读', identity: '身份与备份', settings: '人格与设置' };
-const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', promise: '约定' };
+const labels = { chat: '对话实验室', memories: '记忆书架', reading: '网页阅读', books: '书房', expressions: '表情库', identity: '身份与备份', settings: '人格与设置' };
+const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'book-note': '读书笔记', promise: '约定' };
 const scopes = { owner: '仅创建人', public: '公开记忆', 'group:demo': '演练群聊' };
-const state = { status: {}, data: null, page: 'chat', scope: 'owner', memories: [], busyChat: false, preview: null };
+const state = { status: {}, data: null, page: 'chat', scope: 'owner', memories: [], books: [], expressions: new Map(), busyChat: false, preview: null };
 let toastTimer;
 
 function node(tag, text, className) {
@@ -96,6 +96,9 @@ async function loadState({ fill = false } = {}) {
     : '尚未启用。可以在设置中添加阅读地址和时间间隔。';
   renderAccounts();
   renderBackupStatus(state.data.backupStatus);
+  renderAutonomyStatus(state.data.autonomyStatus);
+  renderSelfExpressionStatus(state.data.selfExpressionStatus);
+  renderBookStatus(state.data.bookStatus);
   if (fill) { fillSettings(); fillBackupSettings(); }
 }
 
@@ -119,6 +122,8 @@ async function navigate(page) {
     if (page === 'chat') await loadMessages();
     if (page === 'memories') await loadMemories();
     if (page === 'reading') await Promise.all([loadEvents(), loadState()]);
+    if (page === 'books') await Promise.all([loadBooks(), loadState()]);
+    if (page === 'expressions') await loadExpressions();
     if (page === 'identity') { await loadState(); fillBackupSettings(); }
     if (page === 'settings') await loadState({ fill: true });
   } catch (error) { toast(error.message, true); }
@@ -134,6 +139,13 @@ function appendMessage(message, pending = false) {
   meta.append(node('span', name));
   if (message.createdAt) meta.append(node('time', date(message.createdAt)));
   body.append(meta, node('div', message.content, 'message-text'));
+  if (!user && !pending && Array.isArray(message.metadata?.expressionIds)) {
+    const expression = state.expressions.get(message.metadata.expressionIds[0]);
+    if (expression && (expression.builtin || expression.custom || expression.scope === (message.scope || state.scope))) {
+      const picture = expressionImage(expression, 'message-expression');
+      body.append(picture);
+    }
+  }
   row.append(body);
   $('chat-messages').append(row);
   return row;
@@ -141,12 +153,131 @@ function appendMessage(message, pending = false) {
 
 async function loadMessages() {
   const requestedScope = state.scope;
-  const { messages } = await api(`/api/messages?scope=${encodeURIComponent(requestedScope)}`);
+  const [{ messages }] = await Promise.all([api(`/api/messages?scope=${encodeURIComponent(requestedScope)}`), loadExpressions({ render: false }).catch(() => state.expressions.clear())]);
   if (requestedScope !== state.scope) return;
   $('chat-messages').replaceChildren();
   if (!messages.length) empty($('chat-messages'), '留下一句今天的开场白。', state.scope === 'owner' ? '可以聊聊你的兴趣，或试着告诉她一件值得记住的事。' : '这是本地群聊演练。创建人的私密记忆不会用于这里的回应。', '✳');
   else messages.forEach(message => appendMessage(message));
   $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+}
+
+function expressionImage(expression, className) {
+  const image = node('img', undefined, className);
+  image.src = expression.previewPath;
+  image.alt = expression.name || '表情';
+  image.loading = 'lazy';
+  image.addEventListener('error', () => image.replaceWith(node('span', '图片暂不可用', 'caption')), { once: true });
+  return image;
+}
+
+async function loadExpressions({ render = true } = {}) {
+  const catalog = await api('/api/expressions');
+  const mapping = new Map();
+  const clean = (entries, kind) => (Array.isArray(entries) ? entries : []).filter(entry => {
+    if (!entry || typeof entry.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(entry.id) || mapping.has(entry.id)) return false;
+    const builtin = kind === 'builtin', custom = kind === 'custom';
+    if (custom && (entry.origin !== 'custom' || entry.scope !== 'public')) return false;
+    const expected = builtin ? `/expressions/${entry.id}.png` : `/api/expressions/${entry.id}/image`;
+    if (entry.previewPath !== expected) return false;
+    mapping.set(entry.id, { ...entry, builtin, custom });
+    return true;
+  }).map(entry => mapping.get(entry.id));
+  const builtins = clean(catalog.builtins, 'builtin'), custom = clean(catalog.custom, 'custom'), collected = clean(catalog.collected, 'collected');
+  state.expressions = mapping;
+  if (!render) return;
+  $('builtin-expression-count').textContent = `${builtins.length} 款`;
+  $('custom-expression-count').textContent = `${custom.length} 张`;
+  $('collected-expression-count').textContent = `${collected.length} 张`;
+  const maxItems = Number.isSafeInteger(catalog.limits?.maxItems) ? catalog.limits.maxItems : 64;
+  const maxBytes = Number.isFinite(catalog.limits?.maxBytes) ? catalog.limits.maxBytes : 8388608;
+  $('expression-limits').textContent = `上传与收藏共用表情库：每张不超过 2 MiB，总共不超过 ${Math.round(maxBytes / 1048576)} MiB，最多 ${maxItems} 张。`;
+  function renderCards(container, entries, kind) {
+    container.replaceChildren();
+    const builtin = kind === 'builtin', custom = kind === 'custom';
+    if (!entries.length) return empty(container, builtin ? '内置表情正在等待就绪。' : custom ? '还没有上传的表情。' : '还没有收藏的表情。', builtin ? '准备好图片后，刷新即可查看。' : custom ? '选择一张图片，告诉她适合在什么时候使用。' : '聊天中收藏的图片会出现在这里，并保留原来的使用场合。', '☺');
+    for (const entry of entries) {
+      const card = node('article', null, 'panel expression-card');
+      const preview = node('div', null, 'expression-preview');
+      preview.append(expressionImage(entry, 'expression-image'));
+      card.append(preview, node('h3', entry.name || '收藏的表情'), node('p', entry.description || '', 'expression-description'));
+      if (!builtin) {
+        const place = entry.scope === 'owner' ? '原创建人私聊' : entry.scope?.startsWith('group:') ? `原群聊 · ${entry.scope.slice(6)}` : entry.scope?.startsWith('person:') ? `原私聊 · ${entry.scope.slice(7)}` : '原聊天场合';
+        card.append(node('p', custom ? '所有聊天可选' : `仅用于${place}`, 'expression-scope'), node('p', custom ? '来源：你上传的图片' : `来源：${entry.origin || '未记录'}`, 'expression-origin'), node('time', date(entry.createdAt), 'caption'));
+        const remove = node('button', custom ? '删除表情' : '删除收藏', 'text-button expression-remove');
+        remove.type = 'button';
+        remove.addEventListener('click', () => action(remove, async () => {
+          if (!confirm(`删除${custom ? '表情' : '收藏'}「${entry.name || '这张表情'}」？删除后，她不会再使用这张图片。`)) return;
+          await api(`/api/expressions/${encodeURIComponent(entry.id)}`, { method: 'DELETE', data: {} });
+          await loadExpressions();
+          toast(custom ? '这张上传的表情已删除。' : '这张表情已从收藏中删除。');
+        }));
+        card.append(remove);
+      }
+      container.append(card);
+    }
+  }
+  renderCards($('builtin-expressions'), builtins, 'builtin');
+  renderCards($('custom-expressions'), custom, 'custom');
+  renderCards($('collected-expressions'), collected, 'collected');
+}
+
+async function loadBooks() {
+  const result = await api('/api/books');
+  state.books = (Array.isArray(result.books) ? result.books : []).filter(book => book && typeof book.id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(book.id));
+  if (state.data) state.data.bookStatus = result.status || {};
+  const totalBytes = state.books.reduce((sum, book) => sum + (Number.isFinite(book.byteLength) ? Math.max(0, book.byteLength) : 0), 0);
+  $('book-library-size').textContent = `${state.books.length} / 10 本 · ${(totalBytes / 1048576).toFixed(2)} / 5 MiB`;
+  const list = $('book-list'); list.replaceChildren();
+  if (!state.books.length) empty(list, '留一盏灯，等第一本书。', '导入文本或一页公开正文后，就可以从第一段开始。', '▥');
+  for (const book of state.books) {
+    const total = Number.isFinite(book.totalChars) ? Math.max(0, book.totalChars) : 0;
+    const current = Math.min(total, Number.isFinite(book.currentOffset) ? Math.max(0, book.currentOffset) : 0);
+    const percent = total ? Math.floor(current / total * 100) : 0;
+    const card = node('article', null, 'panel book-card');
+    const heading = node('div', null, 'book-card-heading');
+    heading.append(node('span', current >= total && total ? '已读完' : current ? '阅读中' : '准备开始', 'tag'), node('span', `${percent}%`, 'caption'));
+    const progress = node('progress', undefined, 'book-progress'); progress.max = 100; progress.value = percent;
+    progress.setAttribute('aria-label', `${book.title || '书籍'}的阅读进度`);
+    card.append(heading, node('h3', book.title || '未命名书籍'), progress, node('p', `已读 ${current.toLocaleString('zh-CN')} / ${total.toLocaleString('zh-CN')} 字符`, 'caption'));
+    let source;
+    try { const url = new URL(book.sourceRef); if (url.protocol === 'https:' && !url.username && !url.password) source = url; } catch {}
+    if (source) {
+      const link = node('a', `来源：${source.hostname} · 当前页`, 'book-source'); link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link);
+    } else card.append(node('p', '来源：本地文本', 'book-source'));
+    card.append(node('p', book.lastReadAt ? `最近读到这里：${date(book.lastReadAt)}` : `导入时间：${date(book.createdAt)}`, 'caption'));
+    const remove = node('button', '移出书房', 'text-button book-remove'); remove.type = 'button';
+    remove.addEventListener('click', () => action(remove, async () => {
+      if (!confirm(`将「${book.title || '这本书'}」移出书房？正文和阅读位置会移除，已有笔记仍保留在记忆书架。`)) return;
+      await api(`/api/books/${encodeURIComponent(book.id)}`, { method: 'DELETE', data: {} });
+      await loadBooks(); toast('已移出书房，已有笔记仍保留。');
+    }));
+    card.append(remove); list.append(card);
+  }
+  renderBookStatus(result.status || {});
+}
+
+function renderBookStatus(status = {}) {
+  const config = state.data?.settings.books || {};
+  const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
+  const count = inDay ? status.attempts || 0 : 0;
+  const limit = inDay && Number.isFinite(status.target) ? Math.min(status.target, config.dailyLimit || 2) : config.dailyLimit || 2;
+  const hour = value => `${String(value ?? 0).padStart(2, '0')}:00`;
+  $('book-schedule-summary').textContent = config.enabled
+    ? `每天最多 ${config.dailyLimit} 次，每次约 ${config.chunkChars} 字符，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
+    : '自主读书尚未启用。导入书籍后，可以在「人格与设置」中安排阅读时光。';
+  const unread = state.books.some(book => book.currentOffset < book.totalChars);
+  let next = config.enabled ? '等待安排' : '启用后安排';
+  if (config.enabled && !unread) next = state.books.length ? '书房里的内容已读完' : '添加书籍后安排';
+  else if (config.enabled && inDay) next = status.nextRunAt && count < limit
+    ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '今天暂无后续安排';
+  $('book-next').textContent = next;
+  $('book-count').textContent = `${count} / ${limit} 次`;
+  const outcomes = { success: '一段阅读完成', reading: '正在阅读…', empty: '暂无未读内容', missed: '错过的安排已跳过', error: '未能完成', cancelled: '已取消', busy: '稍后再读' };
+  $('book-outcome').textContent = status.busy ? '正在阅读并写笔记…' : outcomes[status.lastOutcome] || '还没有记录';
+  $('book-last').hidden = !status.lastAttempt;
+  $('book-last').textContent = status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}${status.lastTitle ? ` · 《${status.lastTitle}》` : ''}` : '';
+  $('book-error').hidden = !status.lastError; $('book-error').textContent = status.lastError || '';
+  $('book-run').disabled = Boolean(status.busy || !config.enabled || !unread || count >= limit || !state.data?.settings.model.hasApiKey);
 }
 
 function renderSources(memories) {
@@ -239,7 +370,7 @@ async function loadEvents() {
   for (const event of events.slice(0, 12)) {
     const row = node('div', null, 'event-row');
     const content = node('div');
-    content.append(node('p', event.metadata?.title || event.content?.slice(0, 140) || event.type), node('span', `${scopes[event.scope] || event.scope} · ${event.type === 'reading' ? '网页阅读' : event.type === 'error' ? '未完成的任务' : event.type}${event.sourceRef ? ` · ${event.sourceRef}` : ''}`));
+    content.append(node('p', event.type === 'autonomy' ? event.content?.slice(0, 300) : event.metadata?.title || event.content?.slice(0, 140) || event.type), node('span', `${scopes[event.scope] || event.scope} · ${event.type === 'reading' ? '网页阅读' : event.type === 'autonomy' ? '自主浏览' : event.type === 'error' ? '未完成的任务' : event.type}${event.sourceRef ? ` · ${event.sourceRef}` : ''}`));
     row.append(node('time', date(event.createdAt)), content);
     $('event-list').append(row);
   }
@@ -263,7 +394,7 @@ function renderAccounts() {
 }
 
 function fillSettings() {
-  const { persona, model, qq, reading } = state.data.settings;
+  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {} } = state.data.settings;
   $('persona-name').value = persona.name;
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
@@ -284,6 +415,105 @@ function fillSettings() {
   $('reading-urls').value = reading.urls.join('\n');
   $('reading-interval').value = reading.intervalMinutes;
   $('reading-limit').value = reading.dailyLimit;
+  $('autonomy-enabled').checked = Boolean(autonomy.enabled);
+  $('autonomy-interests').value = autonomy.interests ?? '游戏与玩家社区';
+  $('autonomy-daily-min').value = autonomy.dailyMin ?? 3;
+  $('autonomy-daily-max').value = autonomy.dailyMax ?? 6;
+  $('autonomy-start-hour').value = autonomy.startHour ?? 9;
+  $('autonomy-end-hour').value = autonomy.endHour ?? 23;
+  $('autonomy-time-zone').value = autonomy.timeZone || 'Asia/Shanghai';
+  $('drawing-provider').value = drawing.provider || 'qwen';
+  $('drawing-base-url').value = drawing.baseUrl || 'https://dashscope.aliyuncs.com';
+  $('drawing-model').value = drawing.model || 'qwen-image-3.0';
+  $('drawing-api-key').value = '';
+  $('drawing-api-key').disabled = false;
+  $('drawing-clear-api-key').checked = false;
+  $('drawing-key-status').textContent = drawing.hasApiKey ? '已保存密钥。留空保存会保留当前密钥；绘图尚未接入。' : '尚未保存密钥。可以先留空，后续接入时再填写。';
+  $('drawing-daily-limit').value = drawing.dailyLimit ?? 1;
+  $('drawing-weekly-limit').value = drawing.weeklyLimit ?? 3;
+  $('self-expression-enabled').checked = Boolean(selfExpression.enabled);
+  $('self-expression-desire').value = selfExpression.desire ?? 45;
+  $('self-expression-daily-limit').value = selfExpression.dailyLimit ?? 1;
+  $('self-expression-cooldown').value = selfExpression.cooldownMinutes ?? 360;
+  $('self-expression-start-hour').value = selfExpression.startHour ?? 9;
+  $('self-expression-end-hour').value = selfExpression.endHour ?? 23;
+  $('self-expression-time-zone').value = selfExpression.timeZone || 'Asia/Shanghai';
+  $('self-expression-avatar-days').value = selfExpression.avatarIntervalDays ?? 7;
+  const expressionQQ = selfExpression.platforms?.qq || {};
+  for (const name of ['enabled', 'post', 'signature', 'avatar']) $('self-expression-qq-' + name).checked = expressionQQ[name] ?? true;
+  $('self-expression-qq-daily-limit').value = expressionQQ.dailyLimit ?? 1;
+  $('self-expression-qq-visibility').value = expressionQQ.qzoneVisibility ?? 4;
+  $('books-enabled').checked = Boolean(books.enabled);
+  $('books-daily-limit').value = books.dailyLimit ?? 2;
+  $('books-chunk-chars').value = books.chunkChars ?? 3000;
+  $('books-start-hour').value = books.startHour ?? 9;
+  $('books-end-hour').value = books.endHour ?? 23;
+  $('books-time-zone').value = books.timeZone || 'Asia/Shanghai';
+}
+
+function renderSelfExpressionStatus(status = {}) {
+  const config = state.data?.settings.selfExpression || {};
+  const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
+  const count = inDay ? status.postAttempts || 0 : 0;
+  const qq = config.platforms?.qq || {};
+  const qqCounts = inDay ? status.platformAttempts?.qq || {} : {};
+  const outcomes = { success: '已确认完成', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
+  const actionNames = { post: '空间动态', signature: '签名', avatar: '头像' };
+  const avatarNames = { hello: '打招呼', happy: '开心', thinking: '思考', comfort: '安慰' };
+  $('self-expression-summary').textContent = !config.enabled ? '自主表达尚未启用。可以在「人格与设置」中安排表达习惯。'
+    : `表达欲 ${config.desire ?? 45}% · 自动机会间隔至少 ${config.cooldownMinutes ?? 360} 分钟 · ${String(config.startHour ?? 9).padStart(2, '0')}:00–${String(config.endHour ?? 23).padStart(2, '0')}:00（${config.timeZone || 'Asia/Shanghai'}）。`;
+  $('self-expression-mood').textContent = status.mood || '还没有表达状态';
+  $('self-expression-reason').textContent = status.reason || '有想法时，也可以选择安静。';
+  let next = config.enabled ? '等待安排' : '启用后安排';
+  if (config.enabled && inDay) next = status.nextRunAt
+    ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+    : '今天暂无后续机会';
+  $('self-expression-next').textContent = next;
+  $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 1} 次`;
+  $('self-expression-outcome').textContent = status.busy ? '正在考虑表达…' : outcomes[status.lastOutcome] || '还没有记录';
+  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 1} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次。尝试失败也计次。`;
+  const platformStatus = $('self-expression-platform-status');
+  platformStatus.replaceChildren();
+  for (const [name, label] of Object.entries(actionNames)) {
+    const item = status.outcomes?.qq?.[name];
+    if (!item) continue;
+    platformStatus.append(node('p', `QQ ${label} · ${outcomes[item.outcome] || '结果未确认'} · ${date(item.at)}`, 'caption'));
+  }
+  const recent = $('self-expression-recent');
+  recent.replaceChildren();
+  for (const [label, value] of [['最近已确认动态', status.lastPostText], ['最近已确认签名', status.lastSignature], ['最近已确认头像', avatarNames[status.lastAvatarId]]]) {
+    if (!value) continue;
+    const row = node('div'); row.append(node('span', label, 'caption'), node('p', value)); recent.append(row);
+  }
+  recent.hidden = !recent.childElementCount;
+  $('self-expression-error').hidden = !status.lastError;
+  $('self-expression-error').textContent = status.lastError || '';
+  $('self-expression-run').disabled = Boolean(status.busy || !config.enabled);
+}
+
+function renderAutonomyStatus(status = {}) {
+  const config = state.data?.settings.autonomy || {};
+  const hour = value => `${String(value).padStart(2, '0')}:00`;
+  const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
+  const count = inDay ? status.attempts || 0 : 0;
+  const limit = inDay ? Math.min(status.target, config.dailyMax) : null;
+  $('autonomy-schedule-summary').textContent = config.enabled
+    ? `小黑盒 · 每天计划 ${config.dailyMin}–${config.dailyMax} 次，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
+    : '自主浏览尚未启用。可以在「人格与设置」中安排她的小黑盒日常。';
+  let next = config.enabled ? '等待安排' : '启用后安排';
+  if (config.enabled && inDay) {
+    next = '今天暂无后续安排';
+    if (status.nextRunAt && count < limit) next = new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+  $('autonomy-next').textContent = next;
+  $('autonomy-count').textContent = limit !== null ? `${count} / ${limit} 次` : `${count} 次 · 尚未安排`;
+  const outcomes = { success: '阅读完成', skipped: '未新增阅读', cancelled: '已取消', error: '未能完成' };
+  $('autonomy-outcome').textContent = status.busy ? '正在浏览…' : outcomes[status.lastOutcome] || '还没有记录';
+  $('autonomy-last').hidden = !status.lastAttempt;
+  $('autonomy-last').textContent = status.lastAttempt ? `最近活动：${date(status.lastAttempt)}${status.lastTitle ? ` · ${status.lastTitle}` : ''}${status.lastUrl ? ` · ${status.lastUrl}` : ''}` : '';
+  $('autonomy-error').hidden = !status.lastError;
+  $('autonomy-error').textContent = status.lastError || '';
+  $('autonomy-run').disabled = Boolean(status.busy || !config.enabled || (limit !== null && count >= limit));
 }
 
 function fillBackupSettings() {
@@ -363,11 +593,14 @@ $('logout').addEventListener('click', () => action($('logout'), async () => {
   await api('/api/logout', { method: 'POST', data: {} });
   state.status.authenticated = false;
   state.data = null;
+  state.expressions.clear();
+  state.books = [];
   state.preview = null;
   $('export-passphrase').value = '';
   $('restore-passphrase').value = '';
   $('model-api-key').value = '';
   $('backup-passphrase').value = '';
+  $('drawing-api-key').value = '';
   $('backup-webdav-password').value = '';
   $('qq-access-token').value = '';
   $('qq-webhook-secret').value = '';
@@ -404,6 +637,8 @@ $('chat-form').addEventListener('submit', async event => {
     succeeded = true;
     $('chat-input').value = '';
     renderSources(result.memories || []);
+    pending.remove();
+    appendMessage({ role: 'assistant', content: result.reply, scope: state.scope, metadata: { expressionIds: result.expressionIds || [] }, createdAt: new Date().toISOString() });
     await Promise.all([loadMessages(), loadState()]);
   } catch (error) {
     toast(error.message, true);
@@ -454,6 +689,111 @@ $('read-form').addEventListener('submit', event => {
   });
 });
 $('refresh-events').addEventListener('click', () => action($('refresh-events'), loadEvents));
+$('refresh-books').addEventListener('click', () => action($('refresh-books'), () => Promise.all([loadBooks(), loadState()])));
+$('book-file-form').addEventListener('submit', event => {
+  event.preventDefault();
+  action($('book-file-form'), async () => {
+    const file = $('book-file').files[0], output = $('book-file-result'); let imported = false;
+    output.textContent = '';
+    if (!file || !/\.txt$/i.test(file.name)) throw new Error('请选择 UTF-8 编码的 TXT 文本文件。');
+    if (!file.size || file.size > 1048576) throw new Error('文本文件须非空，且不超过 1 MiB。');
+    let content;
+    try { content = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()); }
+    catch { throw new Error('文件不是有效的 UTF-8 文本，请先转换编码后再导入。'); }
+    if (!content.trim() || content.includes('\0') || content.length > 1000000) throw new Error('正文须非空、无空字符，且不超过 100 万字符。');
+    const title = $('book-file-title').value.trim() || file.name.replace(/\.txt$/i, '').slice(0, 200);
+    try {
+      output.textContent = '正在导入文本…';
+      await api('/api/books', { method: 'POST', data: { title, text: content } }); imported = true;
+      $('book-file-form').reset(); await loadBooks();
+      output.textContent = '文本已加入书房，尚未调用模型阅读。'; toast('文本已导入书房。');
+    } catch (error) { output.textContent = imported ? '已导入，列表刷新未完成。请点击「刷新书房」。' : '导入未完成，请检查文件后重试。'; throw error; }
+  });
+});
+$('book-url-form').addEventListener('submit', event => {
+  event.preventDefault();
+  action($('book-url-form'), async () => {
+    const output = $('book-url-result'); let imported = false;
+    const url = $('book-url').value.trim(), title = $('book-url-title').value.trim();
+    let parsed; try { parsed = new URL(url); } catch { throw new Error('请输入完整的公开网页地址。'); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('请输入不含登录凭据的公开 HTTPS 网页地址。');
+    try {
+      output.textContent = '正在读取当前页正文…';
+      await api('/api/books/import', { method: 'POST', data: { url, ...(title ? { title } : {}) } }); imported = true;
+      $('book-url-form').reset(); await loadBooks();
+      output.textContent = '当前页正文已加入书房；其他分页和章节未导入。'; toast('当前页正文已导入书房。');
+    } catch (error) { output.textContent = imported ? '已导入当前页，列表刷新未完成。请点击「刷新书房」。' : '导入未完成，请确认页面可公开阅读。'; throw error; }
+  });
+});
+$('book-run').addEventListener('click', () => action($('book-run'), async () => {
+  renderBookStatus({ ...state.data.bookStatus, busy: true });
+  try {
+    const result = await api('/api/books/run', { method: 'POST', data: {} });
+    await Promise.all([loadBooks(), loadState()]);
+    toast(result.status?.lastOutcome === 'success' ? '已读完一小段，笔记保存到记忆书架。' : result.status?.skipped === 'no_unread_books' ? '书房里暂时没有未读内容。' : '本次阅读已结束，结果见上方。');
+  } catch (error) { try { await Promise.all([loadBooks(), loadState()]); } catch {} throw error; }
+}).finally(() => renderBookStatus(state.data?.bookStatus)));
+$('refresh-expressions').addEventListener('click', () => action($('refresh-expressions'), () => loadExpressions()));
+$('expression-upload-form').addEventListener('submit', event => {
+  event.preventDefault();
+  action($('expression-upload-form'), async () => {
+    const output = $('expression-upload-result');
+    output.textContent = '';
+    const files = $('expression-upload-file').files;
+    if (files.length !== 1) throw new Error('请只选择一张图片。');
+    const file = files[0];
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) throw new Error('请选择 PNG、JPEG、WebP 或 GIF 图片。');
+    if (!file.size || file.size > 2 * 1024 * 1024) throw new Error('图片须为非空文件，且不超过 2 MiB。');
+    const name = $('expression-upload-name').value.trim(), description = $('expression-upload-description').value.trim();
+    if (!name || name.length > 40 || !description || description.length > 300) throw new Error('请填写 1–40 字的名称与 1–300 字的适用情境。');
+    output.textContent = '正在上传…';
+    let uploaded = false;
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('无法读取图片文件。'));
+        reader.onerror = () => reject(new Error('无法读取图片文件，请重新选择。'));
+        reader.onabort = () => reject(new Error('图片读取已取消。'));
+        reader.readAsDataURL(file);
+      });
+      await api('/api/expressions', { method: 'POST', data: { name, description, image: { mimeType: file.type, dataUrl } } });
+      uploaded = true;
+      $('expression-upload-form').reset();
+      output.textContent = '上传完成，这张表情已可在所有聊天中选择。';
+      await loadExpressions();
+      toast('新表情已加入表情库。');
+    } catch (error) {
+      output.textContent = uploaded ? '表情已上传，列表刷新未完成。请点击「刷新表情库」。' : '上传未完成，请检查图片后重试。';
+      throw error;
+    }
+  });
+});
+$('refresh-autonomy').addEventListener('click', () => action($('refresh-autonomy'), () => Promise.all([loadState(), loadEvents()])));
+$('autonomy-run').addEventListener('click', () => action($('autonomy-run'), async () => {
+  renderAutonomyStatus({ ...state.data.autonomyStatus, busy: true });
+  try {
+    const result = await api('/api/autonomy/run', { method: 'POST', data: {} });
+    await Promise.all([loadState(), loadEvents()]);
+    toast(result.status?.skipped ? '这次浏览已完成，没有新增可阅读的帖子。' : '这次浏览已完成，内容和来源已记下。');
+  } catch (error) {
+    try { await Promise.all([loadState(), loadEvents()]); } catch {}
+    throw error;
+  }
+}).finally(() => renderAutonomyStatus(state.data?.autonomyStatus)));
+$('refresh-self-expression').addEventListener('click', () => action($('refresh-self-expression'), () => Promise.all([loadState(), loadEvents()])));
+$('self-expression-run').addEventListener('click', () => action($('self-expression-run'), async () => {
+  renderSelfExpressionStatus({ ...state.data.selfExpressionStatus, busy: true });
+  try {
+    const result = await api('/api/self-expression/run', { method: 'POST', data: {} });
+    await Promise.all([loadState(), loadEvents()]);
+    const status = result.status || result;
+    const notices = { quiet: '这次选择安静，没有发布内容。', limit: '当前没有可执行的表达动作。', daily_limit: '今天的表达思考次数已用完。', busy: '她正在处理其他事情，稍后再安排。', disabled: '请先保存并启用自主表达。', cancelled: '这次表达机会已取消。', outside_hours: '当前不在表达活跃时段。', cooldown: '还在表达间隔内，稍后再安排。' };
+    toast(notices[status.skipped || status.lastOutcome] || '这次表达机会已结束，结果见下方。');
+  } catch (error) {
+    try { await Promise.all([loadState(), loadEvents()]); } catch {}
+    throw error;
+  }
+}).finally(() => renderSelfExpressionStatus(state.data?.selfExpressionStatus)));
 $('refresh-accounts').addEventListener('click', () => action($('refresh-accounts'), () => loadState()));
 $('binding-code').addEventListener('click', () => action($('binding-code'), async () => {
   const binding = await api('/api/bindings/code', { method: 'POST', data: {} });
@@ -464,6 +804,7 @@ $('binding-code').addEventListener('click', () => action($('binding-code'), asyn
 $('copy-binding').addEventListener('click', () => action($('copy-binding'), async () => { await navigator.clipboard.writeText($('binding-command').textContent); toast('验证命令已复制。'); }));
 
 $('model-clear-api-key').addEventListener('change', () => { $('model-api-key').disabled = $('model-clear-api-key').checked; });
+$('drawing-clear-api-key').addEventListener('change', () => { $('drawing-api-key').disabled = $('drawing-clear-api-key').checked; });
 $('model-test').addEventListener('click', () => action($('model-test'), async () => {
   const output = $('model-test-result');
   output.hidden = false;
@@ -491,6 +832,9 @@ $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   action($('settings-form'), async () => {
     if ($('qq-enabled').checked && !$('qq-bot-id').value.trim()) throw new Error('启用 QQ 前，请填写机器人 QQ 号。');
+    if (Number($('drawing-weekly-limit').value) < Number($('drawing-daily-limit').value)) throw new Error('未来每周绘图限制不能小于每日限制。');
+    if (Number($('self-expression-start-hour').value) >= Number($('self-expression-end-hour').value)) throw new Error('自主表达的开始时间须早于结束时间。');
+    if (Number($('books-start-hour').value) >= Number($('books-end-hour').value)) throw new Error('读书的开始时间须早于结束时间。');
     $('settings-result').textContent = '正在保存…';
     try {
       await api('/api/settings', { method: 'PUT', data: {
@@ -498,6 +842,10 @@ $('settings-form').addEventListener('submit', event => {
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups') },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
+        autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox'], interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
+        drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },
+        selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) } } },
+        books: { enabled: $('books-enabled').checked, dailyLimit: Number($('books-daily-limit').value), chunkChars: Number($('books-chunk-chars').value), startHour: Number($('books-start-hour').value), endHour: Number($('books-end-hour').value), timeZone: $('books-time-zone').value.trim() },
       } });
       await loadState({ fill: true });
       $('settings-result').textContent = `设置已保存 · ${date(new Date().toISOString())}`;
@@ -573,8 +921,8 @@ $('preview-form').addEventListener('submit', event => {
     const input = { archive: await file.text(), passphrase: $('restore-passphrase').value };
     const result = await api('/api/backups/preview', { method: 'POST', data: input });
     state.preview = input;
-    const countLabels = { memories: '记忆', events: '经历', messages: '消息', accounts: '账号', revisions: '修订', tombstones: '删除记录' };
-    const counts = Object.entries(result.counts || {}).map(([key, value]) => `${countLabels[key] || key} ${value} 条`).join('，');
+    const countLabels = { memories: '记忆', events: '经历', messages: '消息', accounts: '账号', revisions: '修订', tombstones: '删除记录', expressions: '表情', books: '书籍' };
+    const counts = Object.entries(result.counts || {}).map(([key, value]) => `${countLabels[key] || key} ${value} ${key === 'books' ? '本' : '条'}`).join('，');
     $('restore-details').textContent = `备份检查通过。导出时间：${date(result.exportedAt)}。${counts}`;
     $('restore-preview').hidden = false;
   });

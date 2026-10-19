@@ -13,8 +13,11 @@ Environment=NODE_ENV=production
 Environment=PORT=3210
 Environment=PERSONA_DATA_DIR=/var/lib/persona-agent
 Environment=PERSONA_BACKUP_DIR=/var/lib/persona-agent-backups
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/cache/persona-agent-browsers
 StateDirectory=persona-agent persona-agent-backups
 StateDirectoryMode=0700
+CacheDirectory=persona-agent-browsers
+CacheDirectoryMode=0700
 UMask=0077
 Restart=on-failure
 RestartSec=5
