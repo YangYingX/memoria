@@ -422,7 +422,7 @@ export function createStore(dbPath) {
       const now = new Date().toISOString();
       const event = { id: randomUUID(), ...eventFields({ type: 'reading', scope: fields.scope, actor,
         content: fields.content, sourceRef: fields.sourceRef,
-        metadata: { title: page.title, readAt: timestamp(page.readAt, '阅读时间') } }), createdAt: now };
+        metadata: { title: page.title, readAt: timestamp(page.readAt, '阅读时间'), truncated: Boolean(page.truncated) } }), createdAt: now };
       return transaction(() => {
         const existing = memoryRow(get(`SELECT * FROM memories WHERE deleted_at IS NULL AND scope = ?
           AND source_type = 'webpage' AND category = 'reading' AND source_ref = ? AND title = ? AND content = ?

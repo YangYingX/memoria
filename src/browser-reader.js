@@ -10,6 +10,7 @@ const POST_BODY = '.hb-bbs-link__content .post__content';
 const POST_LIST = '.bbs-home__content-list a.hb-cpt__bbs-list-content';
 
 function postUrl(value) {
+  if (typeof value !== 'string' || value.length > 4096) throw new Error('请输入有效的小黑盒帖子地址。');
   let url;
   try { url = new URL(value); } catch { throw new Error('请输入有效的小黑盒帖子地址。'); }
   if (url.origin !== 'https://www.xiaoheihe.cn' || url.username || url.password || !POST_PATH.test(url.pathname)) {
@@ -17,6 +18,10 @@ function postUrl(value) {
   }
   url.search = ''; url.hash = '';
   return url.href;
+}
+
+export function isHeyboxPostUrl(value) {
+  try { postUrl(value); return true; } catch { return false; }
 }
 
 async function visit(url, signal, extract) {
@@ -138,21 +143,24 @@ export async function discoverHeyboxPosts({ signal } = {}) {
   });
 }
 
-export async function readHeyboxPost(value, { signal } = {}) {
+export async function readHeyboxPost(value, { signal, maxText = MAX_TEXT } = {}) {
+  if (!Number.isSafeInteger(maxText) || maxText < 1 || maxText > 1000000) throw new Error('正文长度限制无效。');
   const url = postUrl(value);
   return visit(url, signal, async page => {
     await page.waitForSelector(POST_BODY, { state: 'attached', timeout: 20000 });
     const article = await page.evaluate(({ selector, maxText }) => {
       const body = document.querySelector(selector);
       const title = document.querySelector('.hb-bbs-link__content .section-title__content')?.innerText || '';
+      const text = body?.innerText?.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim() || '';
       return {
         title: title.replace(/\s+/g, ' ').trim().slice(0, 500),
-        text: body?.innerText?.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, maxText) || '',
+        text: text.slice(0, maxText), truncated: text.length > maxText, bodyLength: text.length,
       };
-    }, { selector: POST_BODY, maxText: MAX_TEXT });
-    if (!article.title || article.text.length < 40) {
+    }, { selector: POST_BODY, maxText });
+    if (!article.title || article.bodyLength < 40) {
       throw new Error('小黑盒帖子没有足够的公开文字正文；图片、视频或登录页未作为已读内容保存。');
     }
+    delete article.bodyLength;
     return { url, ...article, excerpt: article.text.replace(/\s+/g, ' ').slice(0, 300), readAt: new Date().toISOString() };
   });
 }

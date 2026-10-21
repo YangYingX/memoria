@@ -711,6 +711,7 @@ $('read-form').addEventListener('submit', event => {
       const edit = node('button', '查看这条记忆 ↗', 'button secondary');
       edit.addEventListener('click', () => editMemory(memory));
       $('reading-result').replaceChildren(saved, node('h2', page.title), link, node('p', page.excerpt || page.text?.slice(0, 7000), 'article-body'), edit);
+      if (page.truncated) $('reading-result').append(node('p', '正文超过本次提取上限，已保存前部内容；不代表读完原网页。', 'caption'));
       await Promise.all([loadEvents(), loadState()]);
       toast('阅读完成，内容与来源已保存。');
     } finally { $('read-submit').textContent = '阅读并保存 ↗'; }

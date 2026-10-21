@@ -4,6 +4,7 @@ import https from 'node:https';
 import { isIP } from 'node:net';
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
+import { isHeyboxPostUrl, readHeyboxPost } from './browser-reader.js';
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT = 30000;
@@ -163,6 +164,8 @@ async function requestPage(value, signal, redirects = 0, maxText = MAX_TEXT) {
 
 export async function readPage(url, { maxText = MAX_TEXT } = {}) {
   if (!Number.isSafeInteger(maxText) || maxText < 1 || maxText > 1000000) throw new Error('正文长度限制无效。');
+  checkedUrl(url);
+  if (isHeyboxPostUrl(url)) return readHeyboxPost(url, { maxText });
   const controller = new AbortController();
   let timer;
   const deadline = new Promise((_, reject) => {
