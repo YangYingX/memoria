@@ -81,7 +81,7 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
     if (stopped) return { ...status(), skipped: 'stopped' };
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
     const config = settings(), time = now();
-    if (!config.enabled || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
+    if ((!config.enabled && !force) || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
     const state = plan(config, time);
     if (state.attempts >= Math.min(state.target, config.dailyLimit)) return { ...status(), skipped: 'daily_limit' };
     if (!force) {

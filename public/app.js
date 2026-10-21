@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 const labels = { chat: '对话实验室', memories: '记忆书架', reading: '网页阅读', books: '书房', expressions: '表情库', identity: '身份与备份', settings: '人格与设置' };
 const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'book-note': '读书笔记', promise: '约定' };
 const scopes = { owner: '仅创建人', public: '公开记忆', 'group:demo': '演练群聊' };
+const proactiveOutcomes = { quiet: '这次保持安静', attempt: '已尝试，等待确认', pending: '等待平台确认', success: '已确认发送', unknown: '发送结果未确认', error: '未能完成', cancelled: '已取消', busy: '等空闲时再聊', limit: '今日额度已用完', deciding: '正在考虑分享', missed: '错过的机会已跳过' };
 const state = { status: {}, data: null, page: 'chat', scope: 'owner', memories: [], books: [], expressions: new Map(), busyChat: false, preview: null };
 let toastTimer;
 
@@ -98,6 +99,7 @@ async function loadState({ fill = false } = {}) {
   renderBackupStatus(state.data.backupStatus);
   renderAutonomyStatus(state.data.autonomyStatus);
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
+  renderProactiveStatus(state.data.proactiveStatus);
   renderBookStatus(state.data.bookStatus);
   if (fill) { fillSettings(); fillBackupSettings(); }
 }
@@ -264,7 +266,7 @@ function renderBookStatus(status = {}) {
   const hour = value => `${String(value ?? 0).padStart(2, '0')}:00`;
   $('book-schedule-summary').textContent = config.enabled
     ? `每天最多 ${config.dailyLimit} 次，每次约 ${config.chunkChars} 字符，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
-    : '自主读书尚未启用。导入书籍后，可以在「人格与设置」中安排阅读时光。';
+    : '自主读书尚未启用。仍可在 QQ 私聊让她读一小段，或在这里手动阅读；每日次数共用。';
   const unread = state.books.some(book => book.currentOffset < book.totalChars);
   let next = config.enabled ? '等待安排' : '启用后安排';
   if (config.enabled && !unread) next = state.books.length ? '书房里的内容已读完' : '添加书籍后安排';
@@ -277,7 +279,7 @@ function renderBookStatus(status = {}) {
   $('book-last').hidden = !status.lastAttempt;
   $('book-last').textContent = status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}${status.lastTitle ? ` · 《${status.lastTitle}》` : ''}` : '';
   $('book-error').hidden = !status.lastError; $('book-error').textContent = status.lastError || '';
-  $('book-run').disabled = Boolean(status.busy || !config.enabled || !unread || count >= limit || !state.data?.settings.model.hasApiKey);
+  $('book-run').disabled = Boolean(status.busy || !unread || count >= limit || !state.data?.settings.model.hasApiKey);
 }
 
 function renderSources(memories) {
@@ -370,7 +372,8 @@ async function loadEvents() {
   for (const event of events.slice(0, 12)) {
     const row = node('div', null, 'event-row');
     const content = node('div');
-    content.append(node('p', event.type === 'autonomy' ? event.content?.slice(0, 300) : event.metadata?.title || event.content?.slice(0, 140) || event.type), node('span', `${scopes[event.scope] || event.scope} · ${event.type === 'reading' ? '网页阅读' : event.type === 'autonomy' ? '自主浏览' : event.type === 'error' ? '未完成的任务' : event.type}${event.sourceRef ? ` · ${event.sourceRef}` : ''}`));
+    const proactiveResult = event.type === 'proactive' ? ` · ${proactiveOutcomes[event.metadata?.outcome] || '结果未确认'}` : '';
+    content.append(node('p', event.type === 'autonomy' ? event.content?.slice(0, 300) : event.metadata?.title || event.content?.slice(0, 140) || event.type), node('span', `${scopes[event.scope] || event.scope} · ${event.type === 'reading' ? '网页阅读' : event.type === 'autonomy' ? '自主浏览' : event.type === 'proactive' ? '主动私聊' : event.type === 'error' ? '未完成的任务' : event.type}${proactiveResult}${event.sourceRef && event.type !== 'proactive' ? ` · ${event.sourceRef}` : ''}`));
     row.append(node('time', date(event.createdAt)), content);
     $('event-list').append(row);
   }
@@ -394,7 +397,7 @@ function renderAccounts() {
 }
 
 function fillSettings() {
-  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {} } = state.data.settings;
+  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {} } = state.data.settings;
   $('persona-name').value = persona.name;
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
@@ -449,6 +452,31 @@ function fillSettings() {
   $('books-start-hour').value = books.startHour ?? 9;
   $('books-end-hour').value = books.endHour ?? 23;
   $('books-time-zone').value = books.timeZone || 'Asia/Shanghai';
+  $('proactive-enabled').checked = Boolean(proactive.enabled);
+  $('proactive-desire').value = proactive.desire ?? 35;
+  $('proactive-daily-limit').value = proactive.dailyLimit ?? 1;
+  $('proactive-cooldown').value = proactive.cooldownMinutes ?? 360;
+  $('proactive-idle').value = proactive.idleMinutes ?? 60;
+  $('proactive-start-hour').value = proactive.startHour ?? 10;
+  $('proactive-end-hour').value = proactive.endHour ?? 22;
+  $('proactive-time-zone').value = proactive.timeZone || 'Asia/Shanghai';
+}
+
+function renderProactiveStatus(status = {}) {
+  const config = state.data?.settings.proactive || {};
+  const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
+  $('proactive-summary').textContent = config.enabled
+    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。她会在允许的时段内等待合适的分享机会。`
+    : '主动私聊已关闭。保存开启后才安排；已经发起的发送无法保证撤回。';
+  $('proactive-next').textContent = !config.enabled ? '启用后安排' : inDay && status.nextRunAt
+    ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+    : '等待下次安排';
+  $('proactive-count').textContent = `${inDay ? status.sendAttempts || 0 : 0} / ${config.dailyLimit ?? 1} 次`;
+  $('proactive-outcome').textContent = status.busy ? '正在考虑分享…' : proactiveOutcomes[status.lastOutcome] || '还没有记录';
+  $('proactive-last').hidden = !status.lastAttempt && !status.lastSuccess;
+  $('proactive-last').textContent = [status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}` : '', status.lastSuccess ? `最近确认发送：${date(status.lastSuccess)}` : ''].filter(Boolean).join(' · ');
+  $('proactive-error').hidden = !status.lastError;
+  $('proactive-error').textContent = status.lastError || '';
 }
 
 function renderSelfExpressionStatus(status = {}) {
@@ -835,6 +863,7 @@ $('settings-form').addEventListener('submit', event => {
     if (Number($('drawing-weekly-limit').value) < Number($('drawing-daily-limit').value)) throw new Error('未来每周绘图限制不能小于每日限制。');
     if (Number($('self-expression-start-hour').value) >= Number($('self-expression-end-hour').value)) throw new Error('自主表达的开始时间须早于结束时间。');
     if (Number($('books-start-hour').value) >= Number($('books-end-hour').value)) throw new Error('读书的开始时间须早于结束时间。');
+    if (Number($('proactive-start-hour').value) >= Number($('proactive-end-hour').value)) throw new Error('主动私聊的开始时间须早于结束时间。');
     $('settings-result').textContent = '正在保存…';
     try {
       await api('/api/settings', { method: 'PUT', data: {
@@ -845,6 +874,7 @@ $('settings-form').addEventListener('submit', event => {
         autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox'], interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },
         selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) } } },
+        proactive: { enabled: $('proactive-enabled').checked, desire: Number($('proactive-desire').value), dailyLimit: Number($('proactive-daily-limit').value), cooldownMinutes: Number($('proactive-cooldown').value), idleMinutes: Number($('proactive-idle').value), startHour: Number($('proactive-start-hour').value), endHour: Number($('proactive-end-hour').value), timeZone: $('proactive-time-zone').value.trim() },
         books: { enabled: $('books-enabled').checked, dailyLimit: Number($('books-daily-limit').value), chunkChars: Number($('books-chunk-chars').value), startHour: Number($('books-start-hour').value), endHour: Number($('books-end-hour').value), timeZone: $('books-time-zone').value.trim() },
       } });
       await loadState({ fill: true });

@@ -19,6 +19,7 @@ import { defaultDrawingSettings, normalizeDrawingSettings, publicDrawingSettings
 import { defaultExpressionSettings, normalizeExpressionSettings, publicExpressionSettings, createSelfExpressionJobs } from './self-expression.js';
 import { defaultBookSettings, normalizeBookSettings, createBookJobs } from './book-jobs.js';
 import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
+import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -36,6 +37,7 @@ const defaults = {
   drawing: defaultDrawingSettings,
   selfExpression: defaultExpressionSettings,
   books: defaultBookSettings,
+  proactive: defaultProactiveSettings,
   backup: { enabled: false, intervalHours: 6, keepLocal: 30, localDirectory: resolve(process.env.PERSONA_BACKUP_DIR || join(root, 'backups')), passphrase: '', webdav: { enabled: false, url: '', username: '', password: '' } },
 };
 for (const [key, value] of Object.entries(defaults)) if (!store.getSetting(key)) store.setSetting(key, value);
@@ -52,10 +54,11 @@ let pendingBinding = null;
 let autonomyJobs;
 let selfExpressionJobs;
 let bookJobs;
+let proactiveJobs;
 let bookConversation = false;
 let receivingBook = '';
 const expressionPlatforms = { qq: { name: 'QQ', actions: ['post', 'signature', 'avatar'] } };
-const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy });
+const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy });
 function makeAutonomyJobs() {
   return createAutonomyJobs({ store,
     discoverPosts: async (source, options) => {
@@ -63,7 +66,7 @@ function makeAutonomyJobs() {
       return { url: 'https://www.xiaoheihe.cn/app/bbs/home', posts: await discoverHeyboxPosts(options) };
     },
     readPost: readHeyboxPost,
-    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy,
+    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy,
   });
 }
 autonomyJobs = makeAutonomyJobs();
@@ -111,7 +114,7 @@ function makeSelfExpressionJobs() {
       }
       throw new Error('此平台操作未接入。');
     },
-    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || bookJobs?.status().busy || !store.getSetting('qq').enabled || !store.getSetting('model').apiKey,
+    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy || !store.getSetting('qq').enabled || !store.getSetting('model').apiKey,
   });
 }
 selfExpressionJobs = makeSelfExpressionJobs();
@@ -128,10 +131,40 @@ function makeBookJobs() {
       if (typeof note !== 'string' || !note.trim() || note.length > 4000) throw new Error('模型未返回有效读书笔记，阅读进度未改变。');
       return note.trim();
     },
-    isBusy: () => activeMutation > (bookConversation ? 1 : 0) || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || !store.getSetting('model').apiKey,
+    isBusy: () => activeMutation > (bookConversation ? 1 : 0) || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || proactiveJobs?.status().busy || !store.getSetting('model').apiKey,
   });
 }
 bookJobs = makeBookJobs();
+
+function getProactiveRecipient() {
+  const qq = store.getSetting('qq');
+  if (!qq.enabled) return null;
+  const account = store.listAccounts().find(item => item.platform === 'qq' && item.personId === 'owner'
+    && /^\d{1,20}$/.test(item.userId) && item.userId !== qq.botId);
+  return account ? { accountId: account.id, userId: account.userId } : null;
+}
+
+function makeProactiveJobs() {
+  return createProactiveJobs({ store, getRecipient: getProactiveRecipient,
+    generate: async ({ instructions, signal, ...context }) => {
+      const result = await requestCompletion({ store, signal, maxTokens: 600, messages: [
+        { role: 'system', content: instructions },
+        { role: 'user', content: JSON.stringify(context) },
+      ] });
+      const content = result.choices[0].message.content;
+      if (typeof content !== 'string') throw new Error('模型未返回主动私聊决定。');
+      try { return JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); }
+      catch { throw new Error('主动私聊决定格式无效。'); }
+    },
+    send: async (recipient, message, options) => {
+      const config = store.getSetting('qq');
+      if (!(await testQQ(options.signal)).ok) throw new Error('QQ 未在线或登录账号不匹配。');
+      return sendQQ(config, { user_id: recipient.userId }, message, [], '', options);
+    },
+    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy,
+  });
+}
+proactiveJobs = makeProactiveJobs();
 
 async function importOnlineBook(url, title) {
   const source = new URL(text(url, '在线正文地址', 2048));
@@ -159,11 +192,11 @@ const bookActions = {
       const ok = status.lastOutcome === 'success' && !status.skipped;
       return { ok, ...(status.skipped ? { skipped: status.skipped } : {}), bookId: id, bookTitle: book.title,
         ...(ok ? { startOffset: status.lastStartOffset, endOffset: status.lastEndOffset, note: bookActions.notes(id)[0] }
-          : { reason: '本次没有完成新的阅读；可能是未启用、次数已用完或其他任务正在执行。' }) };
+          : { reason: '本次没有完成新的阅读；可能是次数已用完或其他任务正在执行。' }) };
     } finally { bookConversation = false; }
   },
   importUrl: async url => {
-    if (activeMutation > 1 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy) throw new Error('正在处理其他任务，请稍后再导入。');
+    if (activeMutation > 1 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy) throw new Error('正在处理其他任务，请稍后再导入。');
     const book = await importOnlineBook(url);
     return { book, message: '只收录了当前页正文，没有自动导入其他章节。' };
   },
@@ -200,7 +233,7 @@ function publicSettings() {
   const persona = store.getSetting('persona'), model = store.getSetting('model'), qq = store.getSetting('qq');
   const { apiKey, ...modelView } = model;
   const { accessToken, ...qqView } = qq;
-  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
+  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
 function saveSettings(input) {
@@ -237,9 +270,11 @@ function saveSettings(input) {
   if (input.drawing) next.drawing = normalizeDrawingSettings(input.drawing, store.getSetting('drawing'));
   if (input.selfExpression) next.selfExpression = normalizeExpressionSettings(input.selfExpression, store.getSetting('selfExpression'), expressionPlatforms);
   if (input.books) next.books = normalizeBookSettings(input.books, store.getSetting('books'));
+  if (input.proactive) next.proactive = normalizeProactiveSettings(input.proactive, store.getSetting('proactive'));
   if (next.autonomy && JSON.stringify(next.autonomy) !== JSON.stringify(store.getSetting('autonomy'))) autonomyJobs.cancel();
   if (['selfExpression', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) selfExpressionJobs.cancel();
   if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) bookJobs.cancel();
+  if (['proactive', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) proactiveJobs.cancel();
   for (const [key, value] of Object.entries(next)) store.setSetting(key, value);
   return publicSettings();
 }
@@ -255,6 +290,7 @@ async function readAndRemember(url, scope, actor = 'owner') {
 }
 
 async function chat(scope, message, actor = 'owner', imageUrls = [], origin = '') {
+  if (scope === 'owner' && actor === 'owner') proactiveJobs.cancel();
   const queue = conversationQueues.get(scope) || { tail: Promise.resolve(), pending: 0 };
   if (queue.pending >= 10) throw new Error('当前对话已有 10 条消息等待处理，请稍后再发。');
   queue.pending++; activeMutation++;
@@ -289,25 +325,27 @@ function replyExpressionSegments(ids, origin) {
   });
 }
 
-async function sendQQ(config, target, reply, expressionIds = [], origin = '') {
+async function sendQQ(config, target, reply, expressionIds = [], origin = '', options = {}) {
   let imageSegments = [];
   try { imageSegments = replyExpressionSegments(expressionIds, origin); }
   catch { store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: '本次表情已不可用，已仅发送文字。' }); }
+  options.beforeSend?.();
   const response = await fetch(`${config.apiBaseUrl}/${target.group_id ? 'send_group_msg' : 'send_private_msg'}`, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+    method: 'POST', redirect: 'error', signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
     headers: { 'Content-Type': 'application/json', ...(config.accessToken ? { Authorization: `Bearer ${config.accessToken}` } : {}) },
     body: JSON.stringify({ ...target, message: [{ type: 'text', data: { text: reply.slice(0, 5000) } }, ...imageSegments] }),
   });
   if (!response.ok) throw new Error(`QQ 发送接口 HTTP ${response.status}`);
   const result = await response.json();
   if (result.status !== 'ok' || Number(result.retcode) !== 0) throw new Error('QQ 协议端未确认消息发送成功。');
+  return { messageId: result.data?.message_id };
 }
 
-async function testQQ() {
+async function testQQ(signal) {
   const config = store.getSetting('qq');
   const call = async action => {
     const response = await fetch(`${config.apiBaseUrl}/${action}`, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
+      method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
       headers: { 'Content-Type': 'application/json', ...(config.accessToken ? { Authorization: `Bearer ${config.accessToken}` } : {}) }, body: '{}',
     });
     if (!response.ok) throw new Error(`QQ 接口返回 HTTP ${response.status}，请检查协议端地址与 Access Token。`);
@@ -339,6 +377,7 @@ async function handleQQ(event, config) {
   const binding = message.match(/^(?:绑定|bind)\s+([A-Za-z0-9_-]+)$/);
   if (event.message_type === 'private' && binding && !imageUrls.length && !bookFile) {
     if (pendingBinding && pendingBinding.expires > Date.now() && sameSecret(createHash('sha256').update(binding[1]).digest('hex'), pendingBinding.hash)) {
+      proactiveJobs.cancel();
       store.bindAccount({ platform: 'qq', userId, personId: 'owner', label: '创建人 QQ' });
       pendingBinding = null;
       await sendQQ(config, { user_id: userId }, '已通过一次性验证码绑定为创建人账号。管理设置请在本机后台操作。');
@@ -359,6 +398,7 @@ async function handleQQ(event, config) {
     origin = `qq:private:${userId}`;
   }
   // Group context never inherits the owner's private scope, even when the owner speaks.
+  if (scope === 'owner' && account?.personId === 'owner') proactiveJobs.cancel();
   if (bookFile) {
     if (scope !== 'owner' || account?.personId !== 'owner') return;
     const deliveryKey = `qq-book:${bookFile.fileKey}`;
@@ -386,7 +426,7 @@ async function handleQQ(event, config) {
       const content = `收到 TXT《${book.title}》，已放入书房，正文 ${book.totalChars} 字符。`;
       store.addMessage({ scope: 'owner', role: 'user', actor: 'owner', content: `[发送了一本 TXT：${book.title}]`, metadata: { bookId: book.id } });
       store.addEvent({ type: 'book_import', scope: 'owner', actor: 'owner', content, sourceRef: `book:${book.id}` });
-      bookReply = `${content}${store.getSetting('books').enabled ? '我会按阅读安排分段看，并记下笔记。' : '目前还没有开启自主读书，可以在后台设置阅读节奏。'}\n也可以直接问我“书架里有什么”“这本读到哪里了”“读一小段”或“给我看看笔记”。`;
+      bookReply = `${content}${store.getSetting('books').enabled ? '我会按阅读安排分段看，并记下笔记。' : '你可以直接让我读一小段；想让我自行分段阅读，也可以在后台设置节奏。'}\n也可以直接问我“书架里有什么”“这本读到哪里了”“读一小段”或“给我看看笔记”。`;
       store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: bookReply, metadata: { bookId: book.id } });
     } catch (error) {
       store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: `收书未完成：${error.message}` });
@@ -410,7 +450,7 @@ async function handleQQ(event, config) {
 
 async function scheduledReading() {
   const config = store.getSetting('reading');
-  if (!store.getSetting('admin') || !config.enabled || readingBusy || activeConversations.size || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy) return;
+  if (!store.getSetting('admin') || !config.enabled || readingBusy || activeConversations.size || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy) return;
   const now = Date.now(), day = new Date().toISOString().slice(0, 10);
   let status = store.getSetting('readingStatus', { day, count: 0, cursor: 0 });
   if (status.day !== day) status = { ...status, day, count: 0 };
@@ -473,12 +513,12 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), backupStatus: backupJobs.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), backupStatus: backupJobs.status(), modelUsage: store.getSetting('modelUsage', {}) });
       if (path === '/api/settings' && req.method === 'PUT') return json(res, 200, { settings: saveSettings(input) });
       if (path === '/api/books' && req.method === 'GET') return json(res, 200, { books: store.listBooks(), status: bookJobs.status() });
       if (path === '/api/books' && req.method === 'POST') return json(res, 201, { book: store.addBook({ title: input.title, text: input.text }) });
       if (path === '/api/books/import' && req.method === 'POST') {
-        if (readingBusy || activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || backupJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成后导入。' });
+        if (readingBusy || activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || backupJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成后导入。' });
         activeMutation++;
         try {
           const book = await importOnlineBook(input.url, input.title);
@@ -488,12 +528,13 @@ const server = http.createServer(async (req, res) => {
       const bookRoute = path.match(/^\/api\/books\/([a-zA-Z0-9_-]+)$/);
       if (bookRoute && req.method === 'DELETE') {
         bookJobs.cancel();
+        proactiveJobs.cancel();
         return json(res, 200, { ok: store.deleteBook(bookRoute[1]) });
       }
       if (path === '/api/books/run' && req.method === 'POST') {
         const status = await bookJobs.run({ force: true });
         const blocked = status.skipped && status.skipped !== 'no_unread_books';
-        return json(res, blocked ? 409 : 200, blocked ? { error: '当前无法读书，请检查开关、模型配置、今日次数和其他任务。', status } : { status });
+        return json(res, blocked ? 409 : 200, blocked ? { error: '当前无法读书，请检查模型配置、今日次数和其他任务。', status } : { status });
       }
       if (path === '/api/expressions' && req.method === 'GET') {
         const preview = entry => ({ ...entry, previewPath: `/api/expressions/${entry.id}/image` });
@@ -547,9 +588,10 @@ const server = http.createServer(async (req, res) => {
         if (memoryRoute[2] && req.method === 'GET') return json(res, 200, { revisions: store.listRevisions(id) });
         if (req.method === 'PATCH') {
           const old = store.getMemory(id); if (!old) return json(res, 404, { error: '记忆不存在。' });
+          proactiveJobs.cancel();
           return json(res, 200, { memory: store.saveMemory({ ...old, ...input, id }) });
         }
-        if (req.method === 'DELETE') { store.deleteMemory(id); return json(res, 200, { ok: true }); }
+        if (req.method === 'DELETE') { proactiveJobs.cancel(); store.deleteMemory(id); return json(res, 200, { ok: true }); }
       }
       if (path === '/api/read' && req.method === 'POST') {
         if (!['owner', 'public', 'group:demo'].includes(input.scope || 'owner')) throw new Error('阅读可见范围无效。');
@@ -561,9 +603,9 @@ const server = http.createServer(async (req, res) => {
         pendingBinding = { hash: createHash('sha256').update(code).digest('hex'), expires: Date.now() + 10 * 60000 };
         return json(res, 200, { code, expiresAt: new Date(pendingBinding.expires).toISOString(), command: `绑定 ${code}` });
       }
-      if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
+      if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { proactiveJobs.cancel(); store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
       if (path === '/api/backups/export' && req.method === 'POST') {
-        if (activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy) return json(res, 409, { error: '请等待当前对话、阅读或自主表达完成再备份。' });
+        if (activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy) return json(res, 409, { error: '请等待当前对话、阅读或自主表达完成再备份。' });
         const archive = encryptBackup(store.exportData(), input.passphrase);
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="persona-${new Date().toISOString().slice(0, 10)}.pab"` });
         return res.end(archive);
@@ -573,7 +615,7 @@ const server = http.createServer(async (req, res) => {
         if (![1, 2, 3].includes(payload.schemaVersion) || !['memories', 'messages', 'events', 'accounts', 'revisions', 'tombstones'].every(key => Array.isArray(payload[key])) || (payload.schemaVersion >= 2 && !['expressions', 'expressionTombstones'].every(key => Array.isArray(payload[key]))) || (payload.schemaVersion === 3 && !Array.isArray(payload.books))) throw new Error('备份数据格式不兼容。');
         if (path.endsWith('/preview')) return json(res, 200, { exportedAt: payload.exportedAt, counts: Object.fromEntries(['memories', 'events', 'messages', 'accounts', 'expressions', 'books'].map(key => [key, payload[key]?.length || 0])) });
         if (input.confirm !== true) throw new Error('请先预览并确认恢复。');
-        if (activeMutation || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再恢复。' });
+        if (activeMutation || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再恢复。' });
         const rollback = join(dataDir, `before-restore-${Date.now()}.pab`);
         writeFileSync(rollback, encryptBackup(store.exportData(), input.passphrase), { mode: 0o600 });
         store.importData(payload);
@@ -590,8 +632,12 @@ const server = http.createServer(async (req, res) => {
         bookJobs.stop();
         store.setSetting('books', { ...store.getSetting('books'), enabled: false });
         bookJobs = makeBookJobs();
+        proactiveJobs.stop();
+        store.setSetting('proactive', { ...store.getSetting('proactive'), enabled: false });
+        store.setSetting('proactiveStatus', {});
+        proactiveJobs = makeProactiveJobs();
         pendingBinding = null;
-        return json(res, 200, { ok: true, rollback, message: '已恢复。QQ、自主活动、自主表达、读书、定时阅读和自动备份已暂停，跨平台账号绑定已清除，需要重新验证。模型密钥与登录密码保持不变。' });
+        return json(res, 200, { ok: true, rollback, message: '已恢复。QQ、自主活动、自主表达、主动私聊、自主读书、定时阅读和自动备份已暂停，跨平台账号绑定已清除，需要重新验证。模型密钥与登录密码保持不变。' });
       }
       return json(res, 404, { error: '接口不存在。' });
     }
@@ -620,6 +666,7 @@ const timer = setInterval(() => {
   autonomyJobs.tick().catch(error => console.error('Autonomy scheduler:', error.message));
   selfExpressionJobs.tick().catch(error => console.error('Expression scheduler:', error.message));
   bookJobs.tick().catch(error => console.error('Book scheduler:', error.message));
+  proactiveJobs.tick().catch(error => console.error('Proactive scheduler:', error.message));
   backupJobs.tick().catch(error => console.error('Backup scheduler:', error.message));
 }, 30000);
 timer.unref();
@@ -628,5 +675,5 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`Data: ${dataDir}`);
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); server.close(() => { store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 3000).unref(); });
+server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); server.close(() => { store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 3000).unref(); });
