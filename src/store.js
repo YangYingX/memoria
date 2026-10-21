@@ -391,10 +391,11 @@ export function createStore(dbPath) {
           AND m.scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted);
       return source ? { ...source } : null;
     },
-    saveMemory(input) {
+    saveMemory(input, { auditEvent } = {}) {
       const fields = memoryFields(input);
       const id = input.id === undefined ? randomUUID() : identifier(input.id, '记忆 ID');
       const now = new Date().toISOString();
+      const audit = auditEvent === undefined ? null : { id: randomUUID(), ...eventFields(auditEvent), createdAt: now };
       return transaction(() => {
         const previous = memoryRow(get('SELECT * FROM memories WHERE id = ?', id));
         if (input.id !== undefined && !previous) invalid('要修改的记忆不存在。');
@@ -404,6 +405,7 @@ export function createStore(dbPath) {
           addRevision(previous, now);
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
         } else insertMemory(memory);
+        if (audit) insertEvent(audit);
         return memory;
       });
     },
@@ -433,8 +435,9 @@ export function createStore(dbPath) {
         return { memory, eventId: event.id, reusedMemory: Boolean(existing) };
       });
     },
-    deleteMemory(id) {
+    deleteMemory(id, { auditEvent } = {}) {
       id = identifier(id, '记忆 ID');
+      const audit = auditEvent === undefined ? null : { id: randomUUID(), ...eventFields(auditEvent), createdAt: new Date().toISOString() };
       return transaction(() => {
         const previous = memoryRow(get('SELECT * FROM memories WHERE id = ?', id));
         if (!previous || previous.deletedAt) return false;
@@ -442,6 +445,7 @@ export function createStore(dbPath) {
         addRevision(previous, now);
         run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id);
         run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now);
+        if (audit) insertEvent(audit);
         return true;
       });
     },

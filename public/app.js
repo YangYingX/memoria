@@ -373,7 +373,7 @@ async function loadEvents() {
     const row = node('div', null, 'event-row');
     const content = node('div');
     const proactiveResult = event.type === 'proactive' ? ` · ${proactiveOutcomes[event.metadata?.outcome] || '结果未确认'}` : '';
-    content.append(node('p', event.type === 'autonomy' ? event.content?.slice(0, 300) : event.metadata?.title || event.content?.slice(0, 140) || event.type), node('span', `${scopes[event.scope] || event.scope} · ${event.type === 'reading' ? '网页阅读' : event.type === 'autonomy' ? '自主浏览' : event.type === 'proactive' ? '主动私聊' : event.type === 'error' ? '未完成的任务' : event.type}${proactiveResult}${event.sourceRef && event.type !== 'proactive' ? ` · ${event.sourceRef}` : ''}`));
+    content.append(node('p', event.type === 'autonomy' ? event.content?.slice(0, 300) : event.metadata?.title || event.content?.slice(0, 140) || event.type), node('span', `${scopes[event.scope] || event.scope} · ${event.type === 'reading' ? '网页阅读' : event.type === 'autonomy' ? '自主浏览' : event.type === 'proactive' ? '主动私聊' : event.type === 'memory_change' ? event.metadata?.action === 'forget' ? '记忆移除' : '记忆更正' : event.type === 'error' ? '未完成的任务' : event.type}${proactiveResult}${event.sourceRef && !['proactive', 'memory_change'].includes(event.type) ? ` · ${event.sourceRef}` : ''}`));
     row.append(node('time', date(event.createdAt)), content);
     $('event-list').append(row);
   }
