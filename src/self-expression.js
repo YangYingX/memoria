@@ -266,7 +266,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
             ...(action.type === 'signature' ? { lastSignature: action.text } : {}), ...(action.type === 'avatar' ? { lastAvatarId: action.avatarId } : {}) }
             : { lastError: outcome.message }) });
         const recorded = event(action.type, outcome.outcome, ['success', 'review'].includes(outcome.outcome) ? (action.type === 'avatar' ? '已更新头像。' : outcome.postText || action.text) : outcome.message,
-          { platform: action.platform, ...outcome, ...(action.type === 'avatar' ? { avatarId: action.avatarId } : {}) });
+          { platform: action.platform, ...outcome, ...(action.title ? { title: action.title } : {}), ...(action.type === 'avatar' ? { avatarId: action.avatarId } : {}) });
         if (recorded && action.type === 'post' && ['success', 'review'].includes(outcome.outcome)) {
           try {
             const name = clipped(platforms[action.platform].name, 80) || action.platform;

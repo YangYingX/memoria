@@ -22,6 +22,7 @@ import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 import { bindOwnerHeybox } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
+import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -68,6 +69,8 @@ let selfExpressionJobs;
 let bookJobs;
 let proactiveJobs;
 let bookConversation = false;
+let communityConversation = false;
+let postInspection = false;
 let receivingBook = '';
 function heyboxRuntime() {
   if (process.platform !== 'win32') throw new Error('客户端小黑盒发帖目前需要 Windows 专用 MuMu 设备。');
@@ -103,7 +106,7 @@ function makeAutonomyJobs() {
         return runtime.readHeyboxArticle(url, options);
       }
     },
-    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy,
+    isBusy: () => activeMutation > (communityConversation ? 1 : 0) || postInspection || readingBusy || backupJobs.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy,
   });
 }
 autonomyJobs = makeAutonomyJobs();
@@ -223,6 +226,28 @@ async function importOnlineBook(url, title) {
   if (page.truncated) throw new Error('本页正文超过书架容量，请分章导入 TXT；本次未保存不完整正文。');
   return store.addBook({ title: title?.trim() || page.title.slice(0, 200), text: page.text, sourceRef: page.url });
 }
+
+const activityActions = {
+  status: () => activitySnapshot(store, { readingStatus: autonomyJobs.status(), expressionStatus: selfExpressionJobs.status() }),
+  browse: async () => {
+    if (communityConversation || postInspection) return { ok: false, skipped: 'busy' };
+    communityConversation = true;
+    try { return communityReadingResult(store, await autonomyJobs.run({ force: true })); }
+    finally { communityConversation = false; }
+  },
+  checkPost: async () => {
+    if (activeMutation > 1 || communityConversation || postInspection || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy
+      || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy) return { ok: false, skipped: 'busy' };
+    postInspection = true;
+    try {
+      return await inspectRecentPost({ store, inspect: async post => {
+        const runtime = heyboxRuntime();
+        await runtime.openHeybox();
+        return runtime.inspectHeyboxPost(post);
+      } });
+    } finally { postInspection = false; }
+  },
+};
 
 const bookActions = {
   list: () => store.listBooks(),
@@ -353,7 +378,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
       const expressions = [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])];
       const collectExpression = origin ? input => store.saveExpression({ ...input, scope, origin, actor }) : undefined;
       return await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, collectExpression,
-        ...(scope === 'owner' && actor === 'owner' ? { bookActions } : {}) });
+        ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions } : {}) });
     }
     finally { activeConversations.delete(scope); }
   });
