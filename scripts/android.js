@@ -8,6 +8,7 @@ import { createMumuRuntime } from '../src/mumu-runtime.js';
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const data = resolve(process.env.PERSONA_DATA_DIR || join(project, 'data'));
 const actions = { check: 'check', inspect: 'inspectHeybox', profile: 'openHeyboxProfile', home: 'openHeyboxHome', settings: 'openHeyboxSettings', editor: 'openHeyboxEditor',
+  compose: 'openHeyboxComposer',
   'profile-apply': 'updateHeyboxProfile', 'avatar-apply': 'updateHeyboxAvatar', 'avatar-access': 'inspectAvatarAccess', refresh: 'refreshHeybox', capture: 'captureHeybox',
   configure: 'configure', start: 'start', stop: 'stop', install: 'installHeybox', open: 'openHeybox', setup: 'setup' };
 try {
@@ -26,7 +27,7 @@ try {
   if (command === 'configure' && !runtime.configure) throw new Error('configure 仅用于 MuMu 专用设备。');
   if (command === 'inspect' && !runtime.inspectHeybox) throw new Error('inspect 仅用于 MuMu 专用设备。');
   if (command === 'profile' && !runtime.openHeyboxProfile) throw new Error('profile 仅用于 MuMu 专用设备。');
-  if (['home', 'settings', 'editor', 'profile-apply', 'avatar-apply', 'avatar-access', 'refresh', 'capture'].includes(command) && !runtime[actions[command]]) throw new Error(`${command} 仅用于 MuMu 专用设备。`);
+  if (['home', 'settings', 'editor', 'compose', 'profile-apply', 'avatar-apply', 'avatar-access', 'refresh', 'capture'].includes(command) && !runtime[actions[command]]) throw new Error(`${command} 仅用于 MuMu 专用设备。`);
   if (command === 'setup') {
     console.log((await runtime.start()).message);
     const deadline = Date.now() + 180000;

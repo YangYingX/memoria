@@ -7,6 +7,9 @@ import { setTimeout } from 'node:timers/promises';
 import { DOMParser } from 'linkedom';
 import { androidDevice, verifyHeyboxApk } from './android-runtime.js';
 
+const POST_PAGES = new Set(['PicturePostPageActivityV2', 'WebNewsPostPageActivityV2']
+  .map(name => `${androidDevice.package}/.module.bbs.post.ui.activitys.v2.${name}`));
+
 function execute(file, args, options) {
   return new Promise(resolve => execFile(file, args, { timeout: 12000, maxBuffer: 1024 * 1024, windowsHide: true, ...options },
     (error, stdout, stderr) => resolve({ ok: !error, exitCode: error?.code ?? 0, stdout: String(stdout || ''), stderr: String(stderr || '') })));
@@ -119,10 +122,11 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     const resumed = activities.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
     const activity = resumed?.match(/\bcom\.max\.xiaoheihe\/[a-zA-Z0-9._$]+/)?.[0];
     if (!activity) throw new Error('请先在 MuMu 专用设备中打开小黑盒，当前未读取其他应用。');
-    const redact = value => String(value || '').replace(/(?<!\d)1\d{10}(?!\d)/g, '[手机号已隐藏]').slice(0, 200);
+    const redact = (value, limit = 200) => String(value || '').replace(/(?<!\d)1\d{10}(?!\d)/g, '[手机号已隐藏]').slice(0, limit);
     if (existsSync(adb) && existsSync(androidCli)) {
       // Input and layout share the CLI's instrumentation connection; standalone uiautomator competes with it.
-      const result = await sdkCommand(serial => ['layout', `--device=${serial}`, '--flat', '--full']);
+      // Animated composer hints may never become idle; activity and fields are checked again after the read.
+      const result = await sdkCommand(serial => ['layout', `--device=${serial}`, '--flat', '--full', '--no-idle']);
       let windows;
       try { windows = JSON.parse(result.stdout); } catch { throw new Error('Android CLI 界面结果无法解析。'); }
       const active = Array.isArray(windows) ? windows.filter(window => window.type === 'APPLICATION' && window.active === true && window.focused === true) : [];
@@ -138,11 +142,13 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
         .map(node => {
           const password = node.password === true || node.state?.includes('PASSWORD') || /password|pwd/i.test(node['resource-id'] || '')
             || (/login|register|password/i.test(activity) && node.class === 'android.widget.EditText');
-          return { id: node['resource-id'] || '', text: password ? '[密码字段已隐藏]' : redact(node.text),
+          const readingBody = POST_PAGES.has(activity) && (node['resource-id'] === `${androidDevice.package}:id/tv_desc`
+            || (!node['resource-id'] && node.class === 'android.widget.TextView'));
+          return { id: node['resource-id'] || '', text: password ? '[密码字段已隐藏]' : redact(node.text, readingBody ? 8000 : 200),
             description: password ? '[密码字段已隐藏]' : redact(node['content-desc']), bounds: node.bounds || '', className: node.class || '',
             clickable: node.interactions?.includes('CLICKABLE') === true, focused: node.state?.includes('FOCUSED') === true,
             enabled: node.enabled !== false && !node.state?.includes('DISABLED') };
-        }).filter(node => node.id || node.text || node.description || node.clickable).slice(0, 160);
+        }).filter(node => node.id || node.text || node.description || node.clickable || node.className === 'android.webkit.WebView').slice(0, 160);
       const current = await androidShell('dumpsys activity activities');
       const currentResumed = current.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
       if (!nodes.length || currentResumed?.match(/\bcom\.max\.xiaoheihe\/[a-zA-Z0-9._$]+/)?.[0] !== activity) {
@@ -220,6 +226,16 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
   }
   async function openHeyboxProfile() {
     let view = await closeAvatarMenu(await readHeyboxView());
+    if (POST_PAGES.has(view.activity)) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/iv_appbar_nav_button`);
+      view = await readHeyboxView();
+    }
+    if (view.activity === `${androidDevice.package}/.module.bbs.post_edit.PostTabActivity`
+      && view.nodes.some(node => node.id === `${androidDevice.package}:id/et_title` && ['', '填写标题'].includes(node.text))
+      && view.nodes.some(node => node.id === `${androidDevice.package}:id/et_content` && ['', '添加正文'].includes(node.text))) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/iv_appbar_nav_button`);
+      view = await readHeyboxView();
+    }
     if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_user_id` && /^\d{5,16}$/.test(node.text))) return profileResult(view);
     for (let step = 0; step < 2 && [`${androidDevice.package}/.module.account.UpdateAccountActivity`, `${androidDevice.package}/.module.account.SettingActivity`].includes(view.activity); step++) {
       await tapHeyboxNode(view, `${androidDevice.package}:id/iv_appbar_nav_button`);
@@ -252,6 +268,65 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
       throw new Error('未回到专用账号的“我”页面，本次未继续操作。');
     }
     return { ...view, accountId: profile.accountId, accountVerified: true };
+  }
+  async function openHeyboxComposer() {
+    const home = await ownProfileHome();
+    await tapHeyboxNode(home, `${androidDevice.package}:id/vg_mid_tab`);
+    return { ...await readHeyboxView(), accountVerified: true };
+  }
+  async function openHeyboxArticle(value, { signal } = {}) {
+    signal?.throwIfAborted();
+    let url;
+    try { url = new URL(value); } catch { throw new Error('请输入有效的小黑盒公开帖子地址。'); }
+    if (url.origin !== 'https://www.xiaoheihe.cn' || !/^\/app\/bbs\/link\/\d{1,20}$/.test(url.pathname)
+      || url.username || url.password || url.search || url.hash) throw new Error('仅支持无查询参数的小黑盒公开帖子地址。');
+    await ownProfileHome();
+    signal?.throwIfAborted();
+    const linkId = url.pathname.split('/').at(-1);
+    const shareUrl = `https://c.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=${linkId}`;
+    const route = await androidShell(`cmd package resolve-activity --brief -a android.intent.action.VIEW -d ${shareUrl} -p ${androidDevice.package}`);
+    if (!route.split(/\r?\n/).some(line => /^com\.max\.xiaoheihe\/[a-zA-Z0-9._$]+$/.test(line.trim()))) throw new Error('小黑盒客户端未提供此公开链接的打开入口。');
+    signal?.throwIfAborted();
+    const started = await androidShell(`am start -W -a android.intent.action.VIEW -d ${shareUrl} -p ${androidDevice.package}`);
+    if (!/^Status: ok\s*$/m.test(started)) throw new Error('小黑盒客户端未确认打开帖子。');
+    signal?.throwIfAborted();
+    return { ...await readHeyboxView(), url: url.href, accountVerified: true };
+  }
+  async function readHeyboxArticle(url, { expectedTitle, signal } = {}) {
+    if (typeof expectedTitle !== 'string' || !expectedTitle.trim() || expectedTitle.length > 500) throw new Error('客户端阅读需要公开列表中的帖子标题来核对来源。');
+    let view = await openHeyboxArticle(url, { signal });
+    const expected = expectedTitle.replace(/\s+/g, ' ').trim();
+    for (let attempt = 0; attempt < 4; attempt++) {
+      signal?.throwIfAborted();
+      if (!POST_PAGES.has(view.activity)) throw new Error('客户端尚未进入支持的公开帖子页，未记为已读。');
+      const article = view.activity.endsWith('.WebNewsPostPageActivityV2');
+      const titles = view.nodes.filter(node => (article ? !node.id && node.className === 'android.widget.TextView' : node.id === `${androidDevice.package}:id/tv_title`)
+        && node.text.replace(/\s+/g, ' ').trim() === expected);
+      let body = '';
+      if (article && titles.length === 1) {
+        const box = value => value.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/)?.slice(1).map(Number);
+        const frames = [...new Set(view.nodes.filter(node => node.className === 'android.webkit.WebView').map(node => node.bounds))].map(box).filter(Boolean);
+        const heading = box(titles[0].bounds);
+        if (frames.length === 1 && heading) {
+          const frame = frames[0];
+          body = view.nodes.filter(node => !node.id && node.className === 'android.widget.TextView'
+            && node.text.trim() && node.text !== expected && node.text !== '包含AI辅助创作')
+            .filter(node => { const area = box(node.bounds); return area && area[1] >= heading[3] && area[0] >= frame[0] && area[2] <= frame[2]
+              && area[1] >= frame[1] && area[3] <= frame[3] && area[2] - area[0] >= (frame[2] - frame[0]) * 0.75; })
+            .map(node => node.text.trim()).join('\n\n').slice(0, 8000);
+        }
+      } else if (!article) {
+        const bodies = view.nodes.filter(node => node.id === `${androidDevice.package}:id/tv_desc` && node.className === 'android.widget.TextView');
+        if (bodies.length === 1) body = bodies[0].text.trim();
+      }
+      if (titles.length === 1 && body.length >= 40) {
+        const text = `【客户端可访问的正文文字摘录；未读取图片、视频或未显示的内容】\n${body}`;
+        return { url: view.url || url, title: expected, text, excerpt: text.slice(0, 300), truncated: true,
+          readAt: new Date().toISOString(), source: 'android_ui' };
+      }
+      if (attempt < 3) { await setTimeout(500); view = await readHeyboxView(); }
+    }
+    throw new Error('客户端帖子标题未匹配公开来源，或可访问文字不足；未记为已读。');
   }
   async function profileSettings() {
     if (!expectedAccountId) throw new Error('请先在本机配置中绑定小黑盒专用账号 ID。');
@@ -673,6 +748,9 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     inspectHeybox: () => exclusive(readHeyboxView),
     openHeyboxProfile: () => exclusive(openHeyboxProfile),
     openHeyboxHome: () => exclusive(ownProfileHome),
+    openHeyboxComposer: () => exclusive(openHeyboxComposer),
+    openHeyboxArticle: url => exclusive(() => openHeyboxArticle(url)),
+    readHeyboxArticle: (url, options) => exclusive(() => readHeyboxArticle(url, options)),
     openHeyboxSettings: () => exclusive(profileSettings),
     openHeyboxEditor: () => exclusive(profileEditor),
     updateHeyboxProfile: input => exclusive(() => updateHeyboxProfile(input)),

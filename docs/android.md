@@ -1,6 +1,6 @@
 # 小黑盒专用安卓设备
 
-Windows 上可使用项目命令管理专用 MuMu 设备、打开小黑盒、核对账号 ID，以及设置昵称、签名和初始头像。这些命令通过 MuMu 官方管理工具和 Android 接口执行，可由本机脚本独立调用。当前入口尚未接入聊天工具、定时发帖或评论。
+Windows 上可使用项目命令管理专用 MuMu 设备、打开小黑盒、核对账号 ID，以及设置昵称、签名和初始头像。这些命令通过 MuMu 官方管理工具和 Android 接口执行，可由本机脚本独立调用。自主浏览可使用客户端读取支持的公开图文文字；自动发帖和评论尚未接入。
 
 MuMu 是可选的 Windows 设备环境；Memoria 主服务仍可部署在 Windows、Linux。本页的 MuMu 命令已在 MuMu 6.8.7、Android 15、小黑盒 1.3.398 上实机核验，不代表 MuMu 可以在 Linux 上运行。
 
@@ -99,6 +99,7 @@ node scripts/android.js start
 node scripts/android.js open
 node scripts/android.js inspect
 node scripts/android.js home
+node scripts/android.js compose
 node scripts/android.js refresh
 node scripts/android.js capture
 node scripts/android.js stop
@@ -107,3 +108,7 @@ node scripts/android.js stop
 `inspect` 返回当前小黑盒界面的结构化信息，隐藏密码字段和手机号，并删除临时界面快照。`home` 返回已核对专用账号的“我”页面；`refresh` 重新打开应用并核对账号，保留登录数据。`capture` 只在小黑盒非登录界面生成本机 PNG，保存在 `<root>/logs`，查看后可自行删除。`stop` 区分已请求关闭与实际关闭状态。界面结构变化、登录失效或出现其他应用时，应先核对实际页面，再重试相应命令。
 
 MuMu、系统镜像和小黑盒应用需要单独安装，本仓库不分发这些软件。MuMu 命令说明见 [官方开发者文档](https://mumu.163.com/help/20240726/35047_1170006.html)。
+
+`compose` 只在核对专用账号后打开发帖编辑器，不填入或发布内容。已有非空草稿时应先在应用中处理，项目不会自动丢弃它。
+
+开启自主浏览后，独立浏览器正文读取失败且专用设备已启动、已登录时，主服务可调用客户端的官方分享链接入口读取同一公开帖子。当前支持可访问文字不少于 40 字的图文帖和文章首屏文字，必须与公开列表标题匹配。读取保留来源，并统一标为局部摘录；不识别帖子图片、不阅读视频，也不自动处理登录、权限或验证码。界面变更、账号不符、标题不符或文字不足时停止，不记为已读。核心服务部署在 Linux 时仍使用独立浏览器，不调用 Windows 的 MuMu。
