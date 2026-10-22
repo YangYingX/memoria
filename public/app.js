@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const labels = { chat: '对话实验室', memories: '记忆书架', reading: '网页阅读', books: '书房', expressions: '表情库', identity: '身份与备份', settings: '人格与设置' };
-const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'book-note': '读书笔记', promise: '约定' };
+const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'reading-note': '读后思考', 'book-note': '读书笔记', promise: '约定' };
 const scopes = { owner: '仅创建人', public: '公开记忆', 'group:demo': '演练群聊' };
 const proactiveOutcomes = { quiet: '这次保持安静', attempt: '已尝试，等待确认', pending: '等待平台确认', success: '已确认发送', unknown: '发送结果未确认', error: '未能完成', cancelled: '已取消', busy: '等空闲时再聊', limit: '今日额度已用完', deciding: '正在考虑分享', missed: '错过的机会已跳过' };
 const state = { status: {}, data: null, page: 'chat', scope: 'owner', memories: [], books: [], expressions: new Map(), busyChat: false, preview: null };
@@ -536,11 +536,11 @@ function renderAutonomyStatus(status = {}) {
   $('autonomy-next').textContent = next;
   $('autonomy-count').textContent = limit !== null ? `${count} / ${limit} 次` : `${count} 次 · 尚未安排`;
   const outcomes = { success: '阅读完成', skipped: '未新增阅读', cancelled: '已取消', error: '未能完成' };
-  $('autonomy-outcome').textContent = status.busy ? '正在浏览…' : outcomes[status.lastOutcome] || '还没有记录';
+  $('autonomy-outcome').textContent = status.busy ? '正在浏览与思考…' : status.lastOutcome === 'success' && status.lastReflectionOutcome === 'success' ? '阅读与笔记已完成' : outcomes[status.lastOutcome] || '还没有记录';
   $('autonomy-last').hidden = !status.lastAttempt;
   $('autonomy-last').textContent = status.lastAttempt ? `最近活动：${date(status.lastAttempt)}${status.lastTitle ? ` · ${status.lastTitle}` : ''}${status.lastUrl ? ` · ${status.lastUrl}` : ''}` : '';
-  $('autonomy-error').hidden = !status.lastError;
-  $('autonomy-error').textContent = status.lastError || '';
+  $('autonomy-error').hidden = !status.lastError && !status.lastReflectionError;
+  $('autonomy-error').textContent = status.lastError || status.lastReflectionError || '';
   $('autonomy-run').disabled = Boolean(status.busy || !config.enabled || (limit !== null && count >= limit));
 }
 
@@ -824,6 +824,14 @@ $('self-expression-run').addEventListener('click', () => action($('self-expressi
   }
 }).finally(() => renderSelfExpressionStatus(state.data?.selfExpressionStatus)));
 $('refresh-accounts').addEventListener('click', () => action($('refresh-accounts'), () => loadState()));
+$('heybox-binding-form').addEventListener('submit', event => {
+  event.preventDefault();
+  action(event.currentTarget, async () => {
+    await api('/api/bindings/heybox', { method: 'POST', data: { userId: $('heybox-owner-id').value.trim() } });
+    $('heybox-owner-id').value = '';
+    await loadState(); toast('已记住创建人的小黑盒账号。');
+  });
+});
 $('binding-code').addEventListener('click', () => action($('binding-code'), async () => {
   const binding = await api('/api/bindings/code', { method: 'POST', data: {} });
   $('binding-command').textContent = binding.command;

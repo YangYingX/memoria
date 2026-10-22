@@ -69,7 +69,7 @@ function conversationInterests(store) {
   return evidence;
 }
 
-export function createAutonomyJobs({ store, discoverPosts, readPost, isBusy = () => false, clock = Date.now, random = Math.random }) {
+export function createAutonomyJobs({ store, discoverPosts, readPost, reflect, isBusy = () => false, clock = Date.now, random = Math.random }) {
   let busy = false, stopped = false, controller;
   const now = () => Number(clock());
   const draw = () => Math.min(0.999999999, Math.max(0, Number(random()) || 0));
@@ -143,7 +143,7 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, isBusy = ()
       && (!interestSnapshot || interestSnapshot === interestInputs());
     const check = () => { if (!current()) throw new Error('自主活动已取消。'); };
     const source = config.sources[Math.floor(draw() * config.sources.length)];
-    let url = SOURCE_URLS[source], title = '', selected = false;
+    let url = SOURCE_URLS[source], title = '', selected = false, readingSaved = false;
     function event(outcome, content, metadata = {}) {
       store.addEvent({ type: outcome === 'error' ? 'error' : 'autonomy', scope: 'owner', actor: 'scheduler',
         content, sourceRef: url, metadata: { source, outcome, title, ...metadata } });
@@ -218,17 +218,39 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, isBusy = ()
         return { ...status(), busy: false, skipped: 'already_read' };
       }
       const reading = store.recordReading({ page, scope: 'owner', actor: 'scheduler' });
+      readingSaved = true;
       title = String(page.title).replace(/\0/g, '').slice(0, 500);
       event('success', `阅读了《${title}》。选择方式：${reason}`, { reason,
         matchedKeywords: interestSelection === 'selected' ? [] : post.matched.slice(0, 30), interestSelection, interestMemoryIds, memoryId: reading.memory.id });
-      save({ ...state, lastOutcome: 'success', lastSuccess: new Date(now()).toISOString(), lastUrl: url, lastTitle: title, lastError: '' });
+      const reflection = { lastReflectionOutcome: 'no_model', lastReflectionError: '', lastReflectionMemoryId: '' };
+      if (typeof reflect === 'function' && store.getSetting('model')?.apiKey) {
+        if (isBusy()) reflection.lastReflectionOutcome = 'busy';
+        else try {
+          const previousNotes = store.listReadingReflections(['owner'], 3).filter(item => {
+            try { const address = new URL(item.sourceRef); return address.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(address.pathname) && !address.search && !address.hash; }
+            catch { return false; }
+          }).map(item => ({ title: item.title, note: item.note.slice(0, 800), sourceRef: item.sourceRef, createdAt: item.createdAt }));
+          const note = await reflect({ title, url, excerpt: page.text.slice(0, 8000), readAt: page.readAt,
+            truncated: Boolean(page.truncated || page.text.length > 8000), previousNotes, signal: activeController.signal });
+          check();
+          if (isBusy()) reflection.lastReflectionOutcome = 'busy';
+          else {
+            const saved = store.recordReadingReflection({ readingEventId: reading.eventId, note });
+            reflection.lastReflectionOutcome = 'success'; reflection.lastReflectionMemoryId = saved.memory.id;
+          }
+        } catch {
+          check();
+          reflection.lastReflectionOutcome = 'error'; reflection.lastReflectionError = '本次读后思考未完成，原阅读记录已保留；不自动重试。';
+        }
+      }
+      save({ ...state, lastOutcome: 'success', lastSuccess: new Date(now()).toISOString(), lastUrl: url, lastTitle: title, lastError: '', ...reflection });
       return { ...status(), busy: false };
     } catch (error) {
       if (stopped) return { ...state, busy: false, skipped: 'stopped' };
       if (!current()) {
         const latest = store.getSetting('autonomyStatus', {});
         if (latest.dayId === state.dayId) {
-          event('skipped', '本次自主活动已取消，未继续读取或保存帖子。', { reason: 'cancelled' });
+          event('skipped', readingSaved ? '本次读后思考已取消，原阅读记录已保留。' : '本次自主活动已取消，未继续读取或保存帖子。', { reason: 'cancelled' });
           save({ ...latest, lastOutcome: 'cancelled', lastError: '', lastUrl: url, lastTitle: title });
         }
         return { ...status(), busy: false, skipped: 'cancelled' };

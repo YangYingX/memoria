@@ -435,6 +435,41 @@ export function createStore(dbPath) {
         return { memory, eventId: event.id, reusedMemory: Boolean(existing) };
       });
     },
+    recordReadingReflection({ readingEventId, note }) {
+      readingEventId = identifier(readingEventId, '阅读经历 ID');
+      note = text(note, '读后思考', 2000);
+      return transaction(() => {
+        const row = get("SELECT * FROM events WHERE id = ? AND type = 'reading' AND actor = 'scheduler'", readingEventId);
+        const reading = row && eventRow(row);
+        const original = typeof reading?.metadata?.memoryId === 'string' && memoryRow(get('SELECT * FROM memories WHERE id = ?', reading.metadata.memoryId));
+        if (!original || original.deletedAt || original.scope !== reading.scope || original.sourceType !== 'webpage'
+          || original.category !== 'reading' || original.sourceRef !== reading.sourceRef || original.content !== reading.content) invalid('原阅读记录已改变，未保存读后思考。');
+        if (get("SELECT 1 FROM events WHERE type = 'reading_reflection' AND json_extract(metadata, '$.readingEventId') = ?", readingEventId)) invalid('该次阅读已有思考记录，不重复生成。');
+        const now = new Date().toISOString();
+        const memory = { id: randomUUID(), ...memoryFields({ title: `读后思考 · ${original.title}`.slice(0, 200), content: note,
+          category: 'reading-note', scope: original.scope, sourceType: 'reflection', sourceRef: original.sourceRef }), createdAt: now, updatedAt: now, deletedAt: null };
+        const event = { id: randomUUID(), ...eventFields({ type: 'reading_reflection', scope: memory.scope, actor: 'scheduler',
+          content: note, sourceRef: memory.sourceRef, metadata: { title: memory.title, memoryId: memory.id, readingMemoryId: original.id, readingEventId } }), createdAt: now };
+        insertMemory(memory); insertEvent(event);
+        return { memory, eventId: event.id };
+      });
+    },
+    listReadingReflections(scopes, limit = 3) {
+      if (!Array.isArray(scopes) || scopes.length > 100) invalid('思考索引须提供明确的可见范围。');
+      const permitted = [...new Set(scopes.map(scopeValue))];
+      limit = integer(limit, '思考条数', 1, 10);
+      if (!permitted.length) return [];
+      return all(`SELECT m.id AS memoryId, m.title, e.content AS note, e.source_ref AS sourceRef, e.created_at AS createdAt
+        FROM events e JOIN memories m ON m.id = json_extract(e.metadata, '$.memoryId')
+        JOIN events r ON r.id = json_extract(e.metadata, '$.readingEventId')
+        JOIN memories original ON original.id = json_extract(e.metadata, '$.readingMemoryId')
+        WHERE e.type = 'reading_reflection' AND e.actor = 'scheduler' AND r.type = 'reading' AND r.actor = 'scheduler'
+          AND e.scope IN (${permitted.map(() => '?').join(',')}) AND m.scope = e.scope AND r.scope = e.scope AND original.scope = e.scope
+          AND m.deleted_at IS NULL AND original.deleted_at IS NULL AND m.source_type = 'reflection' AND m.category = 'reading-note'
+          AND m.source_ref = e.source_ref AND r.source_ref = e.source_ref AND original.source_ref = e.source_ref
+          AND m.content = e.content AND original.content = r.content AND original.id = json_extract(r.metadata, '$.memoryId')
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT ?`, ...permitted, limit);
+    },
     deleteMemory(id, { auditEvent } = {}) {
       id = identifier(id, '记忆 ID');
       const audit = auditEvent === undefined ? null : { id: randomUUID(), ...eventFields(auditEvent), createdAt: new Date().toISOString() };
@@ -463,7 +498,8 @@ export function createStore(dbPath) {
           AND e.scope IN (${permitted.map(() => '?').join(',')}) AND m.scope = e.scope
           AND m.deleted_at IS NULL AND m.source_ref = e.source_ref
           AND ((e.type = 'reading' AND m.source_type = 'webpage' AND m.category = 'reading')
-            OR (e.type = 'book_reading' AND m.source_type = 'book' AND m.category = 'book-note'))
+            OR (e.type = 'book_reading' AND m.source_type = 'book' AND m.category = 'book-note')
+            OR (e.type = 'reading_reflection' AND m.source_type = 'reflection' AND m.category = 'reading-note'))
       ) SELECT memoryId, title, scope, type, readAt FROM readings WHERE occurrence = 1
         ORDER BY readAt DESC, sequence DESC LIMIT ?`, ...permitted, limit)
         .map(item => ({ ...item, title: item.title.slice(0, 120) }));

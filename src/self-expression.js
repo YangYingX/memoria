@@ -14,6 +14,7 @@ export const SELF_EXPRESSION_INSTRUCTIONS = `你在决定是否进行公开的�
 仅根据给出的公开阅读和人格表达原创感想，不引用、推测或暗示私人聊天、群友经历、账号信息或群友图片。
 心情是角色表达，不将它描述成已验证的真实体验；不能编造实际做过的活动、听过的音乐、见过的人或读过的内容。
 分享阅读时只使用给出的来源，区分原文说法与自己的感想。头像只能选给出的 avatarId，不能输出网址或文件路径。
+readingNotes 是你在只使用公开帖子时留下的旧思考，并不代表已证实的事实；可以自然延续或修正观点，不能照搬成亲身经历。
 返回 JSON 对象 {mood,reason,actions}；mood 最多 80 字，reason 最多 300 字；actions 每个平台每类最多一个。
 动作格式为 {platform,type,text} 或 {platform,type:"avatar",avatarId}，type 只可为给出的 post/signature/avatar；post 最多 800 字，signature 最多 80 字。`;
 
@@ -203,8 +204,12 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
         check();
       }
       const readings = store.listEvents({ scope: 'owner', limit: 200 }).map(publicReading).filter(Boolean).slice(0, 6);
+      const readingNotes = store.listReadingReflections(['owner'], 3).filter(item => {
+        try { const url = new URL(item.sourceRef); return url.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(url.pathname) && !url.search && !url.hash; }
+        catch { return false; }
+      }).map(item => ({ title: clipped(item.title, 300), note: clipped(item.note, 1200), url: item.sourceRef, createdAt: item.createdAt }));
       const decision = validateDecision(await generate({ persona: store.getSetting('persona', {}), previousMood: clipped(state.mood, 80),
-        readings, avatars, platforms: allowed, instructions: SELF_EXPRESSION_INSTRUCTIONS, signal: activeController.signal }), allowed, avatars);
+        readings, readingNotes, avatars, platforms: allowed, instructions: SELF_EXPRESSION_INSTRUCTIONS, signal: activeController.signal }), allowed, avatars);
       check(); update({ mood: decision.mood, reason: decision.reason, lastOutcome: decision.actions.length ? 'decided' : 'quiet' });
       event('decision', 'success', decision.reason, { mood: decision.mood, actions: decision.actions.map(({ platform, type }) => ({ platform, type })), sources: readings.map(reading => reading.url) });
       for (const action of decision.actions) {
