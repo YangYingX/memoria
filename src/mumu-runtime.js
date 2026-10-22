@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { freemem } from 'node:os';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { setTimeout } from 'node:timers/promises';
 import { DOMParser } from 'linkedom';
 import { androidDevice, verifyHeyboxApk } from './android-runtime.js';
 
@@ -11,7 +12,7 @@ function execute(file, args, options) {
     (error, stdout, stderr) => resolve({ ok: !error, exitCode: error?.code ?? 0, stdout: String(stdout || ''), stderr: String(stderr || '') })));
 }
 
-export function createMumuRuntime({ root, manager, index, createdTimestamp, deviceName, androidVersion = '15', expectedAccountId, run = execute, availableMemory = freemem }) {
+export function createMumuRuntime({ root, manager, index, createdTimestamp, deviceName, androidVersion = '15', expectedAccountId, androidCli, run = execute, availableMemory = freemem }) {
   for (const path of [root, manager]) {
     if (typeof path !== 'string' || !isAbsolute(path) || path.length > 2048 || path.includes('\0') || /^\\\\/.test(path)) {
       throw new Error('请配置 MuMu 管理工具与安卓资源的本机绝对路径。');
@@ -31,10 +32,18 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
   root = resolve(root);
   manager = resolve(manager);
   index = String(index);
+  androidCli ??= join(root, 'user', 'bin', 'android-cli.exe');
+  if (typeof androidCli !== 'string' || !isAbsolute(androidCli) || androidCli.includes('\0') || /^\\\\/.test(androidCli)
+    || !['android-cli.exe', 'android.exe'].includes(basename(androidCli).toLowerCase())) throw new Error('请核对本机 Google Android CLI 路径。');
+  const sdk = join(root, 'sdk');
+  const adb = join(sdk, 'platform-tools', 'adb.exe');
+  const avatarStatePath = join(root, 'user', 'heybox-avatar-state.json');
   let busy = false;
+  let sdkConnection;
   const control = (...args) => ['control', '-v', index, '--version', androidVersion, ...args];
   const defaults = { performance_mode: 'custom', 'performance_cpu.custom': '2', 'performance_mem.custom': '2',
     resolution_mode: 'custom', 'resolution_width.custom': '720', 'resolution_height.custom': '1280', 'resolution_dpi.custom': '320' };
+  const avatarPermissionMessages = ['要允许“小黑盒”访问此设备上的照片和视频吗？', '允许小黑盒访问此设备上的更多照片和视频？'];
   async function request(args, { json = true, timeout = 12000 } = {}) {
     const result = await run(manager, args, { timeout, cwd: dirname(manager) });
     if (!result.ok) throw new Error('MuMu 管理命令未确认成功，请检查专用设备状态。');
@@ -97,22 +106,64 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     return result.stdout;
   }
   async function readHeyboxView() {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { return await readHeyboxViewOnce(); }
+      catch (error) {
+        if (attempt === 2 || !/读取时小黑盒界面已变化|没有取得专用小黑盒的活动窗口/.test(error.message)) throw error;
+        await setTimeout(300);
+      }
+    }
+  }
+  async function readHeyboxViewOnce() {
     const activities = await androidShell('dumpsys activity activities');
     const resumed = activities.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
     const activity = resumed?.match(/\bcom\.max\.xiaoheihe\/[a-zA-Z0-9._$]+/)?.[0];
     if (!activity) throw new Error('请先在 MuMu 专用设备中打开小黑盒，当前未读取其他应用。');
+    const redact = value => String(value || '').replace(/(?<!\d)1\d{10}(?!\d)/g, '[手机号已隐藏]').slice(0, 200);
+    if (existsSync(adb) && existsSync(androidCli)) {
+      // Input and layout share the CLI's instrumentation connection; standalone uiautomator competes with it.
+      const result = await sdkCommand(serial => ['layout', `--device=${serial}`, '--flat', '--full']);
+      let windows;
+      try { windows = JSON.parse(result.stdout); } catch { throw new Error('Android CLI 界面结果无法解析。'); }
+      const active = Array.isArray(windows) ? windows.filter(window => window.type === 'APPLICATION' && window.active === true && window.focused === true) : [];
+      const avatarAccessDialog = activity === `${androidDevice.package}/.module.account.UpdateAccountActivity`
+        && active.length === 1 && Array.isArray(active[0].content)
+        && active[0].content.some(node => node['resource-id'] === 'android:id/message' && node.text === '【图片选择器需要授予访问存储权限】');
+      if (active.length !== 1 || !Array.isArray(active[0].content)
+        || (!avatarAccessDialog && !active[0].content.some(node => node['resource-id']?.startsWith(`${androidDevice.package}:id/`)))) {
+        throw new Error('没有取得专用小黑盒的活动窗口，本次未读取其他应用。');
+      }
+      const nodes = active[0].content.filter(node => !node.hidden && !node['off-screen'])
+        .filter(node => !node['resource-id'] || node['resource-id'].startsWith(`${androidDevice.package}:id/`) || node['resource-id'].startsWith('android:id/'))
+        .map(node => {
+          const password = node.password === true || node.state?.includes('PASSWORD') || /password|pwd/i.test(node['resource-id'] || '')
+            || (/login|register|password/i.test(activity) && node.class === 'android.widget.EditText');
+          return { id: node['resource-id'] || '', text: password ? '[密码字段已隐藏]' : redact(node.text),
+            description: password ? '[密码字段已隐藏]' : redact(node['content-desc']), bounds: node.bounds || '', className: node.class || '',
+            clickable: node.interactions?.includes('CLICKABLE') === true, focused: node.state?.includes('FOCUSED') === true,
+            enabled: node.enabled !== false && !node.state?.includes('DISABLED') };
+        }).filter(node => node.id || node.text || node.description || node.clickable).slice(0, 160);
+      const current = await androidShell('dumpsys activity activities');
+      const currentResumed = current.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
+      if (!nodes.length || currentResumed?.match(/\bcom\.max\.xiaoheihe\/[a-zA-Z0-9._$]+/)?.[0] !== activity) {
+        throw new Error('读取时小黑盒界面已变化，请重新读取。');
+      }
+      return { source: 'android_ui', package: androidDevice.package, activity, nodes };
+    }
     const snapshot = `/data/local/tmp/memoria-heybox-${randomUUID()}.xml`;
     try {
       await androidShell(`uiautomator dump ${snapshot}`);
       const xml = await androidShell(`cat ${snapshot}`);
       if (!xml.trim().endsWith('</hierarchy>')) throw new Error('Android 界面快照不完整，本次未读取账号资料。');
-      const document = new DOMParser().parseFromString(xml, 'text/xml');
-      const redact = value => (value || '').replace(/(?<!\d)1\d{10}(?!\d)/g, '[手机号已隐藏]').slice(0, 200);
+      // Read the flattened UI nodes with decoded attribute entities; linkedom XML mode preserves &amp; and &lt;.
+      const document = new DOMParser().parseFromString(xml, 'text/html');
       const nodes = Array.from(document.querySelectorAll('node')).filter(node => node.getAttribute('package') === androidDevice.package)
         .map(node => ({ id: node.getAttribute('resource-id') || '', text: node.getAttribute('password') === 'true' ? '[密码字段已隐藏]' : redact(node.getAttribute('text')),
           description: node.getAttribute('password') === 'true' ? '[密码字段已隐藏]' : redact(node.getAttribute('content-desc')),
-          bounds: node.getAttribute('bounds') || '', clickable: node.getAttribute('clickable') === 'true' }))
-        .filter(node => node.id || node.text || node.description).slice(0, 160);
+            bounds: node.getAttribute('bounds') || '', className: node.getAttribute('class') || '',
+            clickable: node.getAttribute('clickable') === 'true', focused: node.getAttribute('focused') === 'true',
+            enabled: node.getAttribute('enabled') === 'true' }))
+        .filter(node => node.id || node.text || node.description || node.clickable).slice(0, 160);
       if (!nodes.length) throw new Error('没有取得小黑盒的可核验界面，本次未读取账号资料。');
       return { source: 'android_ui', package: androidDevice.package, activity, nodes };
     } finally {
@@ -122,15 +173,43 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
   async function tapHeyboxNode(view, id) {
     const matches = view.nodes.filter(node => node.id === id && node.clickable);
     if (matches.length !== 1) throw new Error('没有唯一可核验的小黑盒资料入口，本次未点击。');
-    const bounds = matches[0].bounds.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/)?.slice(1).map(Number);
+    return tapHeyboxTarget(view, matches[0]);
+  }
+  async function tapHeyboxLabel(view, text) {
+    const labels = view.nodes.filter(node => node.text === text);
+    if (labels.length !== 1) throw new Error('没有唯一可核验的小黑盒菜单文字，本次未点击。');
+    const bounds = value => value.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/)?.slice(1).map(Number);
+    const label = bounds(labels[0].bounds);
+    if (!label) throw new Error('小黑盒菜单文字的位置无法核验。');
+    const candidates = view.nodes.filter(node => node.clickable && node.enabled).map(node => ({ node, box: bounds(node.bounds) }))
+      .filter(({ box }) => box && box[0] <= label[0] && box[1] <= label[1] && box[2] >= label[2] && box[3] >= label[3])
+      .map(item => ({ ...item, area: (item.box[2] - item.box[0]) * (item.box[3] - item.box[1]) })).sort((a, b) => a.area - b.area);
+    if (!candidates.length || candidates[0].area === candidates[1]?.area) throw new Error('小黑盒菜单点击区域不唯一。');
+    return tapHeyboxTarget(view, candidates[0].node);
+  }
+  async function tapHeyboxTarget(view, node) {
+    const bounds = node.bounds.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/)?.slice(1).map(Number);
     if (!bounds || bounds[0] >= bounds[2] || bounds[1] >= bounds[3] || bounds.some(value => value > 8192)) {
       throw new Error('小黑盒资料入口的位置无法核验，本次未点击。');
     }
     const activities = await androidShell('dumpsys activity activities');
     const resumed = activities.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
-    const currentActivity = resumed?.match(/\bcom\.max\.xiaoheihe\/[a-zA-Z0-9._$]+/)?.[0];
+    const currentActivity = resumed?.match(/\b[a-zA-Z][\w.]+\/[a-zA-Z0-9._$]+/)?.[0];
     if (currentActivity !== view.activity) throw new Error('小黑盒当前界面已变化，请重新读取。');
     await androidShell(`input tap ${Math.floor((bounds[0] + bounds[2]) / 2)} ${Math.floor((bounds[1] + bounds[3]) / 2)}`);
+  }
+  async function closeAvatarMenu(view) {
+    if (view.activity === `${androidDevice.package}/.module.account.UpdateAccountActivity`
+      && view.nodes.some(node => node.id === 'android:id/message' && node.text === '【图片选择器需要授予访问存储权限】')) {
+      await tapHeyboxNode(view, 'android:id/button2');
+      return readHeyboxView();
+    }
+    if (view.activity === `${androidDevice.package}/.module.account.UpdateAccountActivity`
+      && ['更换头像', '更换头像框'].every(text => view.nodes.some(node => node.text === text))) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/cv_cancel`);
+      return readHeyboxView();
+    }
+    return view;
   }
   function profileResult(view) {
     const ids = view.nodes.filter(node => node.id === `${androidDevice.package}:id/tv_user_id` && /^\d{5,16}$/.test(node.text));
@@ -139,23 +218,488 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     if (expectedAccountId && accountId !== expectedAccountId) throw new Error('当前小黑盒账号与本机绑定不一致，未执行后续操作。');
     return { ...view, accountId, accountVerified: Boolean(expectedAccountId) };
   }
+  async function openHeyboxProfile() {
+    let view = await closeAvatarMenu(await readHeyboxView());
+    if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_user_id` && /^\d{5,16}$/.test(node.text))) return profileResult(view);
+    for (let step = 0; step < 2 && [`${androidDevice.package}/.module.account.UpdateAccountActivity`, `${androidDevice.package}/.module.account.SettingActivity`].includes(view.activity); step++) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/iv_appbar_nav_button`);
+      view = await readHeyboxView();
+    }
+    for (let step = 0; step < 2 && view.activity === `${androidDevice.package}/.module.account.GameAccountActivityV2`; step++) {
+      await androidShell('input keyevent 4');
+      view = await readHeyboxView();
+    }
+    if (view.activity !== `${androidDevice.package}/.MainActivity`) throw new Error('请先在小黑盒打开“我”页面，再读取个人主页。');
+    if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_title` && node.text === '绑定Steam领取5元优惠券')) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/iv_close`);
+      view = await readHeyboxView();
+    }
+    if (!view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_me_home_fragment_username`)) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/rb_5`);
+      view = await readHeyboxView();
+    }
+    await tapHeyboxNode(view, `${androidDevice.package}:id/tv_me_home_fragment_username`);
+    return profileResult(await readHeyboxView());
+  }
+  async function ownProfileHome() {
+    if (!expectedAccountId) throw new Error('请先在本机配置中绑定小黑盒专用账号 ID。');
+    const profile = await openHeyboxProfile();
+    if (!profile.accountVerified) throw new Error('小黑盒专用账号尚未核对。');
+    await androidShell('input keyevent 4');
+    const view = await readHeyboxView();
+    if (view.activity !== `${androidDevice.package}/.MainActivity`
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_me_home_fragment_username`)) {
+      throw new Error('未回到专用账号的“我”页面，本次未继续操作。');
+    }
+    return { ...view, accountId: profile.accountId, accountVerified: true };
+  }
+  async function profileSettings() {
+    if (!expectedAccountId) throw new Error('请先在本机配置中绑定小黑盒专用账号 ID。');
+    let view = await closeAvatarMenu(await readHeyboxView());
+    if (view.activity === `${androidDevice.package}/.module.account.UpdateAccountActivity`) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/iv_appbar_nav_button`);
+      view = await readHeyboxView();
+    }
+    if (view.activity !== `${androidDevice.package}/.module.account.SettingActivity`) {
+      const home = await ownProfileHome();
+      await tapHeyboxNode(home, `${androidDevice.package}:id/iv_home_search`);
+      view = await readHeyboxView();
+    }
+    if (view.activity !== `${androidDevice.package}/.module.account.SettingActivity`
+      || !view.nodes.some(node => node.text === '设置')
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_id` && node.text === `ID:${expectedAccountId}`)) {
+      throw new Error('小黑盒设置页或账号 ID 与预期不符，本次未继续操作。');
+    }
+    return view;
+  }
+  function profileEditorView(view) {
+    if (view.activity !== `${androidDevice.package}/.module.account.UpdateAccountActivity`
+      || !view.nodes.some(node => node.text === '个人信息')
+      || !['et_nick', 'et_signature'].every(id => view.nodes.filter(node => node.id === `${androidDevice.package}:id/${id}`
+        && node.className === 'android.widget.EditText' && node.enabled).length === 1)) {
+      throw new Error('小黑盒资料编辑界面与预期不符，本次未继续操作。');
+    }
+    return view;
+  }
+  async function profileEditor() {
+    const settings = await profileSettings();
+    await tapHeyboxNode(settings, `${androidDevice.package}:id/vg_user_info`);
+    return profileEditorView(await readHeyboxView());
+  }
+  async function replaceProfileText(view, id, text) {
+    await tapHeyboxNode(profileEditorView(view), id);
+    view = profileEditorView(await readHeyboxView());
+    if (!view.nodes.some(node => node.id === id && node.focused && node.enabled)) throw new Error('资料输入框未取得焦点，本次未输入。');
+    await sdkCommand(serial => ['input', `--device=${serial}`, 'text', '--match=single', '--wait=3000', '--', text,
+      `id=${id},class=android.widget.EditText,focused=true`]);
+    view = profileEditorView(await readHeyboxView());
+    if (view.nodes.find(node => node.id === id)?.text !== text) throw new Error('资料文字回读不一致，本次未点击保存。');
+    return view;
+  }
+  async function updateHeyboxProfile(input) {
+    const fields = { nickname: 'et_nick', signature: 'et_signature' };
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length
+      || Object.keys(input).some(key => !Object.hasOwn(fields, key))) throw new Error('资料修改仅接受 nickname 和 signature。');
+    const changes = Object.entries(input).map(([key, value]) => {
+      if (typeof value !== 'string' || !value.trim() || value !== value.trim() || /[\x00-\x1f\x7f]/.test(value)
+        || Array.from(value).length > (key === 'nickname' ? 20 : 80)) throw new Error('昵称或签名的格式、长度无效。');
+      return { key, id: `${androidDevice.package}:id/${fields[key]}`, text: value };
+    });
+    let view = await profileEditor();
+    if (changes.every(change => view.nodes.find(node => node.id === change.id)?.text === change.text)) {
+      return { updated: false, verified: true, message: '小黑盒资料已是目标内容。' };
+    }
+    for (const change of changes) {
+      if (view.nodes.find(node => node.id === change.id)?.text !== change.text) view = await replaceProfileText(view, change.id, change.text);
+    }
+    if (changes.some(change => view.nodes.find(node => node.id === change.id)?.text !== change.text)) throw new Error('待保存资料与目标不一致，本次未保存。');
+    const save = view.nodes.filter(node => node.id === `${androidDevice.package}:id/tv_appbar_action` && node.text === '保存' && node.enabled);
+    if (save.length !== 1) throw new Error('未找到可核验的资料保存按钮。');
+    await tapHeyboxNode(view, save[0].id);
+    await waitForProfileSave('资料');
+    view = await refreshHeybox();
+    const homeFields = { nickname: 'tv_me_home_fragment_username', signature: 'tv_signature' };
+    if (changes.some(change => view.nodes.find(node => node.id === `${androidDevice.package}:id/${homeFields[change.key]}`)?.text !== change.text)) {
+      throw new Error('刷新后的个人主页资料与目标不一致，未标记为修改成功。');
+    }
+    return { updated: true, verified: true, fields: changes.map(change => change.key), message: '小黑盒资料已保存，并刷新应用从个人主页核验。' };
+  }
+  async function waitForProfileSave(label) {
+    const deadline = Date.now() + 45000;
+    for (let attempt = 0; attempt < 6 && Date.now() < deadline; attempt++) {
+      let view;
+      try { view = await readHeyboxView(); }
+      catch (error) {
+        if (!/活动窗口|读取时小黑盒界面已变化|Google Android CLI 操作未确认成功/.test(error.message)) throw error;
+      }
+      if (view?.activity === `${androidDevice.package}/.module.account.SettingActivity`) return profileSettings();
+      if (view && view.activity !== `${androidDevice.package}/.module.account.UpdateAccountActivity`) break;
+      if (attempt < 5) await setTimeout(1000);
+    }
+    throw new Error(`${label}保存结果尚未确认；请检查应用提示，不自动重复提交。`);
+  }
+  async function refreshHeybox() {
+    await ownProfileHome();
+    await androidShell(`am force-stop ${androidDevice.package}`);
+    await request(control('app', 'launch', '-pkg', androidDevice.package), { json: false });
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const view = await readHeyboxView();
+        if (view.activity === `${androidDevice.package}/.MainActivity`) return ownProfileHome();
+      } catch (error) {
+        if (!/活动窗口|当前未读取其他应用|读取时小黑盒界面已变化|Google Android CLI 操作未确认成功/.test(error.message)) throw error;
+      }
+      await setTimeout(1500);
+    }
+    throw new Error('小黑盒重新打开后尚未回到主页，请检查登录和启动界面。');
+  }
+  async function sdkDevice() {
+    if (![adb, androidCli].every(existsSync)) throw new Error('请先配置 Google Android CLI 和 SDK Platform Tools。');
+    const device = await ownDevice();
+    if (!device.is_android_started || device.adb_host_ip !== '127.0.0.1' || !Number.isInteger(device.adb_port)
+      || device.adb_port < 1024 || device.adb_port > 65535) throw new Error('没有取得专用设备的有效本机 Android 连接。');
+    const serial = `127.0.0.1:${device.adb_port}`;
+    if (sdkConnection && sdkConnection.serial !== serial) throw new Error('专用 Android 连接已变化，本次未执行操作。');
+    const env = { ...process.env, ANDROID_HOME: sdk, ANDROID_SDK_ROOT: sdk, ANDROID_USER_HOME: join(root, 'user'),
+      ANDROID_ADB_SERVER_PORT: '5039', ANDROID_ADB_SERVER_ADDRESS: '127.0.0.1', ADB_SERVER_SOCKET: 'tcp:127.0.0.1:5039', ADB_MDNS_AUTO_CONNECT: '0',
+      JAVA_TOOL_OPTIONS: '-Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8' };
+    const prefix = ['-H', '127.0.0.1', '-P', '5039'];
+    if (!sdkConnection) {
+      const serverEnv = { ...env };
+      delete serverEnv.ANDROID_ADB_SERVER_PORT;
+      delete serverEnv.ANDROID_ADB_SERVER_ADDRESS;
+      delete serverEnv.ADB_SERVER_SOCKET;
+      const server = await run(adb, ['-L', 'tcp:localhost:5039', '--one-device', serial, 'start-server'], { env: serverEnv });
+      if (!server.ok) throw new Error('专用 Android 调试服务未启动，请检查 5039 端口。');
+      const connected = await run(adb, [...prefix, 'connect', serial], { env });
+      if (!connected.ok) throw new Error('专用 Android 连接未确认在线。');
+      sdkConnection = { serial };
+    }
+    const state = await run(adb, [...prefix, '-s', serial, 'get-state'], { env });
+    if (!state?.ok || state.stdout.trim() !== 'device') throw new Error('专用 Android 连接未确认在线。');
+    const current = await ownDevice();
+    if (!current.is_android_started || current.adb_host_ip !== '127.0.0.1' || current.adb_port !== device.adb_port) throw new Error('专用 Android 连接已变化，本次未执行操作。');
+    return { serial, env, prefix };
+  }
+  async function sdkCommand(buildArgs) {
+    const { serial, env } = await sdkDevice();
+    const result = await run(androidCli, [`--sdk=${sdk}`, ...buildArgs(serial)], { env, timeout: 60000 });
+    if (!result.ok) throw new Error('Google Android CLI 操作未确认成功，请检查专用设备。');
+    return result;
+  }
+  function avatarFile(path) {
+    if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0') || /^\\\\/.test(path) || !/\.png$/i.test(path)
+      || !existsSync(path) || !statSync(path).isFile() || statSync(path).size > 8 * 1024 * 1024) throw new Error('头像须为本机 8 MiB 以内的 PNG 文件。');
+    const image = readFileSync(path);
+    if (!image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('头像未通过 PNG 格式核验。');
+    const sha256 = createHash('sha256').update(image).digest('hex');
+    const target = `/sdcard/Pictures/MemoriaAvatar-${sha256.slice(0, 12)}/avatar.png`;
+    return { target, sha256, album: `MemoriaAvatar-${sha256.slice(0, 12)}` };
+  }
+  function avatarGuard(sha256) {
+    if (!existsSync(avatarStatePath)) return null;
+    let state;
+    try {
+      if (statSync(avatarStatePath).size > 8192) throw new Error();
+      state = JSON.parse(readFileSync(avatarStatePath, 'utf8'));
+      if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error();
+      if (typeof state.accountId !== 'string' || !/^\d{5,16}$/.test(state.accountId)
+        || typeof state.index !== 'string' || !/^(0|[1-9]\d{0,3})$/.test(state.index)
+        || !Number.isSafeInteger(state.createdTimestamp) || state.createdTimestamp <= 0) throw new Error();
+      if (state.accountId !== expectedAccountId || state.createdTimestamp !== createdTimestamp || state.index !== index) return null;
+      if (!/^[a-f0-9]{64}$/.test(state.sha256) || !['pending', 'success', 'unknown'].includes(state.outcome)
+        || typeof state.attemptedAt !== 'string' || !Number.isFinite(Date.parse(state.attemptedAt))) throw new Error();
+    } catch { throw new Error('头像冷却记录无法核验，本次未提交，请先检查本机记录。'); }
+    if (state.outcome === 'success' && state.sha256 === sha256) return { skipped: 'unchanged', message: '同一头像已有成功记录，本次未重复提交。' };
+    const next = Date.parse(state.attemptedAt) + 7 * 86400000;
+    return Date.now() < next ? { skipped: 'cooldown', nextAllowedAt: new Date(next).toISOString(), message: '头像修改处于 7 天冷却期，本次未提交。' } : null;
+  }
+  function saveAvatarState(state) {
+    mkdirSync(dirname(avatarStatePath), { recursive: true, mode: 0o700 });
+    const temporary = `${avatarStatePath}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify({ ...state, index, accountId: expectedAccountId, createdTimestamp }), { mode: 0o600 });
+      renameSync(temporary, avatarStatePath);
+    } finally { if (existsSync(temporary)) unlinkSync(temporary); }
+  }
+  async function stageAvatar(path) {
+    const { target, sha256, album } = avatarFile(path);
+    const { serial, env, prefix } = await sdkDevice();
+    const call = async args => {
+      const result = await run(adb, [...prefix, '-s', serial, ...args], { env, timeout: 30000 });
+      if (!result.ok) throw new Error('头像传入专用安卓设备时未确认成功。');
+      return result.stdout;
+    };
+    await call(['push', path, target]);
+    const digest = await call(['shell', 'toybox', 'sha256sum', target]);
+    if (!digest.startsWith(`${sha256} `)) throw new Error('设备中的头像文件与本机素材不一致。');
+    await call(['shell', 'am', 'broadcast', '-a', 'android.intent.action.MEDIA_SCANNER_SCAN_FILE', '-d', `file://${target}`]);
+    return { target, sha256, album };
+  }
+  async function avatarPicker(editor) {
+    editor = editor ? profileEditorView(editor) : await profileEditor();
+    await tapHeyboxNode(editor, `${androidDevice.package}:id/rl_set_icon`);
+    const menu = await readHeyboxView();
+    if (!menu.nodes.some(node => node.text === '更换头像框')) throw new Error('未找到可核验的头像更换菜单。');
+    await tapHeyboxLabel(menu, '更换头像');
+    try { return await readHeyboxView(); }
+    catch (error) {
+      if (!/请先在 MuMu 专用设备中打开小黑盒|活动窗口/.test(error.message)) throw error;
+      return readAvatarAccessView();
+    }
+  }
+  async function readAvatarAccessView() {
+    const activities = await androidShell('dumpsys activity activities');
+    const resumed = activities.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
+    const activity = resumed?.match(/\b[a-zA-Z][\w.]+\/[a-zA-Z0-9._$]+/)?.[0];
+    const allowed = [`${androidDevice.package}/.module.account.UpdateAccountActivity`,
+      'com.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity',
+      'com.android.permissioncontroller/.permission.ui.GrantPermissionsActivity',
+      'com.android.providers.media.module/.photopicker.PhotoPickerActivity',
+      'com.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerUserSelectActivity',
+      'com.android.providers.media.module/com.android.providers.media.photopicker.PhotoPickerActivity'];
+    if (!allowed.includes(activity)) throw new Error('当前不是已知的头像图片权限或选择页面，本次未继续操作。');
+    const result = await sdkCommand(serial => ['layout', `--device=${serial}`, '--flat', '--full']);
+    let windows;
+    try { windows = JSON.parse(result.stdout); } catch { throw new Error('头像权限页面无法解析。'); }
+    const active = Array.isArray(windows) ? windows.filter(window => window.type === 'APPLICATION' && window.active && window.focused) : [];
+    const prefixes = ['com.android.permissioncontroller:id/', 'com.android.providers.media.module:id/'];
+    if (active.length !== 1 || !Array.isArray(active[0].content) || !active[0].content.some(node => prefixes.some(prefix => node['resource-id']?.startsWith(prefix)))) {
+      throw new Error('没有取得 Android 选定照片权限页面，本次未授权全部存储。');
+    }
+    const nodes = active[0].content.filter(node => !node.hidden && !node['off-screen'])
+      .filter(node => !node['resource-id'] || node['resource-id'].startsWith('android:id/') || prefixes.some(prefix => node['resource-id'].startsWith(prefix)))
+      .map(node => ({ id: node['resource-id'] || '', text: String(node.text || '').slice(0, 200), description: String(node['content-desc'] || '').slice(0, 200),
+        bounds: node.bounds || '', className: node.class || '', clickable: node.interactions?.includes('CLICKABLE') === true,
+        focused: node.state?.includes('FOCUSED') === true, enabled: node.enabled !== false && !node.state?.includes('DISABLED') }));
+    return { source: 'android_avatar_access', activity, nodes };
+  }
+  async function requestSelectedAvatarAccess(view) {
+    view ??= await avatarPicker();
+    const permissions = await androidShell(`dumpsys package ${androidDevice.package}`);
+    if (!/android\.permission\.READ_MEDIA_VISUAL_USER_SELECTED/.test(permissions)) throw new Error('应用未声明仅选定照片权限，本次未申请全部存储权限。');
+    if (!view.nodes.some(node => node.id === 'android:id/message' && node.text === '【图片选择器需要授予访问存储权限】')
+      || !view.nodes.some(node => node.id === 'android:id/button1' && node.text === '确认')) throw new Error('当前没有已核验的头像图片权限说明。');
+    // This opens Android's permission choice. It does not press any permission-grant button.
+    await tapHeyboxNode(view, 'android:id/button1');
+    return readAvatarAccessView();
+  }
+  async function beginLimitedAvatarSelection() {
+    const view = await readAvatarAccessView();
+    if (!view.nodes.some(node => node.id === 'com.android.permissioncontroller:id/permission_message' && avatarPermissionMessages.includes(node.text))
+      || !view.nodes.some(node => node.id === 'com.android.permissioncontroller:id/permission_allow_selected_button' && node.text === '允许有限访问')) {
+      throw new Error('当前没有专用小黑盒的有限图片访问选项，本次未授权。');
+    }
+    await tapHeyboxNode(view, 'com.android.permissioncontroller:id/permission_allow_selected_button');
+    return readAvatarAccessView();
+  }
+  async function verifySoleAvatarFile(path) {
+    const avatar = avatarFile(path);
+    const { serial, env, prefix } = await sdkDevice();
+    const content = projection => run(adb, [...prefix, '-s', serial, 'shell', 'content', 'query', '--uri', 'content://media/external/images/media', '--projection', projection], { env, timeout: 30000 });
+    // MuMu's Java content utility can exit 139 after emitting its result. Accept only matching, complete single-row reads.
+    const complete = result => result.ok ? !result.stderr.trim()
+      : result.exitCode === 139 && (!result.stderr.trim() || /^Segmentation fault\s*$/.test(result.stderr));
+    const row = await content('_id:_display_name:relative_path');
+    const match = row.stdout.trim().match(/^Row: 0 _id=(\d+), _display_name=avatar\.png, relative_path=(Pictures\/MemoriaAvatar-[a-f0-9]{12}\/)$/);
+    if (!complete(row) || !match || match[2] !== `Pictures/${avatar.album}/`) throw new Error('唯一图片不是已核验的专用头像。');
+    const ids = await content('_id');
+    if (!complete(ids) || ids.stdout.trim() !== `Row: 0 _id=${match[1]}`) throw new Error('两次媒体索引核验不一致，本次未选择图片。');
+    const digest = await run(adb, [...prefix, '-s', serial, 'shell', 'toybox', 'sha256sum', avatar.target], { env });
+    if (!digest.ok || !digest.stdout.startsWith(`${avatar.sha256} `)) throw new Error('选择前的设备头像文件哈希不符。');
+    return avatar;
+  }
+  async function selectOnlyAvatarPhoto(path) {
+    let view = await readAvatarAccessView();
+    if (!view.nodes.some(node => node.id === 'com.android.providers.media.module:id/privacy_text' && node.text === '选择允许此应用访问的照片和视频')) {
+      throw new Error('当前不是 Android 有限图片访问选择器。');
+    }
+    if (view.nodes.some(node => node.text === '无相册')) {
+      await tapHeyboxLabel(view, '照片');
+      view = await readAvatarAccessView();
+    }
+    await verifySoleAvatarFile(path);
+    const photos = view.nodes.filter(node => node.clickable && node.enabled && node.className === 'android.widget.FrameLayout' && /^拍摄于 .+的照片$/.test(node.description));
+    if (photos.length !== 1) throw new Error('系统选择器没有唯一可核验的头像图片。');
+    if (view.nodes.some(node => node.id === 'com.android.providers.media.module:id/button_add' && node.text === '允许 (1)')) return view;
+    await tapHeyboxTarget(view, photos[0]);
+    return readAvatarAccessView();
+  }
+  async function finishLimitedAvatarAccess(path) {
+    await verifySoleAvatarFile(path);
+    const view = await readAvatarAccessView();
+    if (!view.nodes.some(node => node.id === 'com.android.providers.media.module:id/privacy_text' && node.text === '选择允许此应用访问的照片和视频')
+      || !view.nodes.some(node => node.id === 'com.android.providers.media.module:id/button_add' && node.text === '允许 (1)')) {
+      throw new Error('未核验到仅允许一张头像照片的确认按钮，本次未授权。');
+    }
+    await tapHeyboxNode(view, 'com.android.providers.media.module:id/button_add');
+    const permissions = await androidShell(`dumpsys package ${androidDevice.package}`);
+    if (!limitedAvatarPermissions(permissions)) throw new Error('图片访问范围与有限授权目标不一致，请检查系统权限。');
+    return readHeyboxView();
+  }
+  function limitedAvatarPermissions(permissions) {
+    // Android's selected-photo compatibility mode reports temporary grants marked REVOKED_COMPAT and ONE_TIME.
+    // https://developer.android.com/about/versions/14/changes/partial-photo-video-access
+    return /android\.permission\.READ_MEDIA_VISUAL_USER_SELECTED: granted=true/.test(permissions)
+      && ['IMAGES', 'VIDEO'].every(type => {
+        const rows = permissions.split(/\r?\n/).filter(line => line.includes(`android.permission.READ_MEDIA_${type}: granted=`));
+        return rows.length === 1 && (/granted=false/.test(rows[0])
+          || (/granted=true/.test(rows[0]) && rows[0].includes('REVOKED_COMPAT') && rows[0].includes('ONE_TIME')));
+      });
+  }
+  async function selectHeyboxAvatar(path) {
+    await verifySoleAvatarFile(path);
+    if (!limitedAvatarPermissions(await androidShell(`dumpsys package ${androidDevice.package}`))) throw new Error('当前不是已核验的有限图片访问权限。');
+    const view = await readHeyboxView();
+    if (view.activity !== `${androidDevice.package}/com.max.mediaselector.lib.basic.PictureSelectorSupporterActivity`
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/ps_tv_title` && node.text === '相机胶卷')
+      || view.nodes.filter(node => node.id === `${androidDevice.package}:id/btnCheck`).length !== 1) {
+      throw new Error('小黑盒图片选择器没有唯一的已核验头像。');
+    }
+    if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tvCheck` && node.text === '1')
+      && view.nodes.some(node => node.id === `${androidDevice.package}:id/ps_tv_preview` && node.text === '已选1/1')) return view;
+    await tapHeyboxNode(view, `${androidDevice.package}:id/btnCheck`);
+    return readHeyboxView();
+  }
+  async function openAvatarCrop(path) {
+    await verifySoleAvatarFile(path);
+    const view = await readHeyboxView();
+    if (view.activity !== `${androidDevice.package}/com.max.mediaselector.lib.basic.PictureSelectorSupporterActivity`
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/tvCheck` && node.text === '1')
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/ps_tv_preview` && node.text === '已选1/1')
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/ps_tv_complete` && node.text === '下一步')) {
+      throw new Error('没有核验到唯一已选头像，本次未继续提交。');
+    }
+    await tapHeyboxNode(view, `${androidDevice.package}:id/ps_complete_select`);
+    return readHeyboxView();
+  }
+  async function completeAvatarCrop(path) {
+    await verifySoleAvatarFile(path);
+    const view = await readHeyboxView();
+    if (!expectedAccountId || view.activity !== `${androidDevice.package}/com.starlightc.ucropplus.ui.UCropPlusActivity`
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_crop_title` && node.text === '剪裁')
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_crop_ratio` && node.text === '头像')) {
+      throw new Error('当前不是已核验的头像裁剪页。');
+    }
+    await tapHeyboxNode(view, `${androidDevice.package}:id/iv_check`);
+    return readHeyboxView();
+  }
+  async function finishAvatarEditor(path) {
+    await verifySoleAvatarFile(path);
+    const view = await readHeyboxView();
+    if (view.activity !== `${androidDevice.package}/com.starlightc.ucropplus.ui.UCropPlusActivity`
+      || !view.nodes.some(node => node.text === '1/1')
+      || !view.nodes.some(node => node.id === `${androidDevice.package}:id/btn_next` && node.text === '下一步')) {
+      throw new Error('当前不是唯一头像的最终图片编辑页。');
+    }
+    await tapHeyboxNode(view, `${androidDevice.package}:id/btn_next`);
+    return readHeyboxView();
+  }
+  async function submitHeyboxAvatar({ path, profile } = {}) {
+    const avatar = await verifySoleAvatarFile(path);
+    const guarded = avatarGuard(avatar.sha256);
+    if (guarded) return { submitted: false, accountVerified: true, ...guarded };
+    const view = profileEditorView(await readHeyboxView());
+    if (!profile || typeof profile.nickname !== 'string' || typeof profile.signature !== 'string'
+      || view.nodes.find(node => node.id === `${androidDevice.package}:id/et_nick`)?.text !== profile.nickname
+      || view.nodes.find(node => node.id === `${androidDevice.package}:id/et_signature`)?.text !== profile.signature) {
+      throw new Error('头像保存前昵称或签名与原资料不一致，本次未提交。');
+    }
+    if (!view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_appbar_action` && node.text === '保存' && node.enabled)) throw new Error('没有取得头像资料保存按钮。');
+    const state = { sha256: avatar.sha256, attemptedAt: new Date().toISOString(), outcome: 'pending' };
+    saveAvatarState(state);
+    try {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/tv_appbar_action`);
+      await waitForProfileSave('头像');
+      const home = await refreshHeybox();
+      saveAvatarState({ ...state, outcome: 'success', confirmation: 'app_receipt' });
+      return { submitted: true, accountVerified: home.accountVerified, sha256: avatar.sha256,
+        message: '已提交头像资料并刷新个人主页；头像最终显示及审核结果以平台为准。' };
+    } catch (error) {
+      saveAvatarState({ ...state, outcome: 'unknown' });
+      throw error;
+    }
+  }
+  async function resetAvatarSetup() {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let view;
+      try { view = await readHeyboxView(); }
+      catch (error) {
+        if (!/请先在 MuMu 专用设备中打开小黑盒|活动窗口/.test(error.message)) throw error;
+        view = await readAvatarAccessView();
+      }
+      if (view.source === 'android_avatar_access') {
+        if (view.nodes.some(node => node.id === 'com.android.permissioncontroller:id/permission_message' && avatarPermissionMessages.includes(node.text))) {
+          const cancel = view.nodes.filter(node => (node.id === 'com.android.permissioncontroller:id/permission_dont_allow_more_selected_button' && node.text === '不选择其他数据')
+            || (node.id === 'com.android.permissioncontroller:id/permission_deny_button' && node.text === '不允许'));
+          if (cancel.length !== 1) throw new Error('没有可核验的图片权限取消按钮。');
+          await tapHeyboxNode(view, cancel[0].id);
+        } else if (view.nodes.some(node => node.id === 'com.android.providers.media.module:id/privacy_text' && node.text === '选择允许此应用访问的照片和视频')) {
+          const cancel = view.nodes.filter(node => node.description === '取消' && node.clickable && node.className === 'android.widget.ImageButton');
+          if (cancel.length !== 1) throw new Error('没有可核验的图片选择取消按钮。');
+          await tapHeyboxTarget(view, cancel[0]);
+        } else throw new Error('当前图片权限页面不符合预期，本次未继续操作。');
+      } else if (view.activity === `${androidDevice.package}/com.max.mediaselector.lib.basic.PictureSelectorSupporterActivity`) {
+        await tapHeyboxNode(view, `${androidDevice.package}:id/ps_iv_left_back`);
+      } else return;
+    }
+    throw new Error('尚未退出上次图片选择，请先回到小黑盒“我”页面。');
+  }
+  async function updateHeyboxAvatar(path) {
+    const avatar = avatarFile(path);
+    await resetAvatarSetup();
+    await ownProfileHome();
+    const guarded = avatarGuard(avatar.sha256);
+    if (guarded) return { submitted: false, accountVerified: true, ...guarded };
+    const editor = await profileEditor();
+    const profile = { nickname: editor.nodes.find(node => node.id === `${androidDevice.package}:id/et_nick`).text,
+      signature: editor.nodes.find(node => node.id === `${androidDevice.package}:id/et_signature`).text };
+    await stageAvatar(path);
+    let view = await avatarPicker(editor);
+    if (view.nodes.some(node => node.id === 'android:id/message' && node.text === '【图片选择器需要授予访问存储权限】')) view = await requestSelectedAvatarAccess(view);
+    if (view.source === 'android_avatar_access') {
+      if (view.nodes.some(node => node.id === 'com.android.permissioncontroller:id/permission_allow_selected_button')) await beginLimitedAvatarSelection();
+      await selectOnlyAvatarPhoto(path);
+      await finishLimitedAvatarAccess(path);
+    }
+    await selectHeyboxAvatar(path);
+    await openAvatarCrop(path);
+    await completeAvatarCrop(path);
+    await finishAvatarEditor(path);
+    return submitHeyboxAvatar({ path, profile });
+  }
   return {
     check,
     inspectHeybox: () => exclusive(readHeyboxView),
-    openHeyboxProfile: () => exclusive(async () => {
-      let view = await readHeyboxView();
-      if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_user_id` && /^\d{5,16}$/.test(node.text))) return profileResult(view);
-      for (let step = 0; step < 2 && view.activity === `${androidDevice.package}/.module.account.GameAccountActivityV2`; step++) {
-        await androidShell('input keyevent 4');
-        view = await readHeyboxView();
+    openHeyboxProfile: () => exclusive(openHeyboxProfile),
+    openHeyboxHome: () => exclusive(ownProfileHome),
+    openHeyboxSettings: () => exclusive(profileSettings),
+    openHeyboxEditor: () => exclusive(profileEditor),
+    updateHeyboxProfile: input => exclusive(() => updateHeyboxProfile(input)),
+    updateHeyboxAvatar: path => exclusive(() => updateHeyboxAvatar(path)),
+    inspectAvatarAccess: () => exclusive(readAvatarAccessView),
+    refreshHeybox: () => exclusive(async () => ({ accountVerified: (await refreshHeybox()).accountVerified,
+      refreshed: true, message: '已重新打开专用小黑盒应用并核对账号，登录数据保留。' })),
+    captureHeybox: () => exclusive(async () => {
+      const view = await readHeyboxView();
+      if (/login|register|password/i.test(view.activity) || view.nodes.some(node => node.text === '[密码字段已隐藏]')) {
+        throw new Error('登录或密码界面不生成项目截图。');
       }
-      if (view.activity !== `${androidDevice.package}/.MainActivity`) throw new Error('请先在小黑盒打开“我”页面，再读取个人主页。');
-      if (!view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_me_home_fragment_username`)) {
-        await tapHeyboxNode(view, `${androidDevice.package}:id/rb_5`);
-        view = await readHeyboxView();
+      const path = join(root, 'logs', `heybox-${randomUUID()}.png`);
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      try {
+        await sdkCommand(serial => ['screen', 'capture', `--device=${serial}`, `--output=${path}`]);
+        const current = await readHeyboxView();
+        if (current.activity !== view.activity) throw new Error('截图时小黑盒界面已变化，本次截图未保留。');
+        if (!existsSync(path) || statSync(path).size > 8 * 1024 * 1024
+          || !readFileSync(path).subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+          throw new Error('项目截图未通过 PNG 格式与大小核验。');
+        }
+        return { path, message: '已保存专用小黑盒界面的本机截图。' };
+      } catch (error) {
+        if (existsSync(path)) unlinkSync(path);
+        throw error;
       }
-      await tapHeyboxNode(view, `${androidDevice.package}:id/tv_me_home_fragment_username`);
-      return profileResult(await readHeyboxView());
     }),
     configure: () => exclusive(async () => {
       const device = await ownDevice();
