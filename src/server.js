@@ -16,7 +16,7 @@ import { createAutonomyJobs, defaultAutonomySettings, normalizeAutonomySettings 
 import { discoverHeyboxPosts, readHeyboxPost } from './browser-reader.js';
 import { getExpressionCatalog, getExpressionPreviews, readExpressionImage, buildExpressionSegments } from './expressions.js';
 import { defaultDrawingSettings, normalizeDrawingSettings, publicDrawingSettings } from './drawing-settings.js';
-import { defaultExpressionSettings, normalizeExpressionSettings, publicExpressionSettings, createSelfExpressionJobs } from './self-expression.js';
+import { defaultExpressionSettings, normalizeExpressionSettings, publicExpressionSettings, createSelfExpressionJobs, expressionPlatforms } from './self-expression.js';
 import { defaultBookSettings, normalizeBookSettings, createBookJobs } from './book-jobs.js';
 import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
@@ -69,7 +69,15 @@ let bookJobs;
 let proactiveJobs;
 let bookConversation = false;
 let receivingBook = '';
-const expressionPlatforms = { qq: { name: 'QQ', actions: ['post', 'signature', 'avatar'] } };
+function heyboxRuntime() {
+  if (process.platform !== 'win32') throw new Error('客户端小黑盒发帖目前需要 Windows 专用 MuMu 设备。');
+  let config;
+  try { config = JSON.parse(readFileSync(join(dataDir, 'android-runtime.json'), 'utf8').replace(/^\uFEFF/, '')); }
+  catch { throw new Error('请先配置小黑盒专用安卓设备。'); }
+  if (config.provider !== 'mumu' || !config.expectedAccountId) throw new Error('请先绑定小黑盒专用账号。');
+  return createMumuRuntime({ root: config.root, manager: config.manager, index: config.index, createdTimestamp: config.createdTimestamp,
+    deviceName: config.deviceName, androidVersion: config.androidVersion, expectedAccountId: config.expectedAccountId, androidCli: config.androidCli });
+}
 const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy });
 function makeAutonomyJobs() {
   return createAutonomyJobs({ store,
@@ -102,6 +110,10 @@ autonomyJobs = makeAutonomyJobs();
 
 function makeSelfExpressionJobs() {
   return createSelfExpressionJobs({ store, platforms: expressionPlatforms,
+    canUsePlatform: platform => {
+      if (platform === 'qq') return store.getSetting('qq').enabled;
+      try { return Boolean(heyboxRuntime()); } catch { return false; }
+    },
     getAvatars: platform => platform === 'qq' ? getExpressionCatalog().filter(entry => ['hello', 'happy', 'thinking', 'comfort'].includes(entry.id)) : [],
     generate: async ({ instructions, signal, ...context }) => {
       const result = await requestCompletion({ store, signal, maxTokens: 900, messages: [
@@ -114,6 +126,15 @@ function makeSelfExpressionJobs() {
       catch { throw new Error('模型的自主表达决定格式无效，本次不执行。'); }
     },
     perform: async (platform, action, payload, { signal }) => {
+      if (platform === 'heybox') {
+        if (action !== 'post') throw new Error('小黑盒当前只开放自主发帖。');
+        const settings = normalizeExpressionSettings({}, store.getSetting('selfExpression'), expressionPlatforms);
+        if (!settings.enabled || !settings.platforms.heybox.enabled || !settings.platforms.heybox.post) throw new Error('小黑盒自主发帖尚未启用。');
+        const runtime = heyboxRuntime();
+        await runtime.openHeybox(); signal.throwIfAborted();
+        return runtime.publishHeyboxPost({ title: payload.title, text: payload.text, topic: settings.platforms.heybox.topic }, {
+          signal, dailyLimit: Math.min(settings.dailyLimit, settings.platforms.heybox.dailyLimit), cooldownMinutes: settings.cooldownMinutes, timeZone: settings.timeZone });
+      }
       const config = store.getSetting('qq');
       if (platform !== 'qq' || !config.enabled) throw new Error('此平台尚未启用。');
       const call = async (name, parameters) => {
@@ -143,7 +164,7 @@ function makeSelfExpressionJobs() {
       }
       throw new Error('此平台操作未接入。');
     },
-    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy || !store.getSetting('qq').enabled || !store.getSetting('model').apiKey,
+    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy || !store.getSetting('model').apiKey,
   });
 }
 selfExpressionJobs = makeSelfExpressionJobs();

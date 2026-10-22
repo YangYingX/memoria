@@ -133,16 +133,21 @@
             <section id="self-expression-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">07</span><h2>自主表达</h2><p class="muted">有自己的表达节奏，也留一些安静的时间。</p></div><div class="settings-fields">
               <label class="check-label"><input id="self-expression-enabled" type="checkbox">启用自主表达</label>
               <label>表达欲（0–100）<input id="self-expression-desire" type="number" min="0" max="100" required><small>每次机会按这个百分比决定是否思考表达；0 表示不主动表达，100 也可以由她选择安静。</small></label>
-              <div class="field-row"><label>每天动态总上限<input id="self-expression-daily-limit" type="number" min="0" max="5" required></label><label>自动表达机会间隔（分钟）<input id="self-expression-cooldown" type="number" min="60" max="1440" required></label></div>
-              <p class="caption">动态上限在所有已接入平台间共用，每个平台还有自己的上限。设为 0 仅停止发动态；尝试失败也计次。</p>
+              <div class="field-row"><label>每天动态总上限（全平台合计）<input id="self-expression-daily-limit" type="number" min="0" max="100" required></label><label>自动表达机会间隔（分钟）<input id="self-expression-cooldown" type="number" min="60" max="1440" required></label></div>
+              <p class="caption">默认每天 20 次，全平台合计，可自定义为 0–100。每个平台还有自己的上限；设为 0 仅停止发动态。尝试失败也计次。</p>
               <div class="field-row"><label>活跃时段开始（整点）<input id="self-expression-start-hour" type="number" min="0" max="23" required></label><label>活跃时段结束（整点）<input id="self-expression-end-hour" type="number" min="1" max="24" required></label></div>
               <label>表达时区<input id="self-expression-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"></label>
               <label>更换头像的最短间隔（天）<input id="self-expression-avatar-days" type="number" min="7" max="30" required><small>至少间隔 7 天；头像只选已有的人设素材，不使用聊天图片。</small></label>
-              <div class="self-expression-platform-settings"><h3>QQ · 当前已接入</h3><p class="caption">使用「QQ 接入」中配置的机器人账号。其他平台尚待适配。</p>
+              <div class="self-expression-platform-settings"><h3>QQ</h3><p class="caption">使用「QQ 接入」中配置的机器人账号。</p>
                 <label class="check-label"><input id="self-expression-qq-enabled" type="checkbox">允许在 QQ 自主表达</label>
                 <div class="self-expression-options"><label class="check-label"><input id="self-expression-qq-post" type="checkbox">发布空间动态</label><label class="check-label"><input id="self-expression-qq-signature" type="checkbox">更新签名</label><label class="check-label"><input id="self-expression-qq-avatar" type="checkbox">更换头像</label></div>
-                <div class="field-row"><label>QQ 每天动态上限<input id="self-expression-qq-daily-limit" type="number" min="0" max="5" required></label><label>空间动态可见范围<select id="self-expression-qq-visibility"><option value="4">好友可见</option><option value="1">所有人可见</option><option value="64">仅自己可见</option></select></label></div>
+                <div class="field-row"><label>QQ 每天动态上限<input id="self-expression-qq-daily-limit" type="number" min="0" max="100" required></label><label>空间动态可见范围<select id="self-expression-qq-visibility"><option value="4">好友可见</option><option value="1">所有人可见</option><option value="64">仅自己可见</option></select></label></div>
                 <p class="caption">签名每天最多尝试更新 1 次；头像遵循上方间隔。未确认结果的操作不会自动重试。</p>
+              </div>
+              <div class="self-expression-platform-settings"><h3>小黑盒</h3><p class="caption">使用本机配置的栖忆专用账号，需要 Windows 上的专用 MuMu 设备在线并已登录。创建人账号不用于发帖。</p>
+                <label class="check-label"><input id="self-expression-heybox-enabled" type="checkbox">允许在小黑盒自主发帖</label>
+                <div class="field-row"><label>小黑盒每天发帖上限<input id="self-expression-heybox-daily-limit" type="number" min="0" max="100" required></label><label>发帖分区<input id="self-expression-heybox-topic" maxlength="40" required placeholder="分区的准确名称"></label></div>
+                <p class="caption">开启后可按表达欲、总额度和间隔自主发布，无需逐条确认。失败和结果未确认也计次，不自动重发。只使用公开阅读、原始笔记和已确认的本人公开动态。</p>
               </div>
             </div></section>
             <section id="book-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">08</span><h2>读书节奏</h2><p class="muted">把长篇阅读分成日常的小片刻，读到哪里就记到哪里。</p></div><div class="settings-fields">

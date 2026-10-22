@@ -436,7 +436,7 @@ function fillSettings() {
   $('drawing-weekly-limit').value = drawing.weeklyLimit ?? 3;
   $('self-expression-enabled').checked = Boolean(selfExpression.enabled);
   $('self-expression-desire').value = selfExpression.desire ?? 45;
-  $('self-expression-daily-limit').value = selfExpression.dailyLimit ?? 1;
+  $('self-expression-daily-limit').value = selfExpression.dailyLimit ?? 20;
   $('self-expression-cooldown').value = selfExpression.cooldownMinutes ?? 360;
   $('self-expression-start-hour').value = selfExpression.startHour ?? 9;
   $('self-expression-end-hour').value = selfExpression.endHour ?? 23;
@@ -444,8 +444,12 @@ function fillSettings() {
   $('self-expression-avatar-days').value = selfExpression.avatarIntervalDays ?? 7;
   const expressionQQ = selfExpression.platforms?.qq || {};
   for (const name of ['enabled', 'post', 'signature', 'avatar']) $('self-expression-qq-' + name).checked = expressionQQ[name] ?? true;
-  $('self-expression-qq-daily-limit').value = expressionQQ.dailyLimit ?? 1;
+  $('self-expression-qq-daily-limit').value = expressionQQ.dailyLimit ?? 20;
   $('self-expression-qq-visibility').value = expressionQQ.qzoneVisibility ?? 4;
+  const expressionHeybox = selfExpression.platforms?.heybox || {};
+  $('self-expression-heybox-enabled').checked = Boolean(expressionHeybox.enabled && expressionHeybox.post);
+  $('self-expression-heybox-daily-limit').value = expressionHeybox.dailyLimit ?? 20;
+  $('self-expression-heybox-topic').value = expressionHeybox.topic || '盒友杂谈';
   $('books-enabled').checked = Boolean(books.enabled);
   $('books-daily-limit').value = books.dailyLimit ?? 2;
   $('books-chunk-chars').value = books.chunkChars ?? 3000;
@@ -485,7 +489,9 @@ function renderSelfExpressionStatus(status = {}) {
   const count = inDay ? status.postAttempts || 0 : 0;
   const qq = config.platforms?.qq || {};
   const qqCounts = inDay ? status.platformAttempts?.qq || {} : {};
-  const outcomes = { success: '已确认完成', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
+  const heybox = config.platforms?.heybox || {};
+  const heyboxCounts = inDay ? status.platformAttempts?.heybox || {} : {};
+  const outcomes = { success: '已确认完成', review: '已提交，待平台审核', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
   const actionNames = { post: '空间动态', signature: '签名', avatar: '头像' };
   const avatarNames = { hello: '打招呼', happy: '开心', thinking: '思考', comfort: '安慰' };
   $('self-expression-summary').textContent = !config.enabled ? '自主表达尚未启用。可以在「人格与设置」中安排表达习惯。'
@@ -497,9 +503,9 @@ function renderSelfExpressionStatus(status = {}) {
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
     : '今天暂无后续机会';
   $('self-expression-next').textContent = next;
-  $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 1} 次`;
+  $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 20} 次（全平台合计）`;
   $('self-expression-outcome').textContent = status.busy ? '正在考虑表达…' : outcomes[status.lastOutcome] || '还没有记录';
-  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 1} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次。尝试失败也计次。`;
+  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} / ${Math.max(6, config.dailyLimit ?? 20)} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 20} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次；小黑盒发帖 ${heyboxCounts.post || 0} / ${heybox.dailyLimit ?? 20} 次。尝试失败也计次。`;
   const platformStatus = $('self-expression-platform-status');
   platformStatus.replaceChildren();
   for (const [name, label] of Object.entries(actionNames)) {
@@ -507,9 +513,14 @@ function renderSelfExpressionStatus(status = {}) {
     if (!item) continue;
     platformStatus.append(node('p', `QQ ${label} · ${outcomes[item.outcome] || '结果未确认'} · ${date(item.at)}`, 'caption'));
   }
+  if (status.outcomes?.heybox?.post) {
+    const item = status.outcomes.heybox.post;
+    platformStatus.append(node('p', `小黑盒发帖 · ${outcomes[item.outcome] || '结果未确认'} · ${date(item.at)}`, 'caption'));
+    if (item.modified) platformStatus.append(node('p', '平台替换了部分文字，下方显示客户端中的正文。', 'caption'));
+  }
   const recent = $('self-expression-recent');
   recent.replaceChildren();
-  for (const [label, value] of [['最近已确认动态', status.lastPostText], ['最近已确认签名', status.lastSignature], ['最近已确认头像', avatarNames[status.lastAvatarId]]]) {
+  for (const [label, value] of [[status.lastPostState === 'review' ? '最近已提交动态（待审核）' : '最近已确认动态', [status.lastPostTitle, status.lastPostText].filter(Boolean).join('\n\n')], ['最近已确认签名', status.lastSignature], ['最近已确认头像', avatarNames[status.lastAvatarId]]]) {
     if (!value) continue;
     const row = node('div'); row.append(node('span', label, 'caption'), node('p', value)); recent.append(row);
   }
@@ -882,7 +893,7 @@ $('settings-form').addEventListener('submit', event => {
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
         autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox'], interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },
-        selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) } } },
+        selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) }, heybox: { enabled: $('self-expression-heybox-enabled').checked, post: $('self-expression-heybox-enabled').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-heybox-daily-limit').value), topic: $('self-expression-heybox-topic').value.trim() } } },
         proactive: { enabled: $('proactive-enabled').checked, desire: Number($('proactive-desire').value), dailyLimit: Number($('proactive-daily-limit').value), cooldownMinutes: Number($('proactive-cooldown').value), idleMinutes: Number($('proactive-idle').value), startHour: Number($('proactive-start-hour').value), endHour: Number($('proactive-end-hour').value), timeZone: $('proactive-time-zone').value.trim() },
         books: { enabled: $('books-enabled').checked, dailyLimit: Number($('books-daily-limit').value), chunkChars: Number($('books-chunk-chars').value), startHour: Number($('books-start-hour').value), endHour: Number($('books-end-hour').value), timeZone: $('books-time-zone').value.trim() },
       } });
