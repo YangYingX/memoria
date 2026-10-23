@@ -491,7 +491,7 @@ export function createStore(dbPath) {
       item.recipientAccountId, item.dueAt, item.expiresAt, item.nextDecisionAt, item.status, item.revision, item.decisionAttempts, item.createdAt, item.updatedAt);
   }
   function followupAudit(item, action, now) {
-    insertEvent({ id: randomUUID(), ...eventFields({ type: 'followup', scope: 'owner', actor: action === 'created' || action === 'cancelled' || action === 'resumed' ? 'owner' : 'scheduler',
+    insertEvent({ id: randomUUID(), ...eventFields({ type: 'followup', scope: 'owner', actor: action === 'created' || action === 'cancelled' || action === 'resumed' || action === 'owner_paused' ? 'owner' : 'scheduler',
       sourceRef: item.id, content: `聊天跟进状态：${action}。`, metadata: { followupId: item.id, memoryId: item.memoryId, sourceEventId: item.sourceEventId,
         status: item.status, revision: item.revision } }), createdAt: now });
   }
@@ -1774,11 +1774,20 @@ export function createStore(dbPath) {
         return updateFollowup(previous, patch, now);
       });
     },
+    pauseFollowup(id, now = Date.now()) {
+      id = identifier(id, '跟进 ID'); const stamp = followupClock(now);
+      return transaction(() => {
+        const previous = followupRow(get('SELECT * FROM followups WHERE id = ?', id));
+        if (!previous || !['pending', 'deciding', 'paused'].includes(previous.status)) return null;
+        if (previous.status === 'paused') return previous;
+        return updateFollowup(previous, { status: 'paused' }, stamp, 'owner_paused');
+      });
+    },
     cancelFollowup(id, now = Date.now()) {
       id = identifier(id, '跟进 ID'); const stamp = followupClock(now);
       return transaction(() => {
         const previous = followupRow(get('SELECT * FROM followups WHERE id = ?', id));
-        if (!previous || FOLLOWUP_TERMINAL_STATUSES.includes(previous.status)) return null;
+        if (!previous || !['pending', 'paused', 'deciding'].includes(previous.status)) return null;
         return updateFollowup(previous, { status: 'cancelled' }, stamp, 'cancelled');
       });
     },

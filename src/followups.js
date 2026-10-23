@@ -29,6 +29,10 @@ export function createFollowupActions({ store, getRecipient, cancel, signal, ass
       cancel();
       return result(row);
     },
+    pause(id) {
+      check(); const row = store.pauseFollowup(id, clock()); cancel();
+      return { ...result(row), ok: row?.status === 'paused' };
+    },
     cancel(id) { check(); const row = store.cancelFollowup(id, clock()); cancel(); return result(row); },
     resume(id) {
       check();
