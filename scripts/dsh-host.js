@@ -255,13 +255,13 @@ async function main(input) {
   const modelTask = noting || judging;
   const searchingExpressions = operationName === 'search_expressions';
   if (Number(process.versions.node.split('.')[0]) !== 24) fail('NODE_VERSION_MISMATCH');
-  if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'proactivePlugin', 'moodPlugin', 'expressionPlugin', 'operation'])
+  if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'readonlyCredentials', 'proactivePlugin', 'moodPlugin', 'expressionPlugin', 'operation'])
     || ![input.hostDirectory, input.workspace].every(value => typeof value === 'string' && isAbsolute(value))
     || !fields(input.operation, ['name', 'args'])
     || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'evaluate_mood_feiyu', 'recall_memory', 'compose_proactive', 'search_expressions', ...memoryTools].includes(operationName)
     || !object(input.operation.args)
     || (operationName === 'inspect' && Object.keys(input.operation.args).length)
-    || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'credentialPath')))
+    || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'readonlyCredentials')))
     || (Object.hasOwn(input, 'proactivePlugin') && (operationName !== 'inspect' || input.proactivePlugin !== 'dsh-speak-up'))
     || (Object.hasOwn(input, 'moodPlugin') && (operationName !== 'inspect' || input.moodPlugin !== 'dsh-feiyu-mood'))
     || (Object.hasOwn(input, 'expressionPlugin') && (operationName !== 'inspect' || input.expressionPlugin !== 'dsh-meme'))
@@ -280,13 +280,10 @@ async function main(input) {
     cacheDirectory = realpathSync(input.cacheDirectory);
     if (!lstatSync(input.cacheDirectory).isDirectory() || lstatSync(input.cacheDirectory).isSymbolicLink()
       || basename(cacheDirectory) !== 'humanism' || basename(dirname(cacheDirectory)) !== 'dsh-cache') fail('INVALID_START');
-    if (Object.hasOwn(input, 'credentialPath')) {
-      const expected = join(dirname(dirname(cacheDirectory)), 'bili-credentials.json');
-      if (input.credentialPath !== expected) fail('INVALID_START');
-      const file = lstatSync(expected);
-      if (!file.isFile() || file.isSymbolicLink() || realpathSync(expected) !== expected) fail('INVALID_START');
-      credentialPath = expected;
-    }
+    if (Object.hasOwn(input, 'readonlyCredentials') && (!fields(input.readonlyCredentials, ['sessdata', 'accountId'])
+      || typeof input.readonlyCredentials.sessdata !== 'string' || !input.readonlyCredentials.sessdata
+      || input.readonlyCredentials.sessdata.length >= 4096 || /[\s\u0000-\u001f\u007f;]/u.test(input.readonlyCredentials.sessdata)
+      || typeof input.readonlyCredentials.accountId !== 'string' || !/^[1-9]\d{0,19}$/.test(input.readonlyCredentials.accountId))) fail('INVALID_START');
   }
   const host = realpathSync(input.hostDirectory);
   const workspace = realpathSync(input.workspace);
@@ -297,6 +294,10 @@ async function main(input) {
     if (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink() || readdirSync(path).length) fail('WORKSPACE_NOT_EMPTY');
   }
   if (readdirSync(workspace).some(name => !['home', 'appdata', 'localappdata', 'tmp', 'dsh'].includes(name))) fail('WORKSPACE_NOT_EMPTY');
+  if (reading && input.readonlyCredentials) {
+    credentialPath = join(workspace, 'tmp', 'bili-readonly-credentials.json');
+    writeFileSync(credentialPath, JSON.stringify(input.readonlyCredentials), { flag: 'wx', mode: 0o600 });
+  }
   process.env.DSH_HOME = join(workspace, 'dsh');
   process.env.DSH_TELEMETRY_DISABLED = '1';
 

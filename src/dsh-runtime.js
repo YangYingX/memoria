@@ -9,6 +9,7 @@ import { moodSnapshot, validateMoodDelta } from './mood.js';
 import { createMemoryAgentAccess, memoryAgentErrorMessage } from './dsh-memory-agent-access.js';
 import { proactiveQuery } from './dsh-proactive-context.js';
 import { expressionSearchItems, expressionSearchQuery, expressionSearchResult } from './expression-search.js';
+import { readBiliCredentials } from './bili-credentials.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
@@ -167,6 +168,7 @@ export function createDshRuntime({ store, dataDir }) {
         const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal, excludeMessageId,
           ...(composing ? { purpose: 'proactive', ...args } : {}) }) : null;
         let cacheDirectory;
+        const readonlyCredentials = reading ? readBiliCredentials({ dataDir }) : null;
         if (reading) {
           cacheDirectory = join(resolve(dataDir), 'dsh-cache', 'humanism');
           mkdirSync(cacheDirectory, { recursive: true });
@@ -206,9 +208,8 @@ export function createDshRuntime({ store, dataDir }) {
             taskController.abort();
             if (!received) stop('DSH 连接已中断，未自动重试。');
           });
-          const credentialPath = join(resolve(dataDir), 'bili-credentials.json');
           child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace,
-            ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}),
+            ...(reading ? { cacheDirectory, ...(readonlyCredentials ? { readonlyCredentials } : {}) } : {}),
             ...(name === 'inspect' && settings.proactivePlugin ? { proactivePlugin: settings.proactivePlugin } : {}),
             ...(name === 'inspect' && settings.moodPlugin ? { moodPlugin: settings.moodPlugin } : {}),
             ...(name === 'inspect' && settings.expressionPlugin ? { expressionPlugin: settings.expressionPlugin } : {}),

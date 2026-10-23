@@ -33,6 +33,9 @@ import { createQQChatBudget, defaultQQChatLimit, normalizeQQChatLimit } from './
 import { createQQChatBatch, defaultQQMergeWindow, normalizeQQMergeWindow } from './qq-chat-batch.js';
 import { captureQQContext, isQQContextCanceled, qqConfigSignature } from './qq-context.js';
 import { createFollowupActions, followupView } from './followups.js';
+import { readBiliCredentials } from './bili-credentials.js';
+import { createBiliSocialRuntime } from './bili-social-runtime.js';
+import { createBiliSocialDiscussion } from './bili-social.js';
 import { defaultFeishuSettings, normalizeFeishuSettings } from './feishu-message.js';
 import { createFeishuChat } from './feishu.js';
 import { createFeishuRuntime } from './feishu-runtime.js';
@@ -46,6 +49,8 @@ mkdirSync(dataDir, { recursive: true });
 const store = createStore(join(dataDir, 'persona.sqlite'));
 const dshRuntime = createDshRuntime({ store, dataDir });
 const biliAccount = createBiliAccount({ dataDir });
+const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
+const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
@@ -156,11 +161,13 @@ function makeSelfExpressionJobs() {
   return createSelfExpressionJobs({ store, platforms: expressionPlatforms,
     canUsePlatform: platform => {
       if (platform === 'qq') return store.getSetting('qq').enabled;
+      if (platform === 'bilibili') return biliSocialRuntime.status().enabled && biliAccount.status().socialReady;
       try { return Boolean(heyboxRuntime()); } catch { return false; }
     },
     isPlatformReady: async (platform, { signal }) => {
       signal.throwIfAborted();
       if (platform === 'qq') return (await testQQ(signal)).ok === true;
+      if (platform === 'bilibili') return biliSocialRuntime.status().ready === true;
       const state = await heyboxRuntime().check();
       signal.throwIfAborted();
       return state.configured === true && state.booted === true && state.heyboxInstalled === true;
@@ -171,6 +178,7 @@ function makeSelfExpressionJobs() {
       await runtime.openHeybox(); signal.throwIfAborted();
       return runtime.readHeyboxComments(reading.url, { expectedTitle: reading.title, signal });
     },
+    getBiliDiscussion,
     generate: async ({ instructions, signal, ...context }) => {
       const result = await requestCompletion({ store, signal, maxTokens: 900, messages: [
         { role: 'system', content: instructions },
@@ -181,7 +189,12 @@ function makeSelfExpressionJobs() {
       try { return JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); }
       catch { throw new Error('模型的自主表达决定格式无效，本次不执行。'); }
     },
-    perform: async (platform, action, payload, { signal }) => {
+    perform: async (platform, action, payload, { signal, beforeSend }) => {
+      if (platform === 'bilibili') {
+        const notice = store.getBiliNotice(payload.noticeKey);
+        if (action !== 'reply' || !notice || notice.state !== 'processing') throw new Error('B站回复来源无法核对。');
+        return biliSocialRuntime.reply({ notice: notice.notice, text: payload.text, signal, beforeSend });
+      }
       if (platform === 'heybox') {
         if (!['post', 'comment', 'reply'].includes(action)) throw new Error('小黑盒当前不支持此表达动作。');
         const settings = normalizeExpressionSettings({}, store.getSetting('selfExpression'), expressionPlatforms);
@@ -769,7 +782,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
       if (path === '/api/feishu/reconnect' && req.method === 'POST') { feishuChat.disconnect(); await feishuRuntime.restart(); return json(res, 200, { status: feishuChat.status(), connection: feishuRuntime.status() }); }
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
@@ -956,5 +969,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), feishuRuntime.stop(), feishuChat.stop()]); await biliAccount.close(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), feishuChat.stop(), feishuRuntime.stop()]); server.close(async () => { await stopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await biliAccount.close(); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });

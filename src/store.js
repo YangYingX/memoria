@@ -7,6 +7,7 @@ import { assertPublicUrl } from './public-fetch.js';
 import { normalizeMoodState } from './mood.js';
 import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
+import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -85,6 +86,20 @@ function metadataValue(value = {}) {
   return jsonValue(value, '附加信息');
 }
 
+function biliKey(value) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) invalid('B站通知去重标识无效。');
+  return value;
+}
+
+function biliSourceMetadata(value) {
+  record(value, 'B站通知来源');
+  if (Object.keys(value).length !== 4 || Object.keys(value).some(key => !['key', 'accountId', 'notice', 'hash'].includes(key))) invalid('B站通知来源字段无效。');
+  const accountId = biliSocialId(value.accountId), notice = normalizeNotice(value.notice);
+  const key = biliNoticeKey(accountId, notice), hash = biliNoticeHash(accountId, notice);
+  if (value.key !== key || value.hash !== hash) invalid('B站通知来源校验不一致。');
+  return { key, accountId, notice, hash };
+}
+
 function feishuMessageKey(value) {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) invalid('飞书消息标识须为完整 SHA256。');
   return value;
@@ -120,6 +135,20 @@ function eventFields(input) {
     if (type !== 'message') invalid('QQ 合并消息来源只能保存在消息经历中。');
     metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
   }
+  if (Object.hasOwn(metadata, 'biliNotice')) {
+    const source = biliSourceMetadata(metadata.biliNotice);
+    if (type !== 'message' || input.scope !== biliNoticeScope(source.accountId, source.notice) || input.actor !== biliNoticeActor(source.notice)
+      || content !== source.notice.content || input.sourceRef !== source.key || typeof metadata.messageId !== 'string') invalid('B站通知来源与消息正文或身份不一致。');
+    identifier(metadata.messageId, 'B站通知原消息 ID'); metadata.biliNotice = source;
+  }
+  if (type === 'bili_reply') {
+    if (Object.keys(metadata).some(key => !['key', 'sourceEventId', 'state', 'replyId'].includes(key)) || !BILI_REPLY_STATES.includes(metadata.state)
+      || metadata.state === 'received' || metadata.key !== input.sourceRef || input.actor !== 'scheduler'
+      || !/^group:bilibili:[1-9]\d*:[1-9]\d*:[1-9]\d*$/.test(input.scope)) invalid('B站回复状态事件无效。');
+    biliKey(metadata.key); identifier(metadata.sourceEventId, 'B站回复来源 ID');
+    if (metadata.state === 'sent') metadata.replyId = biliSocialId(metadata.replyId);
+    else if (metadata.replyId !== undefined) invalid('未确认的B站回复不能保存成功标识。');
+  }
   return {
     type,
     scope: scopeValue(input.scope),
@@ -139,6 +168,7 @@ function messageFields(input) {
     if (input.role !== 'user') invalid('QQ 合并消息来源只能保存在用户消息中。');
     metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
   }
+  if (Object.hasOwn(metadata, 'biliNoticeKey') && (input.role !== 'user' || !/^[a-f0-9]{64}$/.test(metadata.biliNoticeKey))) invalid('B站通知只能关联有效用户消息。');
   return {
     scope: scopeValue(input.scope),
     role: input.role,
@@ -320,6 +350,7 @@ export function createStore(dbPath) {
         content TEXT NOT NULL, source_ref TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS events_scope_created ON events(scope, created_at);
+      CREATE INDEX IF NOT EXISTS events_type_source ON events(type, source_ref);
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY, scope TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
         actor TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL
@@ -449,6 +480,47 @@ export function createStore(dbPath) {
     return valid ? { followup: item, memory, source, message: messageRow(message) } : null;
   }
   const currentFollowupSource = item => Boolean(followupEvidence(item));
+  const biliClaimed = (kind, key) => Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', `bili-${kind}:${key}`));
+  function claimBili(kind, key, now) {
+    return run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `bili-${kind}:${key}`, now).changes > 0;
+  }
+  function biliRecord(key) {
+    const row = get("SELECT * FROM events WHERE type = 'message' AND source_ref = ? AND json_type(metadata, '$.biliNotice') = 'object' ORDER BY rowid LIMIT 1", key);
+    if (!row) return null;
+    const source = eventRow(row), fields = eventFields(source), original = fields.metadata.biliNotice;
+    const incoming = get('SELECT * FROM messages WHERE id = ?', fields.metadata.messageId);
+    if (!incoming || incoming.role !== 'user' || incoming.scope !== fields.scope || incoming.actor !== fields.actor || incoming.content !== fields.content
+      || JSON.parse(incoming.metadata).biliNoticeKey !== key || get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', fields.scope, row.id)) return null;
+    const last = get("SELECT * FROM events WHERE type = 'bili_reply' AND source_ref = ? ORDER BY rowid DESC LIMIT 1", key);
+    let state = 'received', updatedAt = source.createdAt, replyId;
+    if (last) {
+      const outcome = eventRow(last), checked = eventFields(outcome);
+      if (checked.metadata.sourceEventId !== source.id || outcome.scope !== source.scope) return null;
+      state = checked.metadata.state; updatedAt = outcome.createdAt; replyId = checked.metadata.replyId;
+    }
+    if (biliClaimed('history', key) && ['received', 'processing', 'sending'].includes(state)) state = state === 'sending' || biliClaimed('send', key) ? 'unknown' : 'interrupted';
+    else if (state === 'received' && biliClaimed('send', key)) state = 'unknown';
+    else if (state === 'received' && biliClaimed('decision', key)) state = 'interrupted';
+    return { key, accountId: original.accountId, scope: fields.scope, actor: fields.actor, notice: original.notice, state,
+      sourceEventId: source.id, messageId: incoming.id, receivedAt: source.createdAt, updatedAt, ...(replyId ? { replyId } : {}) };
+  }
+  function appendBiliState(item, state, now, replyId) {
+    insertEvent({ id: randomUUID(), ...eventFields({ type: 'bili_reply', scope: item.scope, actor: 'scheduler', sourceRef: item.key,
+      content: `B站公开回复状态：${state}。`, metadata: { key: item.key, sourceEventId: item.sourceEventId, state, ...(replyId ? { replyId } : {}) } }), createdAt: now });
+    return { ...item, state, updatedAt: now, ...(replyId ? { replyId } : {}) };
+  }
+  function biliSources(accountId) {
+    return all(`SELECT e.source_ref AS key FROM events e WHERE e.type = 'message' AND json_extract(e.metadata, '$.biliNotice.accountId') = ?
+      AND json_extract(e.metadata, '$.biliNotice.notice.at') >= ?
+      AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.key = 'bili-history:' || e.source_ref)
+      AND NOT EXISTS (SELECT 1 FROM events s WHERE s.type = 'bili_reply' AND s.source_ref = e.source_ref
+        AND json_extract(s.metadata, '$.state') IN ('sent', 'unknown', 'quiet', 'failed', 'invalidated', 'interrupted'))
+      ORDER BY e.created_at, e.rowid`, accountId, new Date(Date.now() - 7 * 86400000).toISOString());
+  }
+  function currentBili(item, now) {
+    return item && !biliClaimed('history', item.key) && Date.parse(item.notice.at) >= now - 7 * 86400000
+      && Date.parse(item.notice.at) <= now + 5 * 60000 && item.notice.mid !== item.accountId;
+  }
   function addRevision(memory, now) {
     insertRevision({ id: randomUUID(), memoryId: memory.id, snapshot: memory, createdAt: now });
   }
@@ -612,6 +684,9 @@ export function createStore(dbPath) {
     },
     getMemory(id) {
       return memoryRow(get('SELECT * FROM memories WHERE id = ?', identifier(id, '记忆 ID')));
+    },
+    isConversationSourceBlocked(scope, eventId) {
+      return Boolean(get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', scopeValue(scope), identifier(eventId, '对话来源 ID')));
     },
     getMemorySource(id, scopes) {
       id = identifier(id, '记忆 ID');
@@ -941,6 +1016,104 @@ export function createStore(dbPath) {
     },
     hasDelivery(key) {
       return Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', text(key, '消息去重标识', 256)));
+    },
+    receiveBiliNotice(input) {
+      record(input, 'B站通知');
+      if (Object.keys(input).length !== 2 || Object.keys(input).some(key => !['accountId', 'notice'].includes(key))) invalid('B站通知入站参数无效。');
+      const accountId = biliSocialId(input.accountId), notice = normalizeNotice(input.notice), key = biliNoticeKey(accountId, notice);
+      const hash = biliNoticeHash(accountId, notice), now = new Date().toISOString(), time = Date.parse(now);
+      return transaction(() => {
+        const previous = biliRecord(key);
+        if (previous) {
+          if (biliNoticeHash(previous.accountId, previous.notice) !== hash) {
+            claimBili('decision', key, now);
+            return { inserted: false, record: appendBiliState(previous, previous.state === 'sending' ? 'unknown' : 'invalidated', now), skipped: 'changed' };
+          }
+          return { inserted: false, record: previous };
+        }
+        if (get("SELECT 1 FROM events WHERE type = 'message' AND source_ref = ? AND json_type(metadata, '$.biliNotice') = 'object'", key)) {
+          claimBili('decision', key, now);
+          return { inserted: false, record: null, skipped: 'invalidated' };
+        }
+        if (!currentBili({ key, accountId, notice }, time)) return { inserted: false, record: null, skipped: 'stale_or_self' };
+        if (biliSources(accountId).map(item => biliRecord(item.key)).filter(item => item && !BILI_REPLY_TERMINAL.includes(item.state) && currentBili(item, time)).length >= 20) {
+          return { inserted: false, record: null, skipped: 'queue_full' };
+        }
+        const scope = biliNoticeScope(accountId, notice), actor = biliNoticeActor(notice), messageId = randomUUID();
+        insertMessage({ id: messageId, ...messageFields({ scope, actor, role: 'user', content: notice.content, metadata: { biliNoticeKey: key } }), createdAt: now });
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'message', scope, actor, content: notice.content, sourceRef: key,
+          metadata: { messageId, biliNotice: { key, accountId, notice, hash } } }), createdAt: now });
+        return { inserted: true, record: biliRecord(key) };
+      });
+    },
+    getBiliNotice(key) {
+      return biliRecord(biliKey(key));
+    },
+    listBiliNotices(accountId, options = {}) {
+      accountId = biliSocialId(accountId); record(options, 'B站待处理通知参数');
+      if (Object.keys(options).some(key => key !== 'limit')) invalid('B站待处理通知参数无效。');
+      const limit = integer(options.limit === undefined ? 20 : options.limit, 'B站待处理通知条数', 1, 20), now = Date.now();
+      return biliSources(accountId).map(item => biliRecord(item.key)).filter(item => item?.state === 'received' && currentBili(item, now)).slice(0, limit);
+    },
+    beginBiliReply(key) {
+      key = biliKey(key); const now = new Date().toISOString();
+      return transaction(() => {
+        const item = biliRecord(key);
+        if (!item || item.state !== 'received' || !currentBili(item, Date.parse(now)) || !claimBili('decision', key, now)) return null;
+        return appendBiliState(item, 'processing', now);
+      });
+    },
+    beginBiliSend(key, options) {
+      key = biliKey(key); record(options, 'B站发送领取参数');
+      if (Object.keys(options).some(key => !['dayId', 'now'].includes(key))) invalid('B站发送领取参数无效。');
+      const dayId = identifier(options.dayId, '公共表达当日 ID'), now = followupClock(options.now === undefined ? Date.now() : options.now), time = Date.parse(now);
+      return transaction(() => {
+        const item = biliRecord(key), config = api.getSetting('selfExpression', {}), budget = api.getSetting('selfExpressionStatus', {});
+        const platform = config.platforms?.bilibili, counts = budget.platformAttempts?.bilibili || {};
+        if (!item || item.state !== 'processing' || !currentBili(item, time) || !biliClaimed('decision', key) || biliClaimed('send', key)
+          || !config.enabled || !platform?.enabled || platform.reply !== true || budget.dayId !== dayId
+          || !Number.isFinite(Date.parse(budget.dayStartAt)) || !Number.isFinite(Date.parse(budget.dayEndAt))
+          || time < Date.parse(budget.dayStartAt) || time >= Date.parse(budget.dayEndAt)) return null;
+        const limit = integer(config.dailyLimit, '公共表达每日上限', 0, 100), platformLimit = integer(platform.dailyLimit, 'B站公开表达每日上限', 0, 100);
+        const attempts = integer(budget.postAttempts, '公共表达次数', 0, Number.MAX_SAFE_INTEGER), publicAttempts = ['post', 'comment', 'reply'].reduce((sum, action) => sum + integer(counts[action] ?? 0, '平台公共表达次数', 0, Number.MAX_SAFE_INTEGER), 0);
+        const unconfirmed = ['post', 'comment', 'reply'].some(action => ['pending', 'unknown', 'error'].includes(budget.outcomes?.bilibili?.[action]?.outcome)
+          && Date.parse(budget.outcomes.bilibili[action].at) >= Date.parse(budget.dayStartAt));
+        if (attempts >= limit || publicAttempts >= platformLimit || unconfirmed || !claimBili('send', key, now)) return null;
+        const target = { targetKey: key, targetUrl: `https://www.bilibili.com/video/${item.notice.bvid}` };
+        api.setSetting('selfExpressionStatus', { ...budget, postAttempts: attempts + 1,
+          platformAttempts: { ...budget.platformAttempts, bilibili: { ...counts, reply: (counts.reply || 0) + 1 } },
+          outcomes: { ...budget.outcomes, bilibili: { ...budget.outcomes?.bilibili, reply: { outcome: 'pending', at: now, ...target } } }, lastOutcome: 'pending' });
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'self_expression', scope: 'owner', actor: 'scheduler', content: '开始执行B站公开回复，本次已计入公共表达额度。', sourceRef: key,
+          metadata: { action: 'reply', platform: 'bilibili', outcome: 'attempt', noticeKey: key, ...target } }), createdAt: now });
+        return appendBiliState(item, 'sending', now);
+      });
+    },
+    finishBiliReply(key, state, options = {}) {
+      key = biliKey(key); record(options, 'B站回复结果');
+      if (!BILI_REPLY_TERMINAL.includes(state) || Object.keys(options).some(key => !['replyId', 'now'].includes(key))) invalid('B站回复结束状态无效。');
+      const now = followupClock(options.now === undefined ? Date.now() : options.now);
+      const replyId = state === 'sent' ? biliSocialId(options.replyId) : undefined;
+      if (state !== 'sent' && options.replyId !== undefined) invalid('未确认发送不能记录B站回复标识。');
+      return transaction(() => {
+        const item = biliRecord(key);
+        if (!item || BILI_REPLY_TERMINAL.includes(item.state) || (['sent', 'unknown'].includes(state) ? item.state !== 'sending' : !['received', 'processing'].includes(item.state))) return null;
+        claimBili('decision', key, now);
+        return appendBiliState(item, state, now, replyId);
+      });
+    },
+    recoverBiliReplies() {
+      return transaction(() => {
+        const now = new Date().toISOString(), sources = all(`SELECT e.source_ref AS key FROM events e WHERE e.type = 'message' AND json_type(e.metadata, '$.biliNotice') = 'object'
+          AND EXISTS (SELECT 1 FROM events s WHERE s.type = 'bili_reply' AND s.source_ref = e.source_ref AND json_extract(s.metadata, '$.state') IN ('processing', 'sending'))
+          AND NOT EXISTS (SELECT 1 FROM events s WHERE s.type = 'bili_reply' AND s.source_ref = e.source_ref AND json_extract(s.metadata, '$.state') IN ('sent', 'unknown', 'quiet', 'failed', 'invalidated', 'interrupted'))`);
+        let interrupted = 0, unknown = 0;
+        for (const source of sources) {
+          const item = biliRecord(source.key);
+          if (item?.state === 'processing') { appendBiliState(item, 'interrupted', now); interrupted++; }
+          else if (item?.state === 'sending') { appendBiliState(item, 'unknown', now); unknown++; }
+        }
+        return { interrupted, unknown };
+      });
     },
     latestOwnerMessage() {
       const row = get("SELECT * FROM messages WHERE scope = 'owner' AND role = 'user' AND actor = 'owner' ORDER BY rowid DESC LIMIT 1");
@@ -1429,6 +1602,9 @@ export function createStore(dbPath) {
 
       return transaction(() => {
         const restoredAt = new Date().toISOString();
+        // Restored social inbox entries are history, never a renewed permission to publish.
+        for (const item of [...all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_type(metadata, '$.biliNotice') = 'object'"),
+          ...events.filter(item => item.metadata.biliNotice).map(item => ({ key: item.metadata.biliNotice.key }))]) claimBili('history', biliKey(item.key), restoredAt);
         // Local terminal records survive even backups that predate the followup or its source memory.
         const mergedFollowups = new Map(followups.map(item => [item.id, item]));
         for (const row of all("SELECT * FROM followups WHERE status IN ('attempted', 'sent', 'unknown', 'cancelled', 'expired', 'invalidated')")) {

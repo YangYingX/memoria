@@ -108,7 +108,7 @@ async function loadState({ fill = false } = {}) {
   $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。表情选择：${dsh.expressions?.configuredEngine === 'dsh-meme' ? '按需关键词检索' : '当前图库目录'}。主动拟聊选择：${dsh.proactive?.configuredEngine === 'dsh-speak-up' ? '原版主动搭话插件' : 'DSH 原生回合'}。${dsh.proactive?.lastCompletedTurn ? `本次服务启动后最近完成拟聊：${date(dsh.proactive.lastCompletedTurn.completedAt)}。` : '本次服务启动后尚未完成拟聊回合。'}长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
   $('dsh-test').disabled = !dsh?.enabled || dsh.busy;
   const biliAccount = state.data.biliAccountStatus;
-  $('bili-account-summary').textContent = biliAccount?.configured ? `已保存专用账号 ${biliAccount.accountId || ''} 的本机登录状态。此状态不表示当前平台认证仍有效。`
+  $('bili-account-summary').textContent = (biliAccount?.readReady ?? biliAccount?.configured) ? `专用账号 ${biliAccount.accountId || ''}：视频读取凭据已保存；社交凭据${biliAccount.socialReady ? '已保存' : '尚未齐备，可重新导入登录'}。此状态不表示当前平台认证仍有效。`
     : biliAccount?.browserOpen ? '专用登录窗口已打开。登录完成后点击“完成登录，保存状态”。' : '尚未保存 B站专用账号；读取时使用匿名公开接口。';
   $('bili-login-confirm').disabled = !biliAccount?.browserOpen;
   const qqChat = state.data.qqChatStatus;
@@ -483,6 +483,10 @@ function fillSettings() {
   $('self-expression-heybox-reply').checked = Boolean(expressionHeybox.reply);
   $('self-expression-heybox-daily-limit').value = expressionHeybox.dailyLimit ?? 80;
   $('self-expression-heybox-topic').value = expressionHeybox.topic || '盒友杂谈';
+  const expressionBili = selfExpression.platforms?.bilibili || {};
+  $('self-expression-bilibili-enabled').checked = Boolean(expressionBili.enabled);
+  $('self-expression-bilibili-reply').checked = Boolean(expressionBili.reply);
+  $('self-expression-bilibili-daily-limit').value = expressionBili.dailyLimit ?? 80;
   $('books-enabled').checked = Boolean(books.enabled);
   $('books-daily-limit').value = books.dailyLimit ?? 2;
   $('books-chunk-chars').value = books.chunkChars ?? 3000;
@@ -561,6 +565,13 @@ function renderSelfExpressionStatus(status = {}) {
   const qqCounts = inDay ? status.platformAttempts?.qq || {} : {};
   const heybox = config.platforms?.heybox || {};
   const heyboxCounts = inDay ? status.platformAttempts?.heybox || {} : {};
+  const bilibili = config.platforms?.bilibili || {}, biliCounts = inDay ? status.platformAttempts?.bilibili || {} : {};
+  const biliAccount = state.data?.biliAccountStatus, biliSocial = state.data?.biliSocialStatus;
+  const socialSummary = biliSocial?.paused ? '社交访问已暂停，请先核对账号和平台状态。'
+    : biliSocial?.error || biliSocial?.enabled && biliSocial?.ready === false ? '社交环境或凭据尚未就绪，请核对本机配置。'
+      : biliSocial?.busy ? '正在核对或处理本次通知。'
+        : biliSocial?.enabled ? '独立社交宿主已启用，账号与目标在执行时核验。' : '独立社交宿主尚未启用；尚未安装时请先按部署说明配置。';
+  $('self-expression-bilibili-summary').textContent = `本机视频读取凭据${(biliAccount?.readReady ?? biliAccount?.configured) ? '已保存' : '未保存'}，社交凭据${biliAccount?.socialReady ? '已保存' : '尚未齐备'}。${socialSummary}这些状态不证明平台登录有效或回复可见。`;
   const outcomes = { success: '已确认完成', review: '已提交，待平台审核', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', checking: '正在检查平台连接', unavailable: '平台接入暂不可用', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
   const actionNames = { post: '空间动态', signature: '签名', avatar: '头像' };
   const avatarNames = { hello: '打招呼', happy: '开心', thinking: '思考', comfort: '安慰' };
@@ -576,7 +587,7 @@ function renderSelfExpressionStatus(status = {}) {
   $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 80} 次（全平台合计）`;
   $('self-expression-outcome').textContent = status.busy ? '正在考虑表达…' : outcomes[status.lastOutcome] || '还没有记录';
   const heyboxTotal = (heyboxCounts.post || 0) + (heyboxCounts.comment || 0) + (heyboxCounts.reply || 0);
-  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} / ${Math.max(6, config.dailyLimit ?? 80)} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 80} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次；小黑盒公开表达 ${heyboxTotal} / ${heybox.dailyLimit ?? 80} 次（发帖 ${heyboxCounts.post || 0}、评论 ${heyboxCounts.comment || 0}、回复 ${heyboxCounts.reply || 0}）。尝试失败也计次。`;
+  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} / ${Math.max(6, config.dailyLimit ?? 80)} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 80} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次；小黑盒公开表达 ${heyboxTotal} / ${heybox.dailyLimit ?? 80} 次（发帖 ${heyboxCounts.post || 0}、评论 ${heyboxCounts.comment || 0}、回复 ${heyboxCounts.reply || 0}）；B站通知回复 ${biliCounts.reply || 0} / ${bilibili.dailyLimit ?? 80} 次。尝试失败也计次。`;
   const platformStatus = $('self-expression-platform-status');
   platformStatus.replaceChildren();
   for (const [name, label] of Object.entries(actionNames)) {
@@ -590,6 +601,8 @@ function renderSelfExpressionStatus(status = {}) {
     platformStatus.append(node('p', `小黑盒${label} · ${outcomes[item.outcome] || '结果未确认'} · ${date(item.at)}`, 'caption'));
     if (item.modified) platformStatus.append(node('p', '平台替换了部分文字，下方显示客户端中的正文。', 'caption'));
   }
+  const biliReply = status.outcomes?.bilibili?.reply;
+  if (biliReply) platformStatus.append(node('p', `B站通知回复 · ${biliReply.outcome === 'success' ? '已取得提交回执，审核与可见性未确认' : outcomes[biliReply.outcome] || '结果未确认'} · ${date(biliReply.at)}`, 'caption'));
   const recent = $('self-expression-recent');
   recent.replaceChildren();
   for (const [label, value] of [[status.lastPostState === 'review' ? '最近已提交动态（待审核）' : '最近已确认动态', [status.lastPostTitle, status.lastPostText].filter(Boolean).join('\n\n')], ['最近已确认签名', status.lastSignature], ['最近已确认头像', avatarNames[status.lastAvatarId]]]) {
@@ -1030,7 +1043,7 @@ $('settings-form').addEventListener('submit', event => {
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
         autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox', 'bilibili'].filter(source => $('autonomy-source-' + source).checked), interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },
-        selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) }, heybox: { enabled: $('self-expression-heybox-enabled').checked, post: $('self-expression-heybox-post').checked, comment: $('self-expression-heybox-comment').checked, reply: $('self-expression-heybox-reply').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-heybox-daily-limit').value), topic: $('self-expression-heybox-topic').value.trim() } } },
+        selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) }, heybox: { enabled: $('self-expression-heybox-enabled').checked, post: $('self-expression-heybox-post').checked, comment: $('self-expression-heybox-comment').checked, reply: $('self-expression-heybox-reply').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-heybox-daily-limit').value), topic: $('self-expression-heybox-topic').value.trim() }, bilibili: { enabled: $('self-expression-bilibili-enabled').checked, post: false, comment: false, reply: $('self-expression-bilibili-reply').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-bilibili-daily-limit').value) } } },
         proactive: { enabled: $('proactive-enabled').checked, desire: Number($('proactive-desire').value), dailyLimit: Number($('proactive-daily-limit').value), cooldownMinutes: Number($('proactive-cooldown').value), idleMinutes: Number($('proactive-idle').value), startHour: Number($('proactive-start-hour').value), endHour: Number($('proactive-end-hour').value), timeZone: $('proactive-time-zone').value.trim() },
         books: { enabled: $('books-enabled').checked, dailyLimit: Number($('books-daily-limit').value), chunkChars: Number($('books-chunk-chars').value), startHour: Number($('books-start-hour').value), endHour: Number($('books-end-hour').value), timeZone: $('books-time-zone').value.trim() },
       } });

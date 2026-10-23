@@ -1,17 +1,10 @@
 import { chromium } from 'playwright';
 import { randomUUID } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { normalizeBiliCredentials, readBiliCredentials } from './bili-credentials.js';
 
 const HOME = 'https://www.bilibili.com/';
-
-function validCredentials(value) {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    && Object.keys(value).every(key => ['sessdata', 'accountId'].includes(key))
-    && typeof value.sessdata === 'string' && value.sessdata.length > 0 && value.sessdata.length < 4096
-    && !/[\s\u0000-\u001f\u007f;]/u.test(value.sessdata)
-    && typeof value.accountId === 'string' && /^[1-9]\d{0,19}$/.test(value.accountId);
-}
 
 // This is a dedicated platform execution account, not a binding of the creator's identity.
 export function createBiliAccount({ dataDir }) {
@@ -24,17 +17,14 @@ export function createBiliAccount({ dataDir }) {
   function status() {
     let credentials;
     try {
-      const file = statSync(credentialsPath, { throwIfNoEntry: false });
-      if (file?.isFile() && file.size <= 32768) {
-        const value = JSON.parse(readFileSync(credentialsPath, 'utf8'));
-        if (validCredentials(value)) credentials = value;
-      }
+      credentials = readBiliCredentials({ dataDir: directory, social: true }) || readBiliCredentials({ dataDir: directory });
     } catch { /* Configuration is local evidence only; it does not prove an online login. */ }
-    return { configured: Boolean(credentials), browserOpen: Boolean(context), ...(credentials ? { accountId: credentials.accountId } : {}) };
+    return { configured: Boolean(credentials), readReady: Boolean(credentials), socialReady: Boolean(credentials?.biliJct),
+      browserOpen: Boolean(context), ...(credentials ? { accountId: credentials.accountId } : {}) };
   }
 
   function saveCredentials(credentials) {
-    if (!validCredentials(credentials)) throw new Error('INVALID_CREDENTIALS');
+    credentials = normalizeBiliCredentials(credentials);
     let temporary, file, owned = false;
     try {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -115,8 +105,10 @@ export function createBiliAccount({ dataDir }) {
         await pendingStart;
         if (!context) throw new Error('LOGIN_WINDOW_REQUIRED');
         const cookies = await context.cookies(HOME);
+        const biliJct = cookies.find(cookie => cookie.name === 'bili_jct')?.value, buvid3 = cookies.find(cookie => cookie.name === 'buvid3')?.value;
         const credentials = { sessdata: cookies.find(cookie => cookie.name === 'SESSDATA')?.value,
-          accountId: cookies.find(cookie => cookie.name === 'DedeUserID')?.value };
+          accountId: cookies.find(cookie => cookie.name === 'DedeUserID')?.value,
+          ...(biliJct !== undefined ? { biliJct } : {}), ...(buvid3 ? { buvid3 } : {}) };
         saveCredentials(credentials);
       } catch {
         throw new Error('未保存B站专用账号；请重新打开登录窗口，手动完成登录后再点击确认。');
@@ -129,9 +121,10 @@ export function createBiliAccount({ dataDir }) {
   }
 
   function importLogin(input) {
-    if (!validCredentials(input)) return Promise.reject(new Error('未导入B站登录状态；请在已登录的 Chrome 中使用栖忆登录桥。'));
+    let credentials;
+    try { credentials = normalizeBiliCredentials(input); }
+    catch { return Promise.reject(new Error('未导入B站登录状态；请在已登录的 Chrome 中使用栖忆登录桥。')); }
     if (confirmPromise) return Promise.reject(new Error('正在保存B站登录状态，请稍候。'));
-    const credentials = { sessdata: input.sessdata, accountId: input.accountId };
     const pendingStart = startPromise;
     confirmPromise = (async () => {
       try {
