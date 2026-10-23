@@ -130,7 +130,7 @@ function Invoke-MemoriaAutostart($Context, [ValidateSet('Enable', 'Disable', 'St
             Configured = $enabled
             ShortcutPath = $Context.ShortcutPath
             BrowserCache = $selectedCache
-            Note = 'Configuration only. This does not report service state, start or stop Node, or provide crash recovery. Takes effect at user sign-in.'
+            Note = 'Configuration only. This does not report service state or start/stop the runtime. At user sign-in the normal launcher starts the supervised core.'
         }
     } finally {
         if ($null -ne $created) { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($created) }

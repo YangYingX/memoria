@@ -2,51 +2,53 @@ param([string]$BrowserCache)
 
 $ErrorActionPreference = 'Stop'
 if ($PSBoundParameters.ContainsKey('BrowserCache')) { $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserCache }
-$projectDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$serverPath = Join-Path $projectDir 'src\server.js'
-$dataDir = Join-Path $projectDir 'data'
-$pidFile = Join-Path $dataDir 'server.pid'
-$hasher = [Security.Cryptography.SHA256]::Create()
-try { $projectKey = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($projectDir.ToLowerInvariant()))).Replace('-', '').Substring(0, 24) }
-finally { $hasher.Dispose() }
-$startMutex = [Threading.Mutex]::new($false, "Local\MemoriaStart-$projectKey")
-$ownsMutex = $false
+. (Join-Path $PSScriptRoot 'windows-runtime.ps1')
+$context = Get-MemoriaWindowsContext
+$gate = [Threading.Mutex]::new($false, $context.GateName)
+$locked = $false
+$core = $null
+$supervisor = $null
 try {
-    try { $ownsMutex = $startMutex.WaitOne(0) }
-    catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
-    if (!$ownsMutex) { throw 'Another Memoria startup is in progress. Try again shortly.' }
-    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-    if (Test-Path -LiteralPath $pidFile) {
-        $savedPid = [int](Get-Content -LiteralPath $pidFile -Raw)
-        $running = Get-CimInstance Win32_Process -Filter "ProcessId = $savedPid" -ErrorAction SilentlyContinue
-        if ($running -and $running.Name -eq 'node.exe' -and $running.CommandLine.Contains($serverPath)) {
-            Write-Host 'Memoria is already running: http://127.0.0.1:3210'
-            exit 0
-        }
+    $locked = Enter-MemoriaWindowsMutex $gate 0
+    if (!$locked) { throw 'Another Memoria start or stop is in progress. Try again shortly.' }
+    New-Item -ItemType Directory -Path $context.DataDirectory -Force | Out-Null
+    $supervisor = Get-MemoriaWindowsManagedProcess $context 'Supervisor'
+    if ((Test-Path -LiteralPath $context.StopMarker) -and $null -ne $supervisor) { throw 'Memoria is still stopping. Wait for its supervisor to exit before starting again.' }
+    $core = Get-MemoriaWindowsManagedProcess $context 'Server'
+    if ($null -ne $supervisor) {
+        Write-Host 'Memoria supervision is already running: http://127.0.0.1:3210'
+        exit 0
     }
-    if (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue) {
+    if ($null -eq $core -and (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue)) {
         throw 'Port 3210 is already in use. Stop that service first, or use PORT with npm run dev.'
     }
-    $nodePath = (Get-Command node.exe -ErrorAction Stop).Source
+    $nodePath = if ($null -ne $core) { $core.ExecutablePath } else { (Get-Command node.exe -ErrorAction Stop).Source }
     $version = & $nodePath -p 'process.versions.node'
     if ([version]$version -lt [version]'22.16.0') { throw 'Node.js 22.16 or newer is required.' }
-    & $nodePath -e "try { for (const name of ['@mozilla/readability', 'linkedom', 'playwright']) require.resolve(name, { paths: [process.argv[1]] }); } catch { process.exitCode = 1; }" $projectDir > $null
+    & $nodePath -e "try { for (const name of ['@mozilla/readability', 'linkedom', 'playwright']) require.resolve(name, { paths: [process.argv[1]] }); } catch { process.exitCode = 1; }" $context.ProjectDirectory > $null
     if ($LASTEXITCODE -ne 0) { throw 'Dependencies missing. Run npm.cmd ci --ignore-scripts in the project directory first.' }
-    $env:PORT = '3210'
-    $env:PERSONA_DATA_DIR = $dataDir
-    $process = Start-Process -FilePath $nodePath -ArgumentList ('"' + $serverPath + '"') -WorkingDirectory $projectDir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $dataDir 'server.log') -RedirectStandardError (Join-Path $dataDir 'server.err.log') -PassThru
-    Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ascii
+    if (Test-Path -LiteralPath $context.StopMarker) { Remove-Item -LiteralPath $context.StopMarker }
+    if ($null -eq $core) { $core = Start-MemoriaWindowsProcess $context 'Server' $nodePath }
+    else { Write-MemoriaWindowsProcessRecord $context.ServerRecord $core }
+    $ready = $false
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
         Start-Sleep -Milliseconds 250
-        if ($process.HasExited) { throw 'Server exited. See data\server.err.log.' }
+        if ($core.Process.HasExited) { throw 'Server exited. See data\server.err.log.' }
         try {
             $status = Invoke-RestMethod -Uri 'http://127.0.0.1:3210/api/status' -TimeoutSec 2
-            Write-Host 'Memoria: http://127.0.0.1:3210'
-            if (!$status.initialized) { Write-Host ('Setup key: ' + (Join-Path $dataDir 'setup-key.txt')) }
-            exit 0
+            if ($status.initialized -isnot [bool]) { throw 'The service status response was invalid.' }
+            if ($core.Process.HasExited) { throw 'Server exited during readiness checking.' }
+            $ready = $true
+            break
         } catch { if ($attempt -eq 19) { throw 'Startup timed out. See data\server.err.log.' } }
     }
+    if (!$ready) { throw 'Startup timed out. See data\server.err.log.' }
+    $supervisor = Start-MemoriaWindowsProcess $context 'Supervisor'
+    Write-Host 'Memoria: http://127.0.0.1:3210 (background crash recovery enabled)'
+    if (!$status.initialized) { Write-Host ('Setup key: ' + (Join-Path $context.DataDirectory 'setup-key.txt')) }
 } finally {
-    if ($ownsMutex) { $startMutex.ReleaseMutex() }
-    $startMutex.Dispose()
+    if ($null -ne $supervisor) { $supervisor.Process.Dispose() }
+    if ($null -ne $core) { $core.Process.Dispose() }
+    if ($locked) { $gate.ReleaseMutex() }
+    $gate.Dispose()
 }

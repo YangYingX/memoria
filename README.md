@@ -30,7 +30,7 @@ npm run browser:install
 
 这会安装 Chromium headless shell，不使用你的日常浏览器账号。聊天中读取小黑盒公开帖子也需要这个浏览器。Windows PowerShell 可用 `npm.cmd run browser:install`；Linux 还需系统依赖，见[部署说明](docs/deployment.md#自主浏览器安装)。仅聊天和普通网页阅读不需要下载浏览器。
 
-- **Windows**：双击 `start.cmd` 后台启动，双击 `stop.cmd` 停止；可配置[当前用户登录后自动启动](docs/deployment.md#windows-安装与运行)。
+- **Windows**：双击 `start.cmd` 后台启动，核心进程异常退出后会退避恢复；双击 `stop.cmd` 同时停止核心与监管，不会因此重新拉起。可配置[当前用户登录后自动启动](docs/deployment.md#windows-安装与运行)。
 - **Linux**：执行 `bash scripts/start.sh` 后台启动，执行 `bash scripts/stop.sh` 停止。
 - 打开 [本机管理后台](http://127.0.0.1:3210)。首次使用时，填写 `data/setup-key.txt` 中的初始化码并设置至少 12 位的管理密码。
 

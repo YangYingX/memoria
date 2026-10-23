@@ -156,13 +156,19 @@ Windows 可在同一 PowerShell 窗口设置 `$env:PLAYWRIGHT_BROWSERS_PATH`，�
 
 选择自己有读写权限的安装目录。安装依赖后双击 `start.cmd` 后台启动，`stop.cmd` 停止。访问 `http://127.0.0.1:3210`，使用 `data\setup-key.txt` 中的初始化码设置管理员密码。日志位于 `data\server.log` 与 `data\server.err.log`。
 
+正常启动后会有一个核心 Node 进程和一个隐藏的 PowerShell 监管进程。核心退出时，监管按 5、15、60、300 秒逐步延长等待，之后最多每 300 秒尝试恢复；连续运行至少 60 秒后重置等待。恢复沿用同一份数据、配置和浏览器缓存，不重新安装依赖或清空额度。重复执行启动不会增加另一套核心。
+
+最近一次监管状态保存在 `data\supervisor-status.json`，可区分运行、等待重试和错误；它是记录，是否在线仍需核对实际进程或访问后台。
+
+`stop.cmd` 会记录停止意图，先停止监管，再停止核心；等待恢复期间也可执行，停止后不会自动拉起。需要再次运行时执行 `start.cmd`。监管只负责核心进程退出，不根据模型连接失败、QQ 离线或网页访问失败重启；它不接管 QQ 协议端、平台宿主或模拟器。核心仍存活但无响应、或监管自身被结束时，可手动停止后重新启动。
+
 确认手动启动正常后，可在项目目录为当前 Windows 用户配置登录自启：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 -Mode Enable
 ```
 
-脚本在当前用户的 [Windows 启动文件夹](https://support.microsoft.com/en-US/Windows/Experience/Startup-Boot/configure-startup-applications-in-windows) 创建本项目的快捷方式，登录后隐藏启动同一个后台服务，沿用项目的 `data` 目录。配置自启只影响后续登录；当前服务仍用 `start.cmd`、`stop.cmd` 控制。自启和手动启动同时发生时，启动互斥会阻止重复创建进程。此方式需要用户登录，不提供异常退出后的自动重启；服务器长期运行可使用下方 Linux systemd 部署。
+脚本在当前用户的 [Windows 启动文件夹](https://support.microsoft.com/en-US/Windows/Experience/Startup-Boot/configure-startup-applications-in-windows) 创建本项目的快捷方式，登录后隐藏启动同一个后台服务和监管，沿用项目的 `data` 目录。配置自启只影响后续登录；当前服务仍用 `start.cmd`、`stop.cmd` 控制。自启和手动启动同时发生时，启动互斥会阻止重复创建进程。已有的项目自启快捷方式无需重建。此方式仍需要用户登录；注销或关机期间不会运行。
 
 若使用独立浏览器缓存，启用时会保存本次 `PLAYWRIGHT_BROWSERS_PATH` 的值，也可通过 `-BrowserCache` 指定已有的绝对目录；`0` 保留 Playwright 的项目内缓存方式。未指定参数且当前环境变量为空时，会保留已保存的缓存位置。后续改变缓存位置时重新运行启用命令。QQ 协议端、独立平台宿主和模拟器仍按各自的部署方式启动。
 
@@ -178,7 +184,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 -Mode Disable
 ```
 
-停用自启保留当前运行的服务和所有数据。移动项目目录前，先在原目录停用自启，再到新目录重新启用。
+停用自启保留当前运行的服务、监管和所有数据。`stop.cmd` 只停止本次运行，已启用的自启仍会在下次登录时启动；需要取消这一行为时执行上面的 `Disable` 命令。移动项目目录前，先在原目录停止服务并停用自启，再到新目录重新启用。
 
 ## Linux 安装与运行
 
