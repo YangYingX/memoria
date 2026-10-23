@@ -31,10 +31,16 @@ export function conversationClock(store, now = Date.now()) {
   } catch { throw new Error('对话日期或时区无效。'); }
 }
 
+function historicalConversationSource(store, memory, source) {
+  return store.isConversationSourceBlocked(memory.scope, source.eventId)
+    ? { historicalOnly: true, sourceNotice: '这条原始聊天来源已被更正或屏蔽，只用于核对当时说过什么；不能代表当前有效事实、偏好或发送授权。当前内容以 read_memory 返回的有效记忆及后续更正为准。' } : {};
+}
+
 export function withConversationSource(store, memory, scope) {
   const source = store.getMemorySource(memory.id, allowedScopes(scope));
   const parts = store.getReadingParts(memory.id, allowedScopes(scope));
   return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt,
+    ...historicalConversationSource(store, memory, source),
     ...(source.qqBatchCount ? { qqBatchCount: source.qqBatchCount } : {}),
     ...(source.qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}) } } : {}),
     ...(parts?.length ? { readingParts: parts } : {}) };
@@ -126,6 +132,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
       if (offset >= source.content.length) throw new Error('对话原话位置超出范围。');
       const end = Math.min(offset + 4000, source.content.length);
       return { memoryId: args.id, eventId: source.eventId, actor: source.actor, recordedAt: source.createdAt,
+        ...historicalConversationSource(store, store.getMemory(args.id), source),
         ...(source.qqBatchCount ? { qqBatchCount: source.qqBatchCount, qqBatchNotice: source.qqBatchNotice } : {}),
         ...qqReplySource(source),
         content: source.content.slice(offset, end), offset, totalLength: source.content.length,

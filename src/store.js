@@ -169,6 +169,7 @@ function eventFields(input) {
   const type = text(input.type, '经历类型', 40);
   const content = text(input.content, '经历正文', LIMITS.event);
   const metadata = metadataValue(input.metadata);
+  if (Object.hasOwn(metadata, 'revisionEvidence')) invalid('记忆更正版本证明只能由当前聊天更正事务生成。');
   if (Object.hasOwn(metadata, 'conversationOrigin')) {
     if (type !== 'message' || input.scope !== 'owner' || input.actor !== 'owner') invalid('私聊来源只能关联创建人原始消息。');
     metadata.conversationOrigin = normalizeConversationOrigin(metadata.conversationOrigin);
@@ -561,6 +562,20 @@ export function createStore(dbPath) {
         && input.reply?.messageId === input.messageId && input.reply.conversationId === origin.conversationId && input.reply.actorId === origin.actorId
         && key === origin.inboxKey ? origin : null;
     } catch { return null; }
+  }
+  function memoryCorrectionRequest(audit, memory) {
+    if (!audit || memory.scope !== 'owner' || memory.sourceType !== 'conversation' || memory.category === 'promise'
+      || memory.deletedAt || audit.type !== 'memory_change' || audit.scope !== 'owner' || audit.actor !== 'owner'
+      || audit.sourceRef !== memory.id || audit.metadata.action !== 'revise' || audit.metadata.memoryId !== memory.id
+      || typeof audit.metadata.requestEventId !== 'string' || typeof audit.metadata.requestMessageId !== 'string'
+      || audit.createdAt !== memory.updatedAt) return null;
+    const row = get('SELECT * FROM events WHERE id = ?', audit.metadata.requestEventId), source = row ? eventRow(row) : null;
+    const message = get('SELECT * FROM messages WHERE id = ?', audit.metadata.requestMessageId);
+    if (!validFollowupSource(source, message) || source.metadata.messageId !== audit.metadata.requestMessageId) return null;
+    const dates = [memory.createdAt, memory.updatedAt, audit.createdAt, source.createdAt, message.created_at].map(Date.parse);
+    if (dates.some(value => !Number.isFinite(value) || value > Date.now()) || dates[0] > dates[1]
+      || dates[4] > dates[3] || dates[3] > dates[2] || !currentConversationOrigin(source, message)) return null;
+    return { source, message };
   }
   function followupEvidence(item, requireCurrentOrigin = true) {
     if (!item || FOLLOWUP_TERMINAL_STATUSES.includes(item.status)) return null;
@@ -1090,8 +1105,23 @@ export function createStore(dbPath) {
         const row = get(`SELECT e.* FROM events e JOIN messages u ON u.id = json_extract(e.metadata, '$.messageId')
           AND u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
           WHERE e.id = ? AND e.type = 'message' AND e.scope = 'owner' AND e.actor = 'owner'`, memory.sourceRef);
-        if (!row || api.isConversationSourceBlocked('owner', memory.sourceRef)) return null;
-        return { memory, source: api.getMemorySource(memory.id, ['owner']), parts: [] };
+        if (row && !api.isConversationSourceBlocked('owner', memory.sourceRef)) return { memory, source: api.getMemorySource(memory.id, ['owner']), parts: [] };
+        const version = memoryVersionEvidence(memory.id, ['owner']);
+        if (!version) return null;
+        const changes = all(`SELECT * FROM events WHERE type = 'memory_change' AND scope = 'owner' AND actor = 'owner'
+          AND source_ref = ? AND json_extract(metadata, '$.revisionEvidence.signature') = ? ORDER BY rowid DESC`, memory.id, version.signature);
+        for (const change of changes) {
+          const audit = eventRow(change), proof = audit.metadata.revisionEvidence;
+          if (!proof || typeof proof !== 'object' || Array.isArray(proof) || Object.keys(proof).length !== 2
+            || proof.version !== 1 || proof.signature !== version.signature) continue;
+          const request = memoryCorrectionRequest(audit, memory);
+          if (!request) continue;
+          const { source, message } = request;
+          return { memory, source: { ...quote(source), ...qqBatchSourceInfo(source.metadata.qqBatchSources, source.content),
+            ...qqReplySourceInfo(JSON.parse(message.metadata), source.metadata, source.content) }, parts: [],
+          correction: { auditEventId: audit.id, requestMessageId: message.id } };
+        }
+        return null;
       }
       if (memory.scope !== 'public') return null;
       try { assertPublicUrl(memory.sourceRef); } catch { return null; }
@@ -1177,7 +1207,14 @@ export function createStore(dbPath) {
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
           retractDependentNotes([previous], now);
         } else insertMemory(memory);
-        if (audit) insertEvent(audit);
+        if (audit) {
+          if (previous && ['scope', 'category', 'sourceType', 'sourceRef'].every(key => previous[key] === memory[key])
+            && memoryCorrectionRequest(audit, memory)) {
+            const version = memoryVersionEvidence(id, ['owner']);
+            if (version) audit.metadata = metadataValue({ ...audit.metadata, revisionEvidence: { version: 1, signature: version.signature } });
+          }
+          insertEvent(audit);
+        }
         return memory;
       });
     },
@@ -2122,7 +2159,10 @@ export function createStore(dbPath) {
       });
       const events = rows('events', item => {
         requireFields(item, ['type', 'scope', 'actor', 'content', 'sourceRef', 'metadata']);
-        return dated(item, eventFields(item));
+        const metadata = metadataValue(item.metadata);
+        // A restored audit is history, not a renewed platform source for autonomous delivery.
+        delete metadata.revisionEvidence;
+        return dated(item, eventFields({ ...item, metadata }));
       });
       const messages = rows('messages', item => {
         requireFields(item, ['scope', 'role', 'content', 'actor', 'metadata']);

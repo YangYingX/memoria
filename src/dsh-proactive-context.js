@@ -101,8 +101,11 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
     }
     const readingEvidence = item?.scope === 'public' && (item.sourceType === 'webpage' && item.category === 'reading'
       || item.sourceType === 'reflection' && item.category === 'reading-note') ? store.getCompanionMemoryEvidence(id) : undefined;
+    const ownerConversation = item?.scope === 'owner' && item.sourceType === 'conversation';
+    const conversationEvidence = ownerConversation ? store.getCompanionMemoryEvidence(id) : undefined;
     if (readingEvidence === null) sourceBlocked = true;
-    return { memory: item, signature: evidence?.signature, source, parts: store.getReadingParts(id, ['owner', 'public']), sourceBlocked, readingEvidence };
+    return { memory: item, signature: evidence?.signature, source, parts: store.getReadingParts(id, ['owner', 'public']),
+      sourceBlocked: sourceBlocked && !ownerConversation, readingEvidence, conversationEvidence };
   };
   const conversation = id => store.getConversation(id, ['owner', 'public']);
   function remember(map, id, value) {
@@ -115,7 +118,10 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
       memoryIds.add(id);
     }
     forbiddenIds.add(id);
-    for (const reference of [value?.source?.eventId, value?.memory?.sourceRef, ...(value?.parts || []).map(part => part.id)]) {
+    const correction = value?.conversationEvidence?.correction;
+    if (validReference(correction?.requestMessageId)) userMessageIds.add(correction.requestMessageId);
+    for (const reference of [value?.source?.eventId, value?.memory?.sourceRef, value?.conversationEvidence?.source?.eventId,
+      correction?.auditEventId, correction?.requestMessageId, ...(value?.parts || []).map(part => part.id)]) {
       if (validReference(reference)) forbiddenIds.add(reference);
     }
   }
@@ -156,6 +162,7 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
       + 'impulse 只是本次交流节奏的数值建议，不是另一人格、心情或事实；疲劳时可以简短或安静，对方未回应时不催促、不责怪。对方表示不想聊或没有自然话题时保持安静。只返回严格 JSON {"text":"拟说的话，或空字符串表示安静"}。',
     input: { now: new Date(now).toISOString(), mood: moodSnapshot(store, now),
       timeZone: store.getSetting('proactive', {}).timeZone || 'Asia/Shanghai',
+      memoryNotice: '有效书架的当前修订及后续更正优先于旧原话。historicalOnly表示来源已被更正或屏蔽，只证明当时说过，不能推翻当前正文或作为发送授权；correctionRequest表示经应用核验的更正请求原话，不是本次新任务。后台手改正文没有新的聊天来源，不据此虚构原话、渠道或约定。',
       ...(advice ? { impulse: advice } : {}),
       ...(agendaMode ? { followup: { ...originLabel(seedOrigin), title: originalEvidence.memory.title, content: originalEvidence.memory.content,
         dueAt: originalEvidence.followup.dueAt, expiresAt: originalEvidence.followup.expiresAt } } : {}),
@@ -164,6 +171,7 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
         updatedAt: originalTheme.memory.updatedAt, ...proactiveTextExcerpt(originalTheme.memory.content, 3000),
         ...(originalThemeMemory.parts.length ? { readingParts: originalThemeMemory.parts } : {}),
         source: { actor: originalTheme.source.actor, ...originLabel(readOrigin(eventOriginReader, originalTheme.source.eventId)), recordedAt: originalTheme.source.createdAt,
+          ...(originalTheme.correction ? { correctionRequest: true } : {}),
           ...proactiveTextExcerpt(originalTheme.source.content, 3000), ...proactiveQuoteContext(originalTheme.source.qqReplyContext, originalTheme.source.content) } } }
         : { seed: { actor: originalSeed.actor, ...originLabel(seedOrigin), recordedAt: originalSeed.createdAt, ...proactiveTextExcerpt(originalSeed.content, 3000),
           ...proactiveQuoteContext(seedQuote, originalSeed.content) } }),

@@ -225,7 +225,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     }
     const recipientSource = candidate => candidate?.kind === 'agenda' ? { sourceEventId: candidate.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: candidate.agenda.recipientAccountId }
       : candidate?.kind === 'conversation' ? { messageId: candidate.message.id }
-        : candidate?.kind === 'theme' && candidate.memory.sourceType === 'conversation' ? { sourceEventId: candidate.memory.sourceRef } : {};
+        : candidate?.kind === 'theme' && candidate.memory.sourceType === 'conversation' ? { sourceEventId: candidate.evidence.source.eventId } : {};
     recipient = getRecipient(recipientSource(selected));
     if (!recipient && selected?.kind !== 'agenda') return { ...status(), skipped: 'no_recipient' };
     if (selected?.kind !== 'agenda' && !canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
