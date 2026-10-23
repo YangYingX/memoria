@@ -173,15 +173,16 @@
               <label>读书时区<input id="books-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"></label>
               <p class="caption">在活跃时段随机安排，从尚未读完的书中选择一本。聊天中要求阅读无需开启此开关，与定时阅读共用每日次数和单次长度；每次使用对话模型写一条笔记。导入文件本身不消耗模型调用，错过的安排不会集中补读。</p>
             </div></section>
-            <section id="proactive-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">09</span><h2>主动私聊</h2><p class="muted">读到想与你分享的内容时，选一个合适的时机开口。</p></div><div class="settings-fields">
+            <section id="proactive-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">09</span><h2>主动私聊</h2><p class="muted">分享阅读，也可以延续你们的旧话题，选一个合适的时机开口。</p></div><div class="settings-fields">
               <label class="check-label"><input id="proactive-enabled" type="checkbox">允许她主动私聊我</label>
-              <p class="caption">默认关闭。仅发送至最近绑定且仍有效的创建人 QQ 私聊，分享实际读过的网页或书籍片段。</p>
-              <label>主动聊天欲（0–100）<input id="proactive-desire" type="number" min="0" max="100" step="1" required><small>每次机会按这个百分比决定是否考虑分享；0 表示保持安静，100 也不保证发送。</small></label>
+              <p class="caption">默认关闭。仅发送至最近绑定且仍有效的创建人 QQ 私聊。优先分享未分享过的阅读；启用 DSH 后，也可以从最近七天的私聊延续兴趣或约定。</p>
+              <label>主动聊天欲（0–100）<input id="proactive-desire" type="number" min="0" max="100" step="1" required><small>每次机会按这个百分比决定是否考虑开口；0 表示保持安静，100 也不保证发送。</small></label>
               <div class="field-row"><label>每天最多尝试发送几次<input id="proactive-daily-limit" type="number" min="0" max="3" step="1" required></label><label>主动聊天机会间隔（分钟）<input id="proactive-cooldown" type="number" min="60" max="1440" step="1" required></label></div>
               <label>聊完后至少安静多久（分钟）<input id="proactive-idle" type="number" min="10" max="1440" step="1" required><small>从最近一次与你的私聊起计算；后台创建人对话也算在内。</small></label>
               <div class="field-row"><label>活跃时段开始（整点）<input id="proactive-start-hour" type="number" min="0" max="23" step="1" required></label><label>活跃时段结束（整点）<input id="proactive-end-hour" type="number" min="1" max="24" step="1" required></label></div>
               <label>主动聊天时区<input id="proactive-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"></label>
-              <p class="caption">每次机会最多调用模型一次，每天最多考虑 6 次，与聊天共用模型额度。没有新阅读或有效 QQ 绑定时不调用；发起发送后失败或结果未确认也计次，同一网页或已读书籍片段只尝试分享一次，不自动重发。关闭会取消尚未发起的分享；在途消息无法保证撤回。</p>
+              <p class="caption">每天最多考虑 6 次，与聊天共用模型额度。阅读分享最多一次模型请求；延续旧话题的 DSH 回合最多四次，可检索有权读取的记忆，也可以保持安静。没有有效 QQ 绑定或可用话题时不调用。</p>
+              <p class="caption">同一阅读只尝试分享一次；同一条私聊记录只触发一次主动对话判断，安静或失败也不自动重试。发起发送后失败或结果未确认也计发送次数。关闭会取消尚未发起的消息；在途消息无法保证撤回。</p>
               <p id="proactive-summary" class="muted">正在读取安排…</p>
               <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次机会</dt><dd id="proactive-next">等待安排</dd></div><div><dt>今日发送尝试</dt><dd id="proactive-count">0 次</dd></div><div><dt>最近结果</dt><dd id="proactive-outcome">还没有记录</dd></div></dl>
               <p id="proactive-last" class="caption" hidden></p><p id="proactive-error" class="connection-result error" role="status" hidden></p>

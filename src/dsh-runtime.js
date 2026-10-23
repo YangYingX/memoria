@@ -7,6 +7,7 @@ import { biliVideoUrl } from './bili-reading.js';
 import { createDshModelAccess } from './dsh-model.js';
 import { moodSnapshot, validateMoodDelta } from './mood.js';
 import { createMemoryAgentAccess } from './dsh-memory-agent-access.js';
+import { proactiveQuery } from './dsh-proactive-context.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
@@ -67,13 +68,18 @@ export function createDshRuntime({ store, dataDir }) {
       const reading = name === 'read_bili_video' || browsing;
       const noting = name === 'note_bili_reading';
       const judging = name === 'evaluate_mood';
-      const recalling = name === 'recall_memory';
+      const composing = name === 'compose_proactive';
+      const recalling = name === 'recall_memory' || composing;
       const modelTask = noting || judging;
       const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor, excludeMessageId });
-      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', 'compose_proactive'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
       let noteMessages;
-      if (recalling) {
+      if (composing) {
+        if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || Object.keys(args).length !== 1 || !Object.hasOwn(args, 'messageId')
+          || typeof args.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args.messageId)) throw new Error('主动拟聊只接受已验证创建人的消息标识。');
+        args = { messageId: args.messageId };
+      } else if (recalling) {
         if (Object.keys(args).some(key => key !== 'query') || typeof args.query !== 'string' || !args.query.trim() || args.query.length > 500) throw new Error('记忆子代理只接受 1–500 字的查询。');
         args = { query: args.query.trim() };
       } else if (judging) {
@@ -125,7 +131,8 @@ export function createDshRuntime({ store, dataDir }) {
       const modelAccess = createDshModelAccess({ store, signal: taskController.signal, purpose: judging ? 'mood' : 'reading-note' });
       let workspace;
       try {
-        const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal, excludeMessageId }) : null;
+        const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal, excludeMessageId,
+          ...(composing ? { purpose: 'proactive', messageId: args.messageId } : {}) }) : null;
         let cacheDirectory;
         if (reading) {
           cacheDirectory = join(resolve(dataDir), 'dsh-cache', 'humanism');
@@ -168,7 +175,8 @@ export function createDshRuntime({ store, dataDir }) {
           });
           const credentialPath = join(resolve(dataDir), 'bili-credentials.json');
           child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace,
-            ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}), operation: { name, args } }));
+            ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}),
+            operation: composing ? { name: 'recall_memory', args: { query: proactiveQuery } } : { name, args } }));
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
             if (['agent-model', 'agent-memory'].includes(message.type)) {
@@ -233,6 +241,7 @@ export function createDshRuntime({ store, dataDir }) {
             taskController.abort();
             clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
+            else if (composing && !result.sourcesCurrent()) reject(new Error('主动拟聊的资料已变化。'));
             else if (modelTask && (!modelRequested || typeof authorizedNote !== 'string' || result?.text !== authorizedNote)) reject(new Error('DSH 未返回有效的模型结果。'));
             else if (judging) {
               try { accept(validateMoodDelta(JSON.parse(result.text))); }

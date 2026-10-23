@@ -817,6 +817,9 @@ export function createStore(dbPath) {
     hasProactiveAttempt(sourceKey) {
       return Boolean(get("SELECT 1 FROM events WHERE type = 'proactive' AND scope = 'owner' AND actor = 'scheduler' AND source_ref = ? AND json_extract(metadata, '$.outcome') = 'attempt' LIMIT 1", text(sourceKey, '阅读来源标识', 256)));
     },
+    hasProactiveDecision(sourceKey) {
+      return Boolean(get("SELECT 1 FROM events WHERE type = 'proactive' AND scope = 'owner' AND actor = 'scheduler' AND source_ref = ? AND json_extract(metadata, '$.outcome') = 'decision' LIMIT 1", text(sourceKey, '主动判断来源标识', 256)));
+    },
     saveExpression(input) {
       const fields = expressionFields(input);
       if (input.id !== undefined) invalid('已有表情不能修改来源或可见范围；管理员上传须另建一张表情。');

@@ -246,12 +246,23 @@ function makeProactiveJobs() {
       try { return JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); }
       catch { throw new Error('主动私聊决定格式无效。'); }
     },
+    canGenerateConversation: () => dshRuntime.status().enabled,
+    generateConversation: async ({ messageId, signal }) => {
+      signal?.throwIfAborted();
+      if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
+      const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args: { messageId }, signal });
+      let proposal;
+      try { proposal = JSON.parse(result.text); }
+      catch { throw new Error('原生主动私聊未返回有效决定。'); }
+      return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
+        historyMessageIds: result.historyMessageIds, sourcesCurrent: result.sourcesCurrent };
+    },
     send: async (recipient, message, options) => {
       const config = store.getSetting('qq');
       if (!(await testQQ(options.signal)).ok) throw new Error('QQ 未在线或登录账号不匹配。');
       return sendQQ(config, { user_id: recipient.userId }, message, [], '', options);
     },
-    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || moodJobs?.status().busy,
+    isBusy: () => activeMutation > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || moodJobs?.status().busy || dshRuntime.status().busy,
   });
 }
 proactiveJobs = makeProactiveJobs();
@@ -804,7 +815,6 @@ const server = http.createServer(async (req, res) => {
         bookJobs = makeBookJobs();
         proactiveJobs.stop();
         store.setSetting('proactive', { ...store.getSetting('proactive'), enabled: false });
-        store.setSetting('proactiveStatus', {});
         proactiveJobs = makeProactiveJobs();
         moodJobs.stop();
         store.setSetting('mood', { ...store.getSetting('mood'), enabled: false });

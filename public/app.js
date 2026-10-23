@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const labels = { chat: '对话实验室', memories: '记忆书架', reading: '网页阅读', books: '书房', expressions: '表情库', identity: '身份与备份', settings: '人格与设置' };
 const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'reading-note': '读后思考', 'book-note': '读书笔记', promise: '约定' };
 const scopes = { owner: '仅创建人', public: '公开记忆', 'group:demo': '演练群聊' };
-const proactiveOutcomes = { quiet: '这次保持安静', attempt: '已尝试，等待确认', pending: '等待平台确认', success: '已确认发送', unknown: '发送结果未确认', error: '未能完成', cancelled: '已取消', busy: '等空闲时再聊', limit: '今日额度已用完', deciding: '正在考虑分享', missed: '错过的机会已跳过' };
+const proactiveOutcomes = { quiet: '这次保持安静', decision: '已考虑本次话题', attempt: '已尝试，等待确认', pending: '等待平台确认', success: '已确认发送', unknown: '发送结果未确认', error: '未能完成', cancelled: '已取消', busy: '等空闲时再聊', limit: '今日额度已用完', deciding: '正在考虑开口', missed: '错过的机会已跳过' };
 const state = { status: {}, data: null, page: 'chat', scope: 'owner', memories: [], books: [], expressions: new Map(), busyChat: false, preview: null };
 let toastTimer;
 
@@ -490,13 +490,13 @@ function renderProactiveStatus(status = {}) {
   const config = state.data?.settings.proactive || {};
   const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
   $('proactive-summary').textContent = config.enabled
-    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。她会在允许的时段内等待合适的分享机会。`
+    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。她会在允许的时段内等待合适的开口机会。`
     : '主动私聊已关闭。保存开启后才安排；已经发起的发送无法保证撤回。';
   $('proactive-next').textContent = !config.enabled ? '启用后安排' : inDay && status.nextRunAt
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
     : '等待下次安排';
   $('proactive-count').textContent = `${inDay ? status.sendAttempts || 0 : 0} / ${config.dailyLimit ?? 1} 次`;
-  $('proactive-outcome').textContent = status.busy ? '正在考虑分享…' : proactiveOutcomes[status.lastOutcome] || '还没有记录';
+  $('proactive-outcome').textContent = status.busy ? '正在考虑开口…' : proactiveOutcomes[status.lastOutcome] || '还没有记录';
   $('proactive-last').hidden = !status.lastAttempt && !status.lastSuccess;
   $('proactive-last').textContent = [status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}` : '', status.lastSuccess ? `最近确认发送：${date(status.lastSuccess)}` : ''].filter(Boolean).join(' · ');
   $('proactive-error').hidden = !status.lastError;

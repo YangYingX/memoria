@@ -42,7 +42,8 @@ function dayBounds(time, timeZone) {
   return { day, timeZone, dayStartAt: boundary(time - 2 * DAY_MS, time, true), dayEndAt: boundary(time, time + 2 * DAY_MS, false) };
 }
 
-export function createProactiveJobs({ store, generate, send, getRecipient, canGenerate = () => true, isBusy = () => false, clock = Date.now, random = Math.random }) {
+export function createProactiveJobs({ store, generate, generateConversation, send, getRecipient, canGenerate = () => true,
+  canGenerateConversation = () => false, isBusy = () => false, clock = Date.now, random = Math.random }) {
   let busy = false, stopped = false, controller;
   let lastState = store.getSetting('proactiveStatus', {});
   const now = () => Number(clock());
@@ -70,7 +71,8 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
   };
   const event = (selected, outcome, content, metadata = {}) => {
     if (!stopped) store.addEvent({ type: 'proactive', scope: 'owner', actor: 'scheduler', sourceRef: selected.sourceKey,
-      content, metadata: { memoryId: selected.memory.id, sourceKey: selected.sourceKey, outcome, ...metadata } });
+      content, metadata: { kind: selected.kind, ...(selected.kind === 'reading' ? { memoryId: selected.memory.id } : { messageId: selected.message.id }),
+        sourceKey: selected.sourceKey, outcome, ...metadata } });
   };
   function plan(config, time) {
     let state = store.getSetting('proactiveStatus', {});
@@ -107,9 +109,28 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
       } else continue;
       const sourceKey = createHash('sha256').update(`${index.type}:${sourceRef}`).digest('hex');
       if (store.hasProactiveAttempt(sourceKey) || store.hasDelivery(`proactive:${sourceKey}`)) continue;
-      return { memory, index, url, bookId, sourceKey };
+      return { kind: 'reading', memory, index, url, bookId, sourceKey };
     }
     return null;
+  }
+  function conversationSeed(time, id) {
+    const messages = store.listConversationHistory('owner', 100);
+    const seed = id ? messages.find(message => message.id === id) : messages.findLast(message => message.role === 'user' && message.actor === 'owner');
+    if (!seed || seed.role !== 'user' || seed.actor !== 'owner' || seed.scope !== 'owner'
+      || !Number.isFinite(Date.parse(seed.createdAt)) || Date.parse(seed.createdAt) > time || time - Date.parse(seed.createdAt) > 7 * DAY_MS) return null;
+    return seed;
+  }
+  function trustedReferences(decision) {
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision) || typeof decision.sourcesCurrent !== 'function') throw new Error('主动拟聊未返回有效来源核对。');
+    const references = {};
+    let count = 0;
+    for (const key of ['memoryIds', 'conversationIds', 'historyMessageIds']) {
+      if (!Array.isArray(decision[key]) || decision[key].length > 100
+        || decision[key].some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(id))) throw new Error('主动拟聊来源索引无效。');
+      references[key] = [...new Set(decision[key])]; count += references[key].length;
+    }
+    if (count > 100) throw new Error('主动拟聊来源索引超过上限。');
+    return references;
   }
 
   async function run() {
@@ -133,7 +154,17 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
     const lastUser = latestUser();
     if (!lastUser || time - Date.parse(lastUser.createdAt) < config.idleMinutes * 60000) return { ...status(), skipped: 'recent_chat' };
     state = save({ ...state, lastOpportunityAt: stamp(time), nextRunAt: stamp(time + config.cooldownMinutes * 60000 * (1 + draw() / 4)), lastError: '' });
-    const selected = reading(time);
+    let selected = reading(time);
+    if (!selected && typeof generateConversation === 'function' && canGenerateConversation() === true) {
+      const message = conversationSeed(time);
+      if (message) {
+        const sourceKey = createHash('sha256').update(`conversation:${message.id}`).digest('hex');
+        if (!store.hasProactiveDecision(sourceKey) && !store.hasDelivery(`proactive-decision:${sourceKey}`)
+          && !store.hasProactiveAttempt(sourceKey) && !store.hasDelivery(`proactive:${sourceKey}`)) {
+          selected = { kind: 'conversation', message, sourceKey, url: '' };
+        }
+      }
+    }
     if (!selected || draw() >= config.desire / 100) {
       save({ ...state, lastOutcome: 'quiet' });
       return { ...status(), skipped: selected ? 'quiet' : 'no_reading' };
@@ -142,25 +173,43 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
     busy = true;
     const activeController = controller = new AbortController();
     const context = recentContext();
+    let sourcesCurrent = () => true;
     const dependencies = () => JSON.stringify({ recipient: getRecipient(), persona: store.getSetting('persona'), model: store.getSetting('model'), qq: store.getSetting('qq'),
-      memory: store.getMemory(selected.memory.id), bookExists: !selected.bookId || Boolean(store.getBook(selected.bookId)), recentContext: recentContext(), lastUserId: latestUser()?.id });
+      ...(selected.kind === 'reading' ? { memory: store.getMemory(selected.memory.id), bookExists: !selected.bookId || Boolean(store.getBook(selected.bookId)) }
+        : { seed: conversationSeed(now(), selected.message.id), conversationAvailable: canGenerateConversation() === true }),
+      recentContext: recentContext(), lastUserId: latestUser()?.id });
     const snapshot = dependencies();
     const sameState = () => !stopped && store.getSetting('proactiveStatus', {}).dayId === state.dayId;
-    const current = () => sameState() && !activeController.signal.aborted && JSON.stringify(settings()) === state.configSignature
-      && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt) && inHours(now(), config)
-      && snapshot === dependencies();
+    const current = () => {
+      try {
+        return sameState() && !activeController.signal.aborted && JSON.stringify(settings()) === state.configSignature
+          && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt) && inHours(now(), config)
+          && snapshot === dependencies() && sourcesCurrent() === true;
+      } catch { return false; }
+    };
     const check = () => { if (!current() || isBusy()) throw new Error('主动私聊已取消。'); };
     const update = patch => { if (sameState()) state = save({ ...store.getSetting('proactiveStatus', {}), ...patch }); };
     try {
-      const decision = await generate({ instructions: PROACTIVE_INSTRUCTIONS, persona: store.getSetting('persona'),
-        mood: moodSnapshot(store, now()),
-        recentMessages: context.messages,
+      let decision, references = { memoryIds: [], conversationIds: [], historyMessageIds: [] };
+      check();
+      if (selected.kind === 'conversation') {
+        if (store.hasProactiveDecision(selected.sourceKey) || !store.claimDelivery(`proactive-decision:${selected.sourceKey}`)) throw new Error('此聊天来源已经判断过。');
+        event(selected, 'decision', '开始根据已验证创建人的聊天来源判断是否主动搭话，同一来源不自动重试。');
+        decision = await generateConversation({ messageId: selected.message.id, signal: activeController.signal });
+        references = trustedReferences(decision);
+        sourcesCurrent = decision.sourcesCurrent;
+      } else decision = await generate({ instructions: PROACTIVE_INSTRUCTIONS, persona: store.getSetting('persona'),
+        mood: moodSnapshot(store, now()), recentMessages: context.messages,
         reading: { type: selected.index.type, title: selected.memory.title, readAt: selected.index.readAt,
           excerpt: selected.memory.content.slice(0, 3200), totalLength: selected.memory.content.length, revisedAt: selected.memory.updatedAt }, signal: activeController.signal });
       check();
       if (!decision || typeof decision.text !== 'string' || decision.text.length > 600 || decision.text.includes('\0') || /https?:\/\/|www\./i.test(decision.text)) throw new Error('主动私聊内容格式无效。');
       const text = decision.text.trim();
       if (!text) { update({ lastOutcome: 'quiet' }); return { ...status(), busy: false, skipped: 'quiet' }; }
+      const memoryIds = [...new Set([...(selected.kind === 'reading' ? [selected.memory.id] : []), ...references.memoryIds])];
+      const conversationIds = [...new Set([...context.conversationIds, ...(selected.kind === 'conversation' ? [selected.message.id] : []), ...references.conversationIds])];
+      const historyMessageIds = [...new Set([...context.historyMessageIds, ...references.historyMessageIds])];
+      if (memoryIds.length + conversationIds.length + historyMessageIds.length > 120) throw new Error('主动拟聊来源索引超过保存上限。');
       const message = text + (selected.url ? `\n\n来源：${selected.url}` : '');
       let result, attempted = false;
       const beforeSend = () => {
@@ -168,7 +217,8 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
         if (attempted || state.sendAttempts >= config.dailyLimit || store.hasProactiveAttempt(selected.sourceKey)
           || !store.claimDelivery(`proactive:${selected.sourceKey}`)) throw new Error('本次阅读不再发送。');
         update({ sendAttempts: state.sendAttempts + 1, lastOutcome: 'pending' });
-        event(selected, 'attempt', '开始向已验证的创建人 QQ 私聊分享阅读，本次已计入额度。');
+        event(selected, 'attempt', selected.kind === 'reading' ? '开始向已验证的创建人 QQ 私聊分享阅读，本次已计入额度。'
+          : '开始向已验证的创建人 QQ 私聊主动搭话，本次已计入额度。');
         attempted = true;
       };
       try {
@@ -185,7 +235,7 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
       const confirmed = (typeof messageId === 'string' && messageId.length > 0 && messageId.length <= 100 && !messageId.includes('\0')) || Number.isSafeInteger(messageId);
       if (confirmed) {
         store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: message,
-          metadata: { mode: 'live', proactive: true, memoryIds: [selected.memory.id], conversationIds: context.conversationIds, historyMessageIds: context.historyMessageIds,
+          metadata: { mode: 'live', proactive: true, kind: selected.kind, memoryIds, conversationIds, historyMessageIds,
             sourceKey: selected.sourceKey, platform: 'qq', messageId: String(messageId) } });
         event(selected, 'success', message, { messageId: String(messageId) });
         update({ lastOutcome: 'success', lastSuccess: stamp(now()), lastError: '' });
