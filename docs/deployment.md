@@ -152,6 +152,30 @@ Windows 可在同一 PowerShell 窗口设置 `$env:PLAYWRIGHT_BROWSERS_PATH`，�
 
 选择自己有读写权限的安装目录。安装依赖后双击 `start.cmd` 后台启动，`stop.cmd` 停止。访问 `http://127.0.0.1:3210`，使用 `data\setup-key.txt` 中的初始化码设置管理员密码。日志位于 `data\server.log` 与 `data\server.err.log`。
 
+确认手动启动正常后，可在项目目录为当前 Windows 用户配置登录自启：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 -Mode Enable
+```
+
+脚本在当前用户的 [Windows 启动文件夹](https://support.microsoft.com/en-US/Windows/Experience/Startup-Boot/configure-startup-applications-in-windows) 创建本项目的快捷方式，登录后隐藏启动同一个后台服务，沿用项目的 `data` 目录。配置自启只影响后续登录；当前服务仍用 `start.cmd`、`stop.cmd` 控制。自启和手动启动同时发生时，启动互斥会阻止重复创建进程。此方式需要用户登录，不提供异常退出后的自动重启；服务器长期运行可使用下方 Linux systemd 部署。
+
+若使用独立浏览器缓存，启用时会保存本次 `PLAYWRIGHT_BROWSERS_PATH` 的值，也可通过 `-BrowserCache` 指定已有的绝对目录；`0` 保留 Playwright 的项目内缓存方式。未指定参数且当前环境变量为空时，会保留已保存的缓存位置。后续改变缓存位置时重新运行启用命令。QQ 协议端、独立平台宿主和模拟器仍按各自的部署方式启动。
+
+查看本项目的自启配置：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 -Mode Status
+```
+
+该状态表示快捷方式是否已配置，不代表当前服务在线。移除本项目的自启项：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 -Mode Disable
+```
+
+停用自启保留当前运行的服务和所有数据。移动项目目录前，先在原目录停用自启，再到新目录重新启用。
+
 ## Linux 安装与运行
 
 将程序放在自己有写权限的目录，例如 `~/persona-agent`，安装依赖后运行：
