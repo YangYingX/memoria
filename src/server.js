@@ -319,6 +319,14 @@ function makeProactiveJobs() {
   };
   return createProactiveJobs({ store, getRecipient: getProactiveRecipient,
     canGenerate: recipient => recipient.platform === 'feishu' ? feishuChat.status().chat.remaining > 0 : qqChatBudget.status().remaining > 0,
+    isRecipientReady: async (recipient, { signal }) => {
+      signal?.throwIfAborted();
+      if (recipient.platform === 'feishu') return true;
+      if (recipient.platform !== 'qq') return false;
+      const result = await testQQ(signal);
+      signal?.throwIfAborted();
+      return result.ok === true && result.botId === recipient.botId;
+    },
     generate: async ({ instructions, recipient, signal, ...context }) => {
       signal?.throwIfAborted();
       reserveProactiveChat(recipient);

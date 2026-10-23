@@ -53,7 +53,7 @@ function dayBounds(time, timeZone) {
 }
 
 export function createProactiveJobs({ store, generate, generateConversation, generateAgenda, generateTheme, assessCompanion, send, getRecipient, canGenerate = () => true,
-  canGenerateConversation = () => false, canAssessCompanion = () => false, isBusy = () => false, clock = Date.now, random = Math.random }) {
+  canGenerateConversation = () => false, canAssessCompanion = () => false, isRecipientReady = () => true, isBusy = () => false, clock = Date.now, random = Math.random }) {
   let busy = false, stopped = false, controller, recovered = false;
   let lastState = store.getSetting('proactiveStatus', {});
   const now = () => Number(clock());
@@ -219,12 +219,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       return { ...status(), skipped: selected ? 'quiet' : 'no_reading' };
     }
     if (selected.kind === 'agenda') {
-      const deciding = store.transitionFollowup(selected.agenda.id, selected.agenda.revision, 'deciding', { now: time });
-      if (deciding?.status !== 'deciding') return { ...status(), skipped: 'changed' };
-      selected.agenda = deciding;
-      selected.evidence = store.getFollowupEvidence(deciding.id);
-      selected.sourceKey = createHash('sha256').update(`agenda:${deciding.id}:${deciding.revision}`).digest('hex');
-      if (!selected.evidence) return { ...status(), skipped: 'changed' };
+      selected.sourceKey = createHash('sha256').update(`agenda:${selected.agenda.id}:${selected.agenda.revision}`).digest('hex');
     }
     busy = true;
     const activeController = controller = new AbortController();
@@ -232,8 +227,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     let sourcesCurrent = () => true;
     const agendaEvidence = () => {
       const evidence = store.getFollowupEvidence(selected.agenda.id);
-      // Acknowledging our own reserved send must not look like a source edit.
-      return selected.attempt && evidence && JSON.stringify(evidence.followup) === JSON.stringify(selected.attempt)
+      // Only our exact transitions may keep the original pending evidence current.
+      return evidence && [selected.deciding, selected.attempt].some(own => own && JSON.stringify(evidence.followup) === JSON.stringify(own))
         ? { ...evidence, followup: selected.evidence.followup } : evidence;
     };
     const dependencies = () => JSON.stringify({ recipient: getRecipient(recipientSource), persona: store.getSetting('persona'), model: store.getSetting('model'),
@@ -261,6 +256,26 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       let decision, references = { memoryIds: [], conversationIds: [], historyMessageIds: [] };
       let impulse;
       check();
+      let ready = false;
+      try { ready = await isRecipientReady(recipient, { signal: activeController.signal }) === true; }
+      catch { /* An unavailable recipient must not consume a model decision. */ }
+      check();
+      if (!ready) {
+        const message = '原聊天渠道当前不可用，本次未调用模型或发送消息。';
+        update({ lastOutcome: 'unavailable', lastError: message });
+        event(selected, 'unavailable', message);
+        return { ...status(), busy: false, skipped: 'unavailable' };
+      }
+      if (!canGenerate(recipient)) return { ...status(), busy: false, skipped: 'platform_limit' };
+      state = store.getSetting('proactiveStatus', {});
+      if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), busy: false, skipped: 'daily_limit' };
+      if (selected.kind === 'agenda') {
+        const deciding = store.transitionFollowup(selected.agenda.id, selected.agenda.revision, 'deciding', { now: now() });
+        if (deciding?.status !== 'deciding') return { ...status(), busy: false, skipped: 'changed' };
+        selected.agenda = selected.deciding = deciding;
+        selected.sourceKey = createHash('sha256').update(`agenda:${deciding.id}:${deciding.revision}`).digest('hex');
+        check();
+      }
       if (companion) {
         assessingCompanion = true;
         if (typeof assessCompanion !== 'function') throw new Error('陪伴行为判断未配置。');
