@@ -10,7 +10,7 @@ import { createSessions, hashPassword, sameSecret, verifyPassword } from './auth
 import { runConversation } from './agent.js';
 import { testModel, requestCompletion } from './model.js';
 import { createBackupJobs, normalizeBackupSettings, publicBackupSettings } from './backup-jobs.js';
-import { parseQQMessage } from './qq-message.js';
+import { parseQQMessage, verifiedQQReply } from './qq-message.js';
 import { loadQQImages, validateQQImageUrls } from './images.js';
 import { createAutonomyJobs, defaultAutonomySettings, normalizeAutonomySettings, reflectReading } from './autonomy.js';
 import { discoverHeyboxPosts, readHeyboxPost } from './browser-reader.js';
@@ -109,6 +109,7 @@ function bindHeyboxOwner(userId) {
     catch { throw new Error('小黑盒专用环境配置无法读取，暂未保存账号绑定。'); }
   }
   proactiveJobs?.cancel();
+  selfExpressionJobs.cancel();
   const account = bindOwnerHeybox(store, userId, agentAccountId);
   cancelQQ();
   return account;
@@ -548,7 +549,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
       } : undefined;
       const collectExpression = origin ? input => { options.signal?.throwIfAborted(); options.assertActive?.(); return store.saveExpression({ ...input, scope, origin, actor }); } : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, signal: options.signal, assertActive: options.assertActive,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions,
@@ -622,6 +623,48 @@ function reserveQQChat() {
   return reservation.allowed;
 }
 
+async function qqQuotedContext(item, { signal, assertActive, canRead }) {
+  const context = item.context;
+  const actorFor = userId => userId === context.config.botId ? 'agent'
+    : store.findAccount('qq', userId)?.personId === 'owner' ? 'owner' : `qq:${userId}`;
+  const mentions = [...new Set((item.mentions || []).map(userId => userId === 'all' ? 'all' : actorFor(userId)))];
+  const hasReply = item.replyId !== undefined || item.replyUnavailable === true;
+  if (!mentions.length && !hasReply) return null;
+  const result = { mentions, ...(hasReply ? { reply: { status: 'unavailable' } } : {}) };
+  if (item.replyId === undefined || !canRead) return result;
+  const call = async (action, payload) => {
+    assertActive();
+    const active = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
+    const response = await fetch(`${context.config.apiBaseUrl}/${action}`, { method: 'POST', redirect: 'error', signal: active,
+      headers: { 'Content-Type': 'application/json', ...(context.config.accessToken ? { Authorization: `Bearer ${context.config.accessToken}` } : {}) },
+      body: JSON.stringify(payload) });
+    try {
+      const declared = response.headers.get('content-length');
+      if (!response.ok || !response.body || (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 131072))) throw new Error('QQ 引用暂不可读。');
+      const chunks = []; let bytes = 0;
+      for await (const chunk of response.body) {
+        active.throwIfAborted(); bytes += chunk.length;
+        if (bytes > 131072) throw new Error('QQ 引用超过读取上限。');
+        chunks.push(chunk);
+      }
+      active.throwIfAborted(); assertActive();
+      const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+      if (data.status !== 'ok' || ![0, '0'].includes(data.retcode) || !data.data) throw new Error('QQ 引用未核对。');
+      return data.data;
+    } finally { await response.body?.cancel().catch(() => {}); }
+  };
+  try {
+    const login = await call('get_login_info', {});
+    if (String(login.user_id) !== context.config.botId) return result;
+    const source = await call('get_msg', { message_id: item.replyId });
+    result.reply = verifiedQQReply(source, { replyId: item.replyId, botId: context.config.botId,
+      userId: context.target.user_id || '', groupId: context.target.group_id || '', actorFor });
+  } catch {
+    signal.throwIfAborted(); assertActive();
+  }
+  return result;
+}
+
 async function runQQBatch(items, { signal }) {
   const first = items[0], context = first.context;
   const ambient = first.ambient === true;
@@ -640,13 +683,21 @@ async function runQQBatch(items, { signal }) {
       return;
     }
     let offset = 0;
-    const qqBatchSources = items.length > 1 ? items.map(item => {
+    const sources = items.map(item => {
       const source = { platformMessageId: item.platformMessageId, startOffset: offset, endOffset: offset + item.text.length, receivedAt: item.receivedAt };
       offset = source.endOffset + 1;
       return source;
-    }) : undefined;
+    });
+    const qqReplyContext = [];
+    let quoteRead = false;
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index], frame = await qqQuotedContext(item, { signal, assertActive, canRead: !quoteRead });
+      if (item.replyId !== undefined) quoteRead = true;
+      if (frame) qqReplyContext.push({ startOffset: sources[index].startOffset, endOffset: sources[index].endOffset, ...frame });
+    }
     const result = await chat(context.scope, items.map(item => item.text).join('\n'), context.actor, first.imageUrls, context.origin,
-      { signal, assertActive, qqBatchSources, allowSilence: ambient, deferAssistant: true });
+      { signal, assertActive, qqBatchSources: items.length > 1 ? sources : undefined,
+        qqReplyContext: qqReplyContext.length ? qqReplyContext : undefined, allowSilence: ambient, deferAssistant: true });
     assertActive();
     if (ambient && result.silent === true) return;
     if (typeof result.commitDeliveredReply !== 'function') throw new Error('QQ 回复尚未准备好记录确认结果。');
@@ -679,7 +730,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
   const conversation = `qq:${selfId}:${groupId ? `group:${groupId}` : `private:${userId}`}`;
   const segments = Array.isArray(event.message) ? event.message : [];
   let ambient = false;
-  const { message, imageUrls } = parseQQMessage(event);
+  const parsed = parseQQMessage(event), { message, imageUrls } = parsed;
   const bookFile = parseQQBookFile(event);
   let platformMessageId;
   if (!privateFileNotice) {
@@ -702,7 +753,9 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     return;
   }
   if (groupId) {
-    const mentioned = segments.some(s => s.type === 'at' && String(s.data?.qq) === selfId) || String(event.raw_message).includes(`[CQ:at,qq=${selfId}]`);
+    const mentioned = segments.some(segment => segment?.type === 'at'
+      && (typeof segment.data?.qq === 'string' || Number.isSafeInteger(segment.data?.qq))
+      && /^[1-9]\d{0,19}$/.test(String(segment.data.qq)) && String(segment.data.qq) === selfId);
     if (!config.allowedGroups.includes(groupId)) return;
     ambient = !mentioned;
   }
@@ -773,7 +826,8 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     ? segments.every(segment => segment?.type === 'text' || (groupId && segment?.type === 'at' && String(segment.data?.qq) === selfId))
     : !/\[CQ:/i.test(String(event.raw_message || '')));
   if (!qqChatBatch.enqueue({ conversation, mergeKey: `${context.mergeKey}:${ambient ? 'ambient' : 'addressed'}`, context, text: message, imageUrls,
-    ambient, mergeable, windowMs: normalizeQQMergeWindow(config.mergeWindowMs), platformMessageId, receivedAt: new Date().toISOString() })) {
+    ambient, mergeable, mentions: parsed.mentions, replyId: parsed.replyId, replyUnavailable: parsed.replyUnavailable,
+    windowMs: normalizeQQMergeWindow(config.mergeWindowMs), platformMessageId, receivedAt: new Date().toISOString() })) {
     if (!ambient) await sendQQ(config, target, '当前聊天有较多消息等待处理，请稍后再发。', [], origin, { beforeSend: context.assertActive });
   }
 }
@@ -959,7 +1013,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (path === '/api/bindings/feishu/code' && req.method === 'POST') return json(res, 200, feishuChat.createBinding());
       if (path === '/api/bindings/heybox' && req.method === 'POST') return json(res, 201, { account: bindHeyboxOwner(input.userId) });
-      if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { proactiveJobs.cancel(); feishuChat.cancel(); cancelQQ(); store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
+      if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { proactiveJobs.cancel(); feishuChat.cancel(); selfExpressionJobs.cancel(); cancelQQ(); store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
       if (path === '/api/backups/export' && req.method === 'POST') {
         if (activeMutation || qqBusy() || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再备份。' });
         const archive = encryptBackup(store.exportData(), input.passphrase);

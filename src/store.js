@@ -6,6 +6,7 @@ import { imageMimeType } from './images.js';
 import { assertPublicUrl } from './public-fetch.js';
 import { normalizeMoodState } from './mood.js';
 import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
+import { normalizeQQReplyContext } from './qq-message.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
 import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
@@ -313,6 +314,13 @@ const followupRow = row => row ? ({ id: row.id, memoryId: row.memory_id, sourceE
   recipientAccountId: row.recipient_account_id, dueAt: row.due_at, expiresAt: row.expires_at, nextDecisionAt: row.next_decision_at,
   status: row.status, revision: row.revision, decisionAttempts: row.decision_attempts, createdAt: row.created_at, updatedAt: row.updated_at }) : null;
 const normalize = value => value.normalize('NFKC').toLowerCase();
+
+function qqReplySourceInfo(userMetadata, sourceMetadata, content) {
+  try {
+    const user = normalizeQQReplyContext(userMetadata.qqReplyContext, content), source = normalizeQQReplyContext(sourceMetadata.qqReplyContext, content);
+    return user && source && JSON.stringify(user) === JSON.stringify(source) ? { qqReplyContext: user } : {};
+  } catch { return {}; }
+}
 
 export function queryTokens(query) {
   const tokens = new Set();
@@ -622,15 +630,20 @@ export function createStore(dbPath) {
     return content.slice(bestOffset, bestOffset + 1200);
   }
   function conversationState(permitted) {
-    if (!permitted.length) return { messages: [], turns: [], blockedUsers: new Set(), hiddenAssistants: new Set() };
+    if (!permitted.length) return { messages: [], turns: [], blockedUsers: new Set(), hiddenAssistants: new Set(), replySources: new Map() };
     const placeholders = permitted.map(() => '?').join(',');
     // Scope filtering precedes content matching on every read.
     const messages = all(`SELECT * FROM messages WHERE scope IN (${placeholders}) ORDER BY created_at DESC, rowid DESC`, ...permitted).map(messageRow);
     const users = new Map(messages.filter(message => message.role === 'user').map(message => [message.id, message]));
-    const linkedUsers = new Set(all(`SELECT u.id FROM events e JOIN messages u
+    const linkedSources = all(`SELECT u.id, e.metadata AS sourceMetadata FROM events e JOIN messages u
       ON u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
         AND json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id
-      WHERE e.type = 'message' AND e.scope IN (${placeholders})`, ...permitted).map(row => row.id));
+      WHERE e.type = 'message' AND e.scope IN (${placeholders})`, ...permitted);
+    const linkedUsers = new Set(linkedSources.map(row => row.id)), replySources = new Map();
+    for (const source of linkedSources) {
+      const user = users.get(source.id), info = qqReplySourceInfo(user.metadata, JSON.parse(source.sourceMetadata), user.content);
+      replySources.set(source.id, replySources.has(source.id) && JSON.stringify(replySources.get(source.id)) !== JSON.stringify(info) ? {} : info);
+    }
     // Dependency IDs can cross scopes (for example a public source used in a private reply).
     // Only IDs and references cross this boundary; no outside-scope message text enters the result.
     const blockedUsers = new Set(all(`SELECT u.id FROM conversation_blocks b
@@ -702,9 +715,9 @@ export function createStore(dbPath) {
       const assistantHidden = hiddenAssistants.has(reply.id);
       turns.push({ id: user.id, scope: user.scope, actor: user.actor, createdAt: user.createdAt, user: user.content,
         assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden,
-        ...qqBatchSourceInfo(user.metadata.qqBatchSources, user.content) });
+        ...qqBatchSourceInfo(user.metadata.qqBatchSources, user.content), ...replySources.get(user.id) });
     }
-    return { messages, turns, blockedUsers, hiddenAssistants };
+    return { messages, turns, blockedUsers, hiddenAssistants, replySources };
   }
 
   try { transaction(backfillConversationBlocks); }
@@ -806,13 +819,17 @@ export function createStore(dbPath) {
       if (!Array.isArray(scopes) || scopes.length > 100) invalid('来源查询须提供最多 100 个明确的可见范围。');
       const permitted = [...new Set(scopes.map(scopeValue))];
       if (!permitted.length) return null;
-      const source = get(`SELECT e.id AS eventId, e.actor, e.created_at AS createdAt, e.content, e.metadata AS sourceMetadata
+      const source = get(`SELECT e.id AS eventId, e.actor, e.created_at AS createdAt, e.content, e.metadata AS sourceMetadata,
+        u.metadata AS userMetadata, EXISTS (SELECT 1 FROM conversation_blocks b WHERE b.scope = e.scope AND b.event_id = e.id) AS sourceBlocked
         FROM memories m JOIN events e ON e.id = m.source_ref AND e.scope = m.scope
+        LEFT JOIN messages u ON u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
+          AND json_type(e.metadata, '$.messageId') = 'text' AND u.id = json_extract(e.metadata, '$.messageId')
         WHERE m.id = ? AND m.deleted_at IS NULL AND m.source_type = 'conversation' AND e.type = 'message'
           AND m.scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted);
       if (!source) return null;
-      const { sourceMetadata, ...quote } = source;
-      return { ...quote, ...qqBatchSourceInfo(JSON.parse(sourceMetadata).qqBatchSources, source.content) };
+      const { sourceMetadata, userMetadata, sourceBlocked, ...quote } = source, metadata = JSON.parse(sourceMetadata);
+      return { ...quote, ...qqBatchSourceInfo(metadata.qqBatchSources, source.content),
+        ...(!sourceBlocked && userMetadata ? qqReplySourceInfo(JSON.parse(userMetadata), metadata, source.content) : {}) };
     },
     saveMemory(input, { auditEvent } = {}) {
       const fields = memoryFields(input);
@@ -1108,12 +1125,14 @@ export function createStore(dbPath) {
       const tokens = queryTokens(query);
       let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId);
       if (query) matches = tokens.length ? matches.map(turn => ({ turn,
-        score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens) }))
+        score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens)
+          + (turn.qqReplyContext || []).reduce((sum, part) => sum + (part.reply?.status === 'verified' ? conversationScore(part.reply.text, tokens) : 0), 0) }))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.turn) : [];
       const total = matches.length;
       const items = offset < total ? matches.slice(offset, offset + limit).map(turn => {
-        const { qqBatchNotice, ...summary } = turn;
-        return { ...summary, user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
+        const { qqBatchNotice, qqReplyContext, ...summary } = turn;
+        return { ...summary, ...(qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}),
+          user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
           userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 };
       }) : [];
       return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null };
@@ -1130,7 +1149,11 @@ export function createStore(dbPath) {
       limit = integer(limit, '消息条数', 1, 1000);
       const state = conversationState([scope]);
       return state.messages.filter(message => message.scope === scope && (message.role === 'user'
-        ? !state.blockedUsers.has(message.id) : !state.hiddenAssistants.has(message.id))).slice(0, limit).reverse();
+        ? !state.blockedUsers.has(message.id) : !state.hiddenAssistants.has(message.id))).slice(0, limit).reverse().map(message => {
+        if (message.role !== 'user' || !Object.hasOwn(message.metadata, 'qqReplyContext')) return message;
+        const { qqReplyContext, ...metadata } = message.metadata;
+        return { ...message, metadata: { ...metadata, ...state.replySources.get(message.id) } };
+      });
     },
     listAccounts() {
       return all('SELECT * FROM accounts ORDER BY updated_at DESC, rowid DESC').map(accountRow);
