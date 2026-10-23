@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createMemoryAccess } from './memory-access.js';
 import { biliVideoUrl } from './bili-reading.js';
 import { createDshModelAccess } from './dsh-model.js';
+import { moodSnapshot, validateMoodDelta } from './mood.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
@@ -61,11 +62,24 @@ export function createDshRuntime({ store, dataDir }) {
       const browsing = name === 'browse_bili';
       const reading = name === 'read_bili_video' || browsing;
       const noting = name === 'note_bili_reading';
-      const memory = createMemoryAccess({ store, scope: reading || noting ? 'public' : scope, actor });
-      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+      const judging = name === 'evaluate_mood';
+      const modelTask = noting || judging;
+      const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor });
+      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
       let noteMessages;
-      if (noting) {
+      if (judging) {
+        const item = args.input;
+        if (typeof scope !== 'string' || !/^(owner|(?:group|person):[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127})$/.test(scope)
+          || (scope === 'owner' && !['owner', 'scheduler'].includes(actor))
+          || Object.keys(args).some(key => key !== 'input') || !item || typeof item !== 'object' || Array.isArray(item)
+          || Object.keys(item).some(key => !['kind', 'text', 'reply'].includes(key)) || !['reading', 'conversation'].includes(item.kind)
+          || typeof item.text !== 'string' || !item.text.trim() || item.text.length > 3000
+          || (item.kind === 'reading' && (scope !== 'owner' || Object.hasOwn(item, 'reply')))
+          || (item.kind === 'conversation' && (typeof item.reply !== 'string' || !item.reply.trim() || item.reply.length > 1500))) throw new Error('情绪评估只接受一个已核对场合的当次资料。');
+        noteMessages = [{ role: 'user', content: JSON.stringify({ input: item, mood: moodSnapshot(store) }) }];
+        args = { messages: noteMessages };
+      } else if (noting) {
         const item = args.reading;
         if (scope !== 'owner' || !['owner', 'scheduler'].includes(actor) || Object.keys(args).some(key => key !== 'reading')
           || !item || typeof item !== 'object' || Array.isArray(item)
@@ -98,7 +112,7 @@ export function createDshRuntime({ store, dataDir }) {
       }
       busy = true;
       const taskController = new AbortController();
-      const modelAccess = createDshModelAccess({ store, signal: taskController.signal });
+      const modelAccess = createDshModelAccess({ store, signal: taskController.signal, purpose: judging ? 'mood' : 'reading-note' });
       let workspace;
       try {
         let cacheDirectory;
@@ -126,7 +140,7 @@ export function createDshRuntime({ store, dataDir }) {
             killTimer ||= setTimeout(() => child.kill('SIGKILL'), 2000);
             killTimer.unref();
           };
-          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : noting ? 90000 : 30000);
+          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : modelTask ? 90000 : 30000);
           const abort = () => stop('DSH 任务已取消。');
           signal?.addEventListener('abort', abort, { once: true });
           if (signal?.aborted) abort();
@@ -145,10 +159,10 @@ export function createDshRuntime({ store, dataDir }) {
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
             if (message.type === 'model') {
-              if (!noting || received || modelRequested || !Number.isSafeInteger(message.id) || message.id < 1
+              if (!modelTask || received || modelRequested || !Number.isSafeInteger(message.id) || message.id < 1
                 || Object.keys(message).some(key => !['type', 'id', 'args'].includes(key))
                 || !message.args || Object.keys(message.args).some(key => !['messages', 'maxTokens'].includes(key))
-                || message.args.maxTokens !== 650 || JSON.stringify(message.args.messages) !== JSON.stringify(noteMessages)) return stop('DSH 模型请求不属于本次获准的阅读笔记。');
+                || message.args.maxTokens !== (judging ? 300 : 650) || JSON.stringify(message.args.messages) !== JSON.stringify(noteMessages)) return stop('DSH 模型请求不属于本次获准的任务。');
               modelRequested = true;
               modelAccess(message.args).then(result => {
                 authorizedNote = result.text;
@@ -175,7 +189,7 @@ export function createDshRuntime({ store, dataDir }) {
                 if (!failure && child.connected) child.send({ type: 'video-selection', id: message.id, url }, () => {});
               }).catch(() => stop('本次视频选择未完成，未自动重试。'));
             } else if (message.type === 'memory') {
-              if (noting || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
+              if (modelTask || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
               let response;
               try { response = { result: memory.execute(message.name, message.args) }; }
               catch (error) { response = { error: error.message }; }
@@ -190,8 +204,11 @@ export function createDshRuntime({ store, dataDir }) {
             taskController.abort();
             clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
-            else if (noting && (!modelRequested || typeof authorizedNote !== 'string' || result?.text !== authorizedNote)) reject(new Error('DSH 未返回有效的阅读笔记。'));
-            else accept(result);
+            else if (modelTask && (!modelRequested || typeof authorizedNote !== 'string' || result?.text !== authorizedNote)) reject(new Error('DSH 未返回有效的模型结果。'));
+            else if (judging) {
+              try { accept(validateMoodDelta(JSON.parse(result.text))); }
+              catch { reject(new Error('DSH 未返回有效的情绪变化。')); }
+            } else accept(result);
           });
         });
       } finally {

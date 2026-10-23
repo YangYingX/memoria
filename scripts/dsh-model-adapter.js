@@ -4,23 +4,25 @@ function count(value) { return Number.isSafeInteger(value) && value >= 0; }
 
 // requestCompletion({ messages: [{ role, content }], maxTokens }, signal) is the parent IPC callback.
 // It returns { text, model, usage: null | DSH TokenUsage }; no system prompt, persona or key crosses into this child.
-export async function registerMemoriaLlm({ ctx, load, requestCompletion }) {
+export async function registerMemoriaLlm({ ctx, load, requestCompletion, purpose = 'reading-note' }) {
+  if (!['reading-note', 'mood'].includes(purpose)) throw Object.assign(new Error('DSH_MODEL_INVALID_INPUT'), { code: 'DSH_MODEL_INVALID_INPUT' });
   const { LlmAdapter, LlmError, resolveRetryPolicy } = await load('@deepseek-ai/dsh-llm');
   const provider = 'memoria';
-  const id = 'memoria-notes';
+  const id = purpose === 'mood' ? 'memoria-mood' : 'memoria-notes';
   const fail = (code, llmCode = code) => { throw new LlmError(code, llmCode); };
   class MemoriaAdapter extends LlmAdapter {
     providerRetryPolicy() { return resolveRetryPolicy({ mode: 'normal', maxRetries: 0 }, 'memoria'); }
     async resolveModel(route, model, signal) {
       if (signal?.aborted) fail('DSH_MODEL_CANCELLED', 'ABORTED');
       if (route !== provider || model !== id) fail('DSH_MODEL_INVALID_INPUT');
-      return { provider, id, name: 'Memoria reading notes', inputModalities: ['text'], defaultMaxTokens: 650 };
+      return { provider, id, name: purpose === 'mood' ? 'Memoria mood suggestion' : 'Memoria reading notes',
+        inputModalities: ['text'], defaultMaxTokens: purpose === 'mood' ? 300 : 650 };
     }
     async *stream(options) {
       if (options.signal?.aborted) fail('DSH_MODEL_CANCELLED', 'ABORTED');
       if (options.provider !== provider || options.model !== id
         || ['tools', 'toolHistory'].some(key => Object.hasOwn(options, key))
-        || ['temperature', 'stop', 'reasoningEffort'].some(key => options[key] !== undefined)
+        || ['temperature', 'stop', 'reasoningEffort', 'purpose'].some(key => options[key] !== undefined)
         || !Array.isArray(options.messages) || !options.messages.length
         || !Number.isSafeInteger(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > 800) fail('DSH_MODEL_INVALID_INPUT');
       let characters = 0;
@@ -34,9 +36,9 @@ export async function registerMemoriaLlm({ ctx, load, requestCompletion }) {
         }).join('');
         return { role: message.role, content };
       });
-      // options.system is intentionally ignored: only the parent owns the fixed reading-note instructions.
+      // options.system is intentionally ignored: only the parent owns the purpose and fixed instructions.
       let result;
-      try { result = await requestCompletion({ messages, maxTokens: options.maxTokens }, options.signal); }
+      try { result = await requestCompletion({ messages, maxTokens: purpose === 'mood' ? 300 : options.maxTokens }, options.signal); }
       catch (error) {
         if (options.signal?.aborted || error?.code === 'DSH_MODEL_CANCELLED') fail('DSH_MODEL_CANCELLED', 'ABORTED');
         if (error?.code === 'DSH_MODEL_LIMIT') fail('DSH_MODEL_LIMIT', 'QUOTA');

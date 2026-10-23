@@ -56,10 +56,18 @@
             <div class="autonomy-actions"><button id="autonomy-run" class="button secondary" type="button">现在去逛逛 <span>↗</span></button><button class="text-button" type="button" data-goto="settings">调整日常安排 <span>↗</span></button></div>
             <p class="caption autonomy-note">现在去逛逛使用已保存的设置，需要先启用，也计入当天次数。失败的尝试同样计次；阅读内容保存到仅创建人可用的记忆。</p>
           </section>
+          <section id="mood-panel" class="panel padded autonomy-panel" aria-labelledby="mood-title">
+            <div class="section-heading compact-heading"><h2 id="mood-title">她的心情</h2><button id="refresh-mood" class="text-button" type="button">刷新状态 ↻</button></div>
+            <div class="self-expression-mood"><span class="caption">跨对话延续的角色心境</span><strong id="mood-label">平静</strong><p id="mood-summary" class="muted">正在读取状态…</p></div>
+            <dl class="autonomy-overview" aria-live="polite"><div><dt>心境值</dt><dd id="mood-value">70 / 100</dd></div><div><dt>最近评估</dt><dd id="mood-updated">尚未评估</dd></div><div><dt>今日评估尝试</dt><dd id="mood-count">0 次</dd></div></dl>
+            <p id="mood-outcome" class="caption"></p><p id="mood-error" class="connection-result error" role="status" hidden></p>
+            <div class="autonomy-actions"><button id="mood-run" class="button secondary" type="button">评估一次心情 <span>↗</span></button><button class="text-button" type="button" data-goto="settings">调整评估节奏 <span>↗</span></button></div>
+            <p class="caption autonomy-note">每次只看一段新对话或一次已读公开资料。手动评估可提前间隔，仍计入每日与模型额度；心情只影响语气，表达遵守各自的开关与额度。</p>
+          </section>
           <section id="self-expression-panel" class="panel padded autonomy-panel" aria-labelledby="self-expression-title">
             <div class="section-heading compact-heading"><h2 id="self-expression-title">她的自主表达</h2><button id="refresh-self-expression" class="text-button" type="button">刷新状态 ↻</button></div>
             <p id="self-expression-summary" class="muted">正在读取安排…</p>
-            <div class="self-expression-mood"><span class="caption">心情 · 角色表达状态</span><strong id="self-expression-mood">还没有表达状态</strong><p id="self-expression-reason" class="muted">有想法时，也可以选择安静。</p></div>
+            <div class="self-expression-mood"><span class="caption">最近一次表达的状态</span><strong id="self-expression-mood">还没有表达状态</strong><p id="self-expression-reason" class="muted">有想法时，也可以选择安静。</p></div>
             <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次表达机会</dt><dd id="self-expression-next">等待安排</dd></div><div><dt>今日公开表达尝试</dt><dd id="self-expression-count">0 次</dd></div><div><dt>最近结果</dt><dd id="self-expression-outcome">还没有记录</dd></div></dl>
             <p id="self-expression-decisions" class="caption"></p><div id="self-expression-platform-status" class="self-expression-platform-status"></div>
             <div id="self-expression-recent" class="self-expression-recent" hidden></div><p id="self-expression-error" class="connection-result error" role="status" hidden></p>
@@ -121,6 +129,12 @@
               <label>活动时区<input id="autonomy-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"><small>中国标准时间填写 Asia/Shanghai；次数和时段按此时区安排。</small></label>
               <p class="caption">每天会在次数范围内随机决定计划，并分散到活跃时段。程序运行时执行，错过的活动不会集中补跑。修改设置不会重置已经使用的次数。</p>
             </div></section>
+            <section id="mood-settings" class="panel padded settings-section"><div class="settings-section-intro"><h2>心情与节奏</h2><p class="muted">让最近的经历留下心境，也留一些自然回稳的时间。</p></div><div class="settings-fields">
+              <label class="check-label"><input id="mood-enabled" type="checkbox">启用间歇心情评估</label>
+              <div class="field-row"><label>自动评估间隔（分钟）<input id="mood-interval" type="number" min="60" max="1440" required></label><label>每天最多尝试（次）<input id="mood-limit" type="number" min="0" max="12" required></label></div>
+              <p class="caption">需要已配置的 DSH 和模型 API。默认关闭，开启后每 180 分钟最多评估一次、每天最多 4 次，按 UTC 日期计数；没有新对话或新阅读便保持安静。每次最多一次模型请求、300 输出 tokens，与聊天共用模型总额度，失败也计次。</p>
+              <p class="caption">对话、自主表达和主动私聊共用同一份心境。评估只生成有限数值与固定情绪；私人原因不进入群聊或公开表达。心境值向 70 自然回稳，数值偏离的半衰期为 3 小时；状态随加密备份迁移。</p>
+            </div></section>
             <section id="drawing-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">06</span><h2>绘图服务（待接入）</h2><p class="muted">先留好配置入口，绘图能力后续再调试。</p></div><div class="settings-fields">
               <p class="notice drawing-status" role="status">预留配置，不会发起请求或产生绘图费用。</p>
               <label>服务类型<select id="drawing-provider"><option value="qwen">Qwen / 阿里云百炼</option><option value="openai-compatible">OpenAI 兼容服务</option></select></label>
@@ -176,7 +190,7 @@
               <p id="dsh-summary" class="muted">正在读取状态…</p>
               <p id="bili-account-summary" class="muted">正在读取专用账号状态…</p>
               <div class="field-row"><button id="bili-login" class="button secondary" type="button">登录 B站专用账号</button><button id="bili-login-confirm" class="button secondary" type="button">完成登录，保存状态</button></div>
-              <p class="caption">项目打开独立浏览器，由你手动登录；确认后只把读取所需的登录凭据保存在本机。专用执行账号不用于认定创建人身份。Windows 使用独立 Edge 窗口，Linux 需图形会话；凭据不进入备份或 GitHub。登录不会自动解除已有的平台风险暂停。</p>
+              <p class="caption">项目打开独立浏览器，由你手动登录；确认后只把读取所需的登录凭据保存在本机。专用执行账号不用于认定创建人身份。Windows 使用独立 Chrome 窗口，Linux 需图形会话；凭据不进入备份或 GitHub。登录不会自动解除已有的平台风险暂停。</p>
               <label>每天最多尝试几次 B站浏览或读取<input id="dsh-reading-limit" type="number" min="0" max="50" step="1" required><small>默认 6 次，所有聊天场合共用，按 UTC 日期计数；发现候选和读取所选视频合计只计一次，失败也计次，重启或换会话不清零。0 表示暂停新读取，已有记忆仍可翻阅。</small></label>
               <p class="caption">在聊天或网页阅读中提供完整的 B站 BV 视频链接，也可加入固定网址阅读安排。通过只读接口获取字幕文字，不读取画面或音频；全部取得文字分段存入书架。平台验证可能阻止读取；暂停后不自动重试。阅读不消耗公开发布额度。</p>
               <div class="connection-test"><button id="dsh-test" class="button secondary" type="button">检测插件运行层</button><p class="caption">此按钮只检测宿主，不调用模型或访问平台。独立宿主配置方法见仓库部署说明。</p><p id="dsh-test-result" class="connection-result" role="status" hidden></p></div>

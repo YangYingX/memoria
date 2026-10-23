@@ -226,15 +226,17 @@ async function main(input) {
   const browsing = operationName === 'browse_bili';
   const reading = operationName === 'read_bili_video' || browsing;
   const noting = operationName === 'note_bili_reading';
+  const judging = operationName === 'evaluate_mood';
+  const modelTask = noting || judging;
   if (Number(process.versions.node.split('.')[0]) !== 24) fail('NODE_VERSION_MISMATCH');
   if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'operation'])
     || ![input.hostDirectory, input.workspace].every(value => typeof value === 'string' && isAbsolute(value))
     || !fields(input.operation, ['name', 'args'])
-    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', ...memoryTools].includes(operationName)
+    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', ...memoryTools].includes(operationName)
     || !object(input.operation.args)
     || (operationName === 'inspect' && Object.keys(input.operation.args).length)
     || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'credentialPath')))) fail('INVALID_START');
-  if (noting && (!fields(input.operation.args, ['messages']) || !Array.isArray(input.operation.args.messages)
+  if (modelTask && (!fields(input.operation.args, ['messages']) || !Array.isArray(input.operation.args.messages)
     || input.operation.args.messages.length !== 1 || !fields(input.operation.args.messages[0], ['role', 'content'])
     || input.operation.args.messages[0].role !== 'user' || typeof input.operation.args.messages[0].content !== 'string'
     || input.operation.args.messages[0].content.length > 16000)) fail('INVALID_START');
@@ -346,7 +348,7 @@ async function main(input) {
   const runtime = await runProfile({ environment: loadLayeredEnv('dsh'), profile, patchFiles: [overlay], args: [] });
   shutdown = runtime.shutdown;
   const { ctx } = runtime;
-  const model = await registerMemoriaLlm({ ctx, load, requestCompletion });
+  const model = await registerMemoriaLlm({ ctx, load, requestCompletion, purpose: judging ? 'mood' : 'reading-note' });
 
   // No model prompt or DSH session owns these memories: the parent binds verified identity and scope.
   for (const name of memoryTools) {
@@ -365,7 +367,7 @@ async function main(input) {
       },
     }));
   }
-  const allowedTools = new Set(['bili_humanism_status', 'bili_humanism_guide', ...(noting ? [] : memoryTools.map(name => `memoria_${name}`)),
+  const allowedTools = new Set(['bili_humanism_status', 'bili_humanism_guide', ...(modelTask ? [] : memoryTools.map(name => `memoria_${name}`)),
     ...(reading ? ['bili_humanism_read', 'bili_humanism_source'] : []), ...(browsing ? ['bili_humanism_candidates'] : [])]);
   ctx.tools.guard(exec => allowedTools.has(exec.name) ? undefined : 'MEMORIA_READ_ONLY');
   let call = 0;
@@ -394,9 +396,9 @@ async function main(input) {
     || ['history', 'favorite', 'like', 'coin'].some(name => tools.includes(`bili_humanism_${name}`))
     || fetchAttempts) fail('READ_ONLY_CHECK_FAILED');
 
-  if (noting) {
+  if (modelTask) {
     let text = '', finished = false;
-    for await (const chunk of ctx.llm.stream({ provider: model.provider, model: model.id, maxTokens: 650,
+    for await (const chunk of ctx.llm.stream({ provider: model.provider, model: model.id, maxTokens: judging ? 300 : 650,
       messages: input.operation.args.messages.map(item => ({ role: item.role, content: [{ type: 'text', text: item.content }] })),
       signal: lifecycle.signal })) {
       lifecycle.signal.throwIfAborted();
@@ -429,7 +431,7 @@ async function main(input) {
   if (typeof guide !== 'string') fail('INVALID_TOOL_RESULT');
   if (fetchAttempts) fail('NETWORK_ATTEMPTED');
   return { versions, tools, callableTools: ['inspect', ...memoryTools], guideCharacters: guide.length,
-    modelBridge: { provider: model.provider, mode: 'text-notes', maxCallsPerTask: 1, authority: 'memoria' },
+    modelBridge: { provider: model.provider, mode: 'text-notes', purposes: ['reading-note', 'mood'], maxCallsPerTask: 1, authority: 'memoria' },
     safety: { dailyFetching: false, personalityLearning: false, platformWrites: false,
       telemetry: false, fetchAttempts, networkPolicy: 'local-only-fetch-blocked', osSandbox: false, memoryAuthority: 'memoria' } };
 }

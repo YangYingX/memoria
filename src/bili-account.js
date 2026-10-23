@@ -61,7 +61,7 @@ export function createBiliAccount({ dataDir }) {
           mkdirSync(profilePath, { recursive: true, mode: 0o700 });
           opened = await chromium.launchPersistentContext(profilePath, {
             headless: false, chromiumSandbox: true, acceptDownloads: false, permissions: [], timeout: 15000,
-            ...(process.platform === 'win32' ? { channel: 'msedge' } : {}),
+            ...(process.platform === 'win32' ? { channel: 'chrome' } : {}),
           });
           context = opened;
           opened.once('close', () => { if (context === opened) context = undefined; });
@@ -81,7 +81,7 @@ export function createBiliAccount({ dataDir }) {
           } catch { /* Retain a context that still needs manual closing. */ }
         }
         throw new Error(process.platform === 'win32'
-          ? 'B站专用登录窗口未能打开；请确认已安装 Microsoft Edge，并在本机桌面会话中重试。'
+          ? 'B站专用登录窗口未能打开；请确认已安装 Google Chrome，并在本机桌面会话中重试。'
           : 'B站专用登录窗口未能打开；请运行 npx playwright install chromium 安装完整浏览器，并在图形桌面会话中重试。');
       }
     })().finally(() => { startPromise = undefined; });

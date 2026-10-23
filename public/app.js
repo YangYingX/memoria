@@ -99,6 +99,7 @@ async function loadState({ fill = false } = {}) {
   renderBackupStatus(state.data.backupStatus);
   renderAutonomyStatus(state.data.autonomyStatus);
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
+  renderMoodStatus();
   renderProactiveStatus(state.data.proactiveStatus);
   renderBookStatus(state.data.bookStatus);
   const dsh = state.data.dshStatus;
@@ -404,8 +405,11 @@ function renderAccounts() {
 }
 
 function fillSettings() {
-  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {} } = state.data.settings;
+  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, mood = {} } = state.data.settings;
   $('dsh-reading-limit').value = dshReading.dailyReadLimit ?? 6;
+  $('mood-enabled').checked = Boolean(mood.enabled);
+  $('mood-interval').value = mood.intervalMinutes ?? 180;
+  $('mood-limit').value = mood.dailyLimit ?? 4;
   $('persona-name').value = persona.name;
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
@@ -494,6 +498,23 @@ function renderProactiveStatus(status = {}) {
   $('proactive-last').textContent = [status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}` : '', status.lastSuccess ? `最近确认发送：${date(status.lastSuccess)}` : ''].filter(Boolean).join(' · ');
   $('proactive-error').hidden = !status.lastError;
   $('proactive-error').textContent = status.lastError || '';
+}
+
+function renderMoodStatus() {
+  const mood = state.data?.mood || {}, status = state.data?.moodStatus || {}, config = state.data?.settings.mood || {};
+  const outcomes = { success: '已完成心情评估', low_confidence: '这次判断没有足够把握，保留原状态', unchanged: '这次保持原状态', error: '本次评估未完成', cancelled: '本次评估已取消', interrupted: '上次评估未完成', evaluating: '正在评估', busy: '等待空闲时间' };
+  $('mood-label').textContent = mood.label || '平静';
+  $('mood-value').textContent = `${Number.isFinite(mood.value) ? mood.value.toFixed(1) : '70'} / 100`;
+  $('mood-updated').textContent = mood.updatedAt ? date(mood.updatedAt) : '尚未评估';
+  const today = status.day === new Date().toISOString().slice(0, 10);
+  $('mood-count').textContent = `${today ? status.attempts || 0 : 0} / ${config.dailyLimit ?? 4} 次`;
+  $('mood-summary').textContent = config.enabled
+    ? `每 ${config.intervalMinutes ?? 180} 分钟最多评估一次；无新资料便保持安静，心境会随时间回稳。`
+    : '间歇评估尚未开启，已有状态仍会自然回稳。可在「人格与设置」调整。';
+  $('mood-outcome').textContent = status.busy ? '正在评估…' : outcomes[status.lastOutcome] || '尚无评估记录；初始状态为平静。';
+  $('mood-error').hidden = !status.lastError;
+  $('mood-error').textContent = status.lastError || '';
+  $('mood-run').disabled = Boolean(status.busy || !config.enabled || !state.data?.dshStatus?.enabled || !state.data?.settings.model.hasApiKey);
 }
 
 function renderSelfExpressionStatus(status = {}) {
@@ -837,6 +858,13 @@ $('autonomy-run').addEventListener('click', () => action($('autonomy-run'), asyn
   }
 }).finally(() => renderAutonomyStatus(state.data?.autonomyStatus)));
 $('refresh-self-expression').addEventListener('click', () => action($('refresh-self-expression'), () => Promise.all([loadState(), loadEvents()])));
+$('refresh-mood').addEventListener('click', () => action($('refresh-mood'), () => loadState()));
+$('mood-run').addEventListener('click', () => action($('mood-run'), async () => {
+  const result = await api('/api/mood/run', { method: 'POST', data: {} });
+  await Promise.all([loadState(), loadEvents()]);
+  const notices = { disabled: '请先保存并启用心情评估。', busy: '她正在处理其他事情，稍后再评估。', daily_limit: '今日评估次数已用完。', no_new_input: '没有新的可评估资料。', no_input: '没有新的可评估资料。', cancelled: '本次评估已取消。', low_confidence: '这次判断把握不足，保留原状态。' };
+  toast(notices[result.status?.skipped || result.status?.lastOutcome] || result.status?.lastError || '评估已结束，状态见上方。');
+}));
 $('self-expression-run').addEventListener('click', () => action($('self-expression-run'), async () => {
   renderSelfExpressionStatus({ ...state.data.selfExpressionStatus, busy: true });
   try {
@@ -922,6 +950,7 @@ $('settings-form').addEventListener('submit', event => {
     try {
       await api('/api/settings', { method: 'PUT', data: {
         dshReading: { dailyReadLimit: Number($('dsh-reading-limit').value) },
+        mood: { enabled: $('mood-enabled').checked, intervalMinutes: Number($('mood-interval').value), dailyLimit: Number($('mood-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups') },

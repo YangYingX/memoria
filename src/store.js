@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { imageMimeType } from './images.js';
 import { assertPublicUrl } from './public-fetch.js';
+import { normalizeMoodState } from './mood.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -599,11 +600,18 @@ export function createStore(dbPath) {
     },
     listEvents(options = {}) {
       record(options, '经历筛选参数');
-      let { limit = 50, scope } = options;
+      if (Object.keys(options).some(key => !['limit', 'scope', 'type', 'actor', 'readingHeadsOnly'].includes(key))) invalid('经历筛选包含未知字段。');
+      let { limit = 50, scope, type, actor, readingHeadsOnly = false } = options;
       limit = integer(limit, '经历条数', 1, 1000);
-      return (scope === undefined
-        ? all('SELECT * FROM events ORDER BY created_at DESC, rowid DESC LIMIT ?', limit)
-        : all('SELECT * FROM events WHERE scope = ? ORDER BY created_at DESC, rowid DESC LIMIT ?', scopeValue(scope), limit)).map(eventRow);
+      if (type !== undefined) type = text(type, '经历类型', 40);
+      if (actor !== undefined) actor = text(actor, '参与者', 160);
+      if (typeof readingHeadsOnly !== 'boolean' || (readingHeadsOnly && type !== 'reading')) invalid('阅读首段筛选须为布尔值，启用时经历类型须为reading。');
+      const conditions = [], parameters = [];
+      if (scope !== undefined) { conditions.push('scope = ?'); parameters.push(scopeValue(scope)); }
+      if (type !== undefined) { conditions.push('type = ?'); parameters.push(type); }
+      if (actor !== undefined) { conditions.push('actor = ?'); parameters.push(actor); }
+      if (readingHeadsOnly) conditions.push("(json_type(metadata, '$.partIndex') IS NULL OR (json_type(metadata, '$.partIndex') IN ('integer', 'real') AND json_extract(metadata, '$.partIndex') = 1))");
+      return all(`SELECT * FROM events${conditions.length ? ` WHERE ${conditions.join(' AND ')}` : ''} ORDER BY created_at DESC, rowid DESC LIMIT ?`, ...parameters, limit).map(eventRow);
     },
     addMessage(input) {
       const message = { id: randomUUID(), ...messageFields(input), createdAt: new Date().toISOString() };
@@ -743,6 +751,7 @@ export function createStore(dbPath) {
       return {
         schemaVersion: 3, exportedAt: new Date().toISOString(),
         persona: personaValue(api.getSetting('persona', null)),
+        moodState: normalizeMoodState(api.getSetting('moodState', null)),
         memories: all('SELECT * FROM memories ORDER BY rowid').map(memoryRow),
         revisions: all('SELECT * FROM revisions ORDER BY rowid').map(revisionRow),
         events: all('SELECT * FROM events ORDER BY rowid').map(eventRow),
@@ -765,6 +774,7 @@ export function createStore(dbPath) {
       if (payload.schemaVersion === 3 && !Array.isArray(payload.books)) invalid('版本 3 备份必须包含书籍数组。');
       timestamp(payload.exportedAt, '备份时间');
       const persona = personaValue(payload.persona);
+      const moodState = normalizeMoodState(Object.hasOwn(payload, 'moodState') ? payload.moodState : null);
       let total = 0;
       function rows(name, check, key = clean => clean.id ?? clean.memoryId) {
         if (!Array.isArray(payload[name]) || payload[name].length > 100000) invalid(`备份中的 ${name} 须为最多 100000 项的数组。`);
@@ -901,8 +911,9 @@ export function createStore(dbPath) {
         for (const item of deletedExpressions.values()) run('INSERT INTO expression_tombstones VALUES (?, ?, ?)', item.origin, item.hash, item.deletedAt);
         for (const book of books) if (!deletedBooks.has(book.id)) insertBook(book);
         for (const [id, deletedAt] of deletedBooks) run('INSERT INTO book_tombstones VALUES (?, ?)', id, deletedAt);
-        // Credentials, sessions, delivery deduplication, and all other settings stay local.
+        // Only persona and the numeric mood snapshot are restored; runtime settings and credentials stay local.
         if (persona !== null) api.setSetting('persona', persona);
+        api.setSetting('moodState', moodState);
         return api.stats();
       });
     },
