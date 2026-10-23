@@ -32,6 +32,7 @@ import { createMoodJobs } from './mood-jobs.js';
 import { createQQChatBudget, defaultQQChatLimit, normalizeQQChatLimit } from './qq-chat-budget.js';
 import { createQQChatBatch, defaultQQMergeWindow, normalizeQQMergeWindow } from './qq-chat-batch.js';
 import { captureQQContext, isQQContextCanceled, qqConfigSignature } from './qq-context.js';
+import { createFollowupActions, followupView } from './followups.js';
 import { defaultFeishuSettings, normalizeFeishuSettings } from './feishu-message.js';
 import { createFeishuChat } from './feishu.js';
 import { createFeishuRuntime } from './feishu-runtime.js';
@@ -252,6 +253,16 @@ function getProactiveRecipient() {
 }
 
 function makeProactiveJobs() {
+  const compose = async (args, signal) => {
+    signal?.throwIfAborted();
+    if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
+    const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args, signal });
+    let proposal;
+    try { proposal = JSON.parse(result.text); }
+    catch { throw new Error('原生主动私聊未返回有效决定。'); }
+    return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
+      historyMessageIds: result.historyMessageIds, sourcesCurrent: result.sourcesCurrent };
+  };
   return createProactiveJobs({ store, getRecipient: getProactiveRecipient, canGenerate: () => qqChatBudget.status().remaining > 0,
     generate: async ({ instructions, signal, ...context }) => {
       signal?.throwIfAborted();
@@ -266,16 +277,8 @@ function makeProactiveJobs() {
       catch { throw new Error('主动私聊决定格式无效。'); }
     },
     canGenerateConversation: () => dshRuntime.status().enabled,
-    generateConversation: async ({ messageId, signal }) => {
-      signal?.throwIfAborted();
-      if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
-      const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args: { messageId }, signal });
-      let proposal;
-      try { proposal = JSON.parse(result.text); }
-      catch { throw new Error('原生主动私聊未返回有效决定。'); }
-      return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
-        historyMessageIds: result.historyMessageIds, sourcesCurrent: result.sourcesCurrent };
-    },
+    generateConversation: ({ messageId, signal }) => compose({ messageId }, signal),
+    generateAgenda: ({ agendaId, signal }) => compose({ agendaId }, signal),
     send: async (recipient, message, options) => {
       const config = store.getSetting('qq');
       if (!(await testQQ(options.signal)).ok) throw new Error('QQ 未在线或登录账号不匹配。');
@@ -490,7 +493,8 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
       const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, qqBatchSources: options.qqBatchSources, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
-        ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions } : {}) });
+        ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions,
+          followupActions: createFollowupActions({ store, getRecipient: getProactiveRecipient, cancel: () => proactiveJobs.cancel(), signal: options.signal, assertActive: options.assertActive }) } : {}) });
       try { moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
     }
@@ -765,7 +769,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
       if (path === '/api/feishu/reconnect' && req.method === 'POST') { feishuChat.disconnect(); await feishuRuntime.restart(); return json(res, 200, { status: feishuChat.status(), connection: feishuRuntime.status() }); }
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
@@ -879,8 +883,8 @@ const server = http.createServer(async (req, res) => {
       }
       if (['/api/backups/preview', '/api/backups/restore'].includes(path) && req.method === 'POST') {
         const payload = decryptBackup(input.archive, input.passphrase);
-        if (![1, 2, 3, 4].includes(payload.schemaVersion) || !['memories', 'messages', 'events', 'accounts', 'revisions', 'tombstones'].every(key => Array.isArray(payload[key])) || (payload.schemaVersion >= 2 && !['expressions', 'expressionTombstones'].every(key => Array.isArray(payload[key]))) || (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) || (payload.schemaVersion === 4 && !Array.isArray(payload.conversationBlocks))) throw new Error('备份数据格式不兼容。');
-        if (path.endsWith('/preview')) return json(res, 200, { exportedAt: payload.exportedAt, counts: Object.fromEntries(['memories', 'events', 'messages', 'accounts', 'expressions', 'books'].map(key => [key, payload[key]?.length || 0])) });
+        if (![1, 2, 3, 4, 5].includes(payload.schemaVersion) || !['memories', 'messages', 'events', 'accounts', 'revisions', 'tombstones'].every(key => Array.isArray(payload[key])) || (payload.schemaVersion >= 2 && !['expressions', 'expressionTombstones'].every(key => Array.isArray(payload[key]))) || (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) || (payload.schemaVersion >= 4 && !Array.isArray(payload.conversationBlocks)) || (payload.schemaVersion >= 5 && !Array.isArray(payload.followups))) throw new Error('备份数据格式不兼容。');
+        if (path.endsWith('/preview')) return json(res, 200, { exportedAt: payload.exportedAt, counts: Object.fromEntries(['memories', 'events', 'messages', 'accounts', 'expressions', 'books', 'followups'].map(key => [key, payload[key]?.length || 0])) });
         if (input.confirm !== true) throw new Error('请先预览并确认恢复。');
         if (activeMutation || qqBusy() || readingBusy || feishuChat.status().busy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再恢复。' });
         const rollback = join(dataDir, `before-restore-${Date.now()}.pab`);

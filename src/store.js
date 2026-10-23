@@ -6,6 +6,7 @@ import { imageMimeType } from './images.js';
 import { assertPublicUrl } from './public-fetch.js';
 import { normalizeMoodState } from './mood.js';
 import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
+import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -277,6 +278,9 @@ const revisionRow = row => ({ id: row.id, memoryId: row.memory_id, snapshot: JSO
 const feishuMessageRow = row => row ? ({ key: row.key, state: row.state, input: JSON.parse(row.input), scope: row.scope, actor: row.actor,
   reply: row.reply === null ? null : JSON.parse(row.reply), code: row.code, receipt: row.receipt === null ? null : JSON.parse(row.receipt),
   createdAt: row.created_at, updatedAt: row.updated_at }) : null;
+const followupRow = row => row ? ({ id: row.id, memoryId: row.memory_id, sourceEventId: row.source_event_id,
+  recipientAccountId: row.recipient_account_id, dueAt: row.due_at, expiresAt: row.expires_at, nextDecisionAt: row.next_decision_at,
+  status: row.status, revision: row.revision, decisionAttempts: row.decision_attempts, createdAt: row.created_at, updatedAt: row.updated_at }) : null;
 const normalize = value => value.normalize('NFKC').toLowerCase();
 
 export function queryTokens(query) {
@@ -326,6 +330,14 @@ export function createStore(dbPath) {
         label TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(platform, user_id)
       );
       CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS followups (
+        id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, source_event_id TEXT NOT NULL, recipient_account_id TEXT NOT NULL,
+        due_at TEXT NOT NULL, expires_at TEXT NOT NULL, next_decision_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'paused', 'deciding', 'attempted', 'sent', 'unknown', 'cancelled', 'expired', 'invalidated')),
+        revision INTEGER NOT NULL, decision_attempts INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS followups_status_due ON followups(status, next_decision_at);
+      CREATE INDEX IF NOT EXISTS followups_memory ON followups(memory_id);
       CREATE TABLE IF NOT EXISTS feishu_messages (
         key TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('received', 'processing', 'reply_ready', 'sending', 'sent', 'unknown', 'failed', 'interrupted', 'canceled')),
         input TEXT NOT NULL, scope TEXT NOT NULL, actor TEXT NOT NULL, reply TEXT, code TEXT NOT NULL DEFAULT '', receipt TEXT,
@@ -390,6 +402,53 @@ export function createStore(dbPath) {
     run('INSERT INTO books VALUES (?, ?, ?, ?, ?, ?, ?, ?)', book.id, book.title, book.sourceRef, book.text,
       book.currentOffset, book.createdAt, book.lastReadAt, book.deletedAt);
   }
+  function insertFollowup(item) {
+    run('INSERT INTO followups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', item.id, item.memoryId, item.sourceEventId,
+      item.recipientAccountId, item.dueAt, item.expiresAt, item.nextDecisionAt, item.status, item.revision, item.decisionAttempts, item.createdAt, item.updatedAt);
+  }
+  function followupAudit(item, action, now) {
+    insertEvent({ id: randomUUID(), ...eventFields({ type: 'followup', scope: 'owner', actor: action === 'created' || action === 'cancelled' || action === 'resumed' ? 'owner' : 'scheduler',
+      sourceRef: item.id, content: `聊天跟进状态：${action}。`, metadata: { followupId: item.id, memoryId: item.memoryId, sourceEventId: item.sourceEventId,
+        status: item.status, revision: item.revision } }), createdAt: now });
+  }
+  function updateFollowup(previous, patch, now, action) {
+    const item = normalizeFollowupRecord({ ...previous, ...patch, revision: previous.revision + 1,
+      updatedAt: now < previous.updatedAt ? previous.updatedAt : now });
+    run('UPDATE followups SET recipient_account_id = ?, next_decision_at = ?, status = ?, revision = ?, decision_attempts = ?, updated_at = ? WHERE id = ? AND revision = ?',
+      item.recipientAccountId, item.nextDecisionAt, item.status, item.revision, item.decisionAttempts, item.updatedAt, item.id, previous.revision);
+    followupAudit(item, action || item.status, item.updatedAt);
+    return item;
+  }
+  function invalidateFollowups(memoryId, now, sources = []) {
+    const sourceIds = [...new Set(sources.filter(memory => memory.scope === 'owner' && memory.sourceType === 'conversation').map(memory => memory.sourceRef))];
+    const sourceClause = sourceIds.length ? ` OR source_event_id IN (${sourceIds.map(() => '?').join(',')})` : '';
+    for (const row of all(`SELECT * FROM followups WHERE (memory_id = ?${sourceClause}) AND status IN ('pending', 'paused', 'deciding', 'attempted')`, memoryId, ...sourceIds)) {
+      updateFollowup(followupRow(row), { status: 'invalidated' }, now);
+    }
+  }
+  function validFollowupRecipient(account) {
+    return account?.platform === 'qq' && account.personId === 'owner' && /^[1-9]\d{4,19}$/.test(account.userId);
+  }
+  function validFollowupSource(source, message) {
+    return source?.type === 'message' && source.scope === 'owner' && source.actor === 'owner'
+      && typeof source.metadata?.messageId === 'string' && message?.id === source.metadata.messageId
+      && message.role === 'user' && message.scope === 'owner' && message.actor === 'owner' && message.content === source.content;
+  }
+  function followupEvidence(item) {
+    if (!item || FOLLOWUP_TERMINAL_STATUSES.includes(item.status)) return null;
+    const memory = memoryRow(get('SELECT * FROM memories WHERE id = ?', item.memoryId));
+    const row = get('SELECT * FROM events WHERE id = ?', item.sourceEventId);
+    const source = row ? eventRow(row) : null;
+    const message = source && typeof source.metadata.messageId === 'string' ? get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId) : null;
+    const valid = validFollowupSource(source, message) && memory && !memory.deletedAt && memory.scope === 'owner' && memory.category === 'promise'
+      && memory.sourceType === 'conversation' && memory.sourceRef === item.sourceEventId && memory.createdAt === item.createdAt
+      && memory.title.length <= 80 && memory.content.length <= 600
+      && memory.updatedAt === memory.createdAt && !get('SELECT 1 FROM revisions WHERE memory_id = ?', item.memoryId)
+      && !get('SELECT 1 FROM tombstones WHERE memory_id = ?', item.memoryId)
+      && !get("SELECT 1 FROM conversation_blocks WHERE scope = 'owner' AND event_id = ?", item.sourceEventId);
+    return valid ? { followup: item, memory, source, message: messageRow(message) } : null;
+  }
+  const currentFollowupSource = item => Boolean(followupEvidence(item));
   function addRevision(memory, now) {
     insertRevision({ id: randomUUID(), memoryId: memory.id, snapshot: memory, createdAt: now });
   }
@@ -581,6 +640,7 @@ export function createStore(dbPath) {
           addRevision(previous, now);
           blockConversationSource(previous, now);
           blockConversationSource(memory, now);
+          invalidateFollowups(id, now, [previous, memory]);
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
         } else insertMemory(memory);
         if (audit) insertEvent(audit);
@@ -720,6 +780,7 @@ export function createStore(dbPath) {
         const now = new Date().toISOString();
         addRevision(previous, now);
         blockConversationSource(previous, now);
+        invalidateFollowups(id, now, [previous]);
         run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id);
         run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now);
         if (audit) insertEvent(audit);
@@ -849,15 +910,26 @@ export function createStore(dbPath) {
     },
     bindAccount(input) {
       const fields = accountFields(input);
-      const previous = accountRow(get('SELECT * FROM accounts WHERE platform = ? AND user_id = ?', fields.platform, fields.userId));
       const now = new Date().toISOString();
-      const account = { id: previous?.id ?? randomUUID(), ...fields, createdAt: previous?.createdAt ?? now, updatedAt: now };
-      if (previous) run('UPDATE accounts SET person_id = ?, label = ?, updated_at = ? WHERE id = ?', account.personId, account.label, now, previous.id);
-      else insertAccount(account);
-      return account;
+      return transaction(() => {
+        const previous = accountRow(get('SELECT * FROM accounts WHERE platform = ? AND user_id = ?', fields.platform, fields.userId));
+        const account = { id: previous?.id ?? randomUUID(), ...fields, createdAt: previous?.createdAt ?? now, updatedAt: now };
+        if (previous) run('UPDATE accounts SET person_id = ?, label = ?, updated_at = ? WHERE id = ?', account.personId, account.label, now, previous.id);
+        else insertAccount(account);
+        if (!validFollowupRecipient(account)) for (const row of all("SELECT * FROM followups WHERE recipient_account_id = ? AND status IN ('pending', 'paused', 'deciding', 'attempted')", account.id)) {
+          updateFollowup(followupRow(row), { status: 'invalidated' }, now);
+        }
+        return account;
+      });
     },
     removeAccount(id) {
-      return run('DELETE FROM accounts WHERE id = ?', identifier(id, '账号绑定 ID')).changes > 0;
+      id = identifier(id, '账号绑定 ID'); const now = new Date().toISOString();
+      return transaction(() => {
+        for (const row of all("SELECT * FROM followups WHERE recipient_account_id = ? AND status IN ('pending', 'paused', 'deciding', 'attempted')", id)) {
+          updateFollowup(followupRow(row), { status: 'invalidated' }, now);
+        }
+        return run('DELETE FROM accounts WHERE id = ?', id).changes > 0;
+      });
     },
     findAccount(platform, userId) {
       const fields = accountFields({ platform, userId });
@@ -869,6 +941,116 @@ export function createStore(dbPath) {
     },
     hasDelivery(key) {
       return Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', text(key, '消息去重标识', 256)));
+    },
+    latestOwnerMessage() {
+      const row = get("SELECT * FROM messages WHERE scope = 'owner' AND role = 'user' AND actor = 'owner' ORDER BY rowid DESC LIMIT 1");
+      return row ? messageRow(row) : null;
+    },
+    scheduleFollowup(input) {
+      record(input, '聊天跟进');
+      if (Object.keys(input).some(key => !['title', 'content', 'dueAt', 'sourceEventId', 'recipientAccountId', 'now'].includes(key))) invalid('聊天跟进包含未知字段。');
+      const title = text(input.title, '跟进标题', 80), content = text(input.content, '跟进内容', 600);
+      const now = followupClock(input.now === undefined ? Date.now() : input.now), dueAt = followupTimestamp(input.dueAt);
+      const time = Date.parse(now), due = Date.parse(dueAt);
+      if (due < time + 60000 || due > time + 366 * FOLLOWUP_DAY_MS) invalid('跟进时间须在一分钟后至366天内。');
+      const sourceEventId = identifier(input.sourceEventId, '跟进来源事件 ID');
+      const recipientAccountId = identifier(input.recipientAccountId, '跟进收件人绑定 ID');
+      return transaction(() => {
+        const sourceRow = get('SELECT * FROM events WHERE id = ?', sourceEventId), source = sourceRow ? eventRow(sourceRow) : null;
+        const message = source && typeof source.metadata.messageId === 'string' ? get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId) : null;
+        const recipient = accountRow(get('SELECT * FROM accounts WHERE id = ?', recipientAccountId));
+        if (!validFollowupSource(source, message) || source.createdAt > now
+          || get("SELECT 1 FROM conversation_blocks WHERE scope = 'owner' AND event_id = ?", sourceEventId)) invalid('跟进必须来自创建人私聊的有效原始消息。');
+        if (!validFollowupRecipient(recipient)) invalid('跟进需要已验证的创建人 QQ 账号。');
+        for (const row of all("SELECT * FROM followups WHERE status IN ('pending', 'paused', 'deciding') AND expires_at <= ?", now)) {
+          updateFollowup(followupRow(row), { status: 'expired' }, now);
+        }
+        if (get("SELECT COUNT(*) AS count FROM followups WHERE status IN ('pending', 'paused', 'deciding', 'attempted')").count >= 20) invalid('最多保留20条未结束的聊天跟进。');
+        const memory = { id: randomUUID(), ...memoryFields({ title, content, category: 'promise', scope: 'owner', sourceType: 'conversation', sourceRef: sourceEventId }),
+          createdAt: now, updatedAt: now, deletedAt: null };
+        const item = normalizeFollowupRecord({ id: randomUUID(), memoryId: memory.id, sourceEventId, recipientAccountId,
+          dueAt, expiresAt: followupClock(due + FOLLOWUP_DAY_MS), nextDecisionAt: dueAt, status: 'pending', revision: 1, decisionAttempts: 0,
+          createdAt: now, updatedAt: now });
+        insertMemory(memory); insertFollowup(item); followupAudit(item, 'created', now);
+        return item;
+      });
+    },
+    getFollowup(id) {
+      return followupRow(get('SELECT * FROM followups WHERE id = ?', identifier(id, '跟进 ID')));
+    },
+    getFollowupEvidence(id) {
+      return followupEvidence(followupRow(get('SELECT * FROM followups WHERE id = ?', identifier(id, '跟进 ID'))));
+    },
+    listFollowups(input = {}) {
+      record(input, '跟进列表参数');
+      if (Object.keys(input).some(key => !['includeTerminal', 'limit'].includes(key))) invalid('跟进列表参数无效。');
+      const includeTerminal = input.includeTerminal === undefined ? true : input.includeTerminal;
+      if (typeof includeTerminal !== 'boolean') invalid('跟进列表状态参数无效。');
+      const limit = integer(input.limit === undefined ? 20 : input.limit, '跟进条数', 1, 100);
+      const active = "status IN ('pending', 'paused', 'deciding', 'attempted')";
+      return all(`SELECT * FROM followups ${includeTerminal ? '' : `WHERE ${active}`} ORDER BY CASE WHEN ${active} THEN 0 ELSE 1 END,
+        CASE WHEN ${active} THEN next_decision_at END, CASE WHEN NOT (${active}) THEN updated_at END DESC, created_at, id LIMIT ?`, limit).map(followupRow);
+    },
+    transitionFollowup(id, expectedRevision, status, options = {}) {
+      id = identifier(id, '跟进 ID'); integer(expectedRevision, '跟进版本', 1, Number.MAX_SAFE_INTEGER - 1);
+      if (!FOLLOWUP_STATUSES.includes(status)) invalid('跟进目标状态无效。');
+      record(options, '跟进状态参数');
+      if (Object.keys(options).some(key => !['nextDecisionAt', 'now'].includes(key))) invalid('跟进状态参数无效。');
+      const now = followupClock(options.now === undefined ? Date.now() : options.now);
+      if (options.nextDecisionAt !== undefined) followupTimestamp(options.nextDecisionAt);
+      return transaction(() => {
+        const previous = followupRow(get('SELECT * FROM followups WHERE id = ?', id));
+        if (!previous || previous.revision !== expectedRevision) return null;
+        const permitted = { pending: ['deciding', 'paused', 'expired', 'invalidated', 'cancelled'],
+          deciding: ['pending', 'attempted', 'expired', 'invalidated', 'cancelled'], attempted: ['sent', 'unknown'], paused: ['expired', 'invalidated', 'cancelled'] };
+        if (!permitted[previous.status]?.includes(status)) invalid('此跟进不能进行该状态转换。');
+        const patch = { status, ...(options.nextDecisionAt === undefined ? {} : { nextDecisionAt: options.nextDecisionAt }) };
+        if (status === 'deciding' || status === 'attempted') {
+          if (now >= previous.expiresAt) patch.status = 'expired';
+          else if (!currentFollowupSource(previous) || !validFollowupRecipient(accountRow(get('SELECT * FROM accounts WHERE id = ?', previous.recipientAccountId)))) patch.status = 'invalidated';
+        }
+        if (patch.status === 'deciding') {
+          if (now < previous.nextDecisionAt || now < previous.dueAt) return null;
+          if (previous.decisionAttempts >= 3) patch.status = 'expired';
+          else patch.decisionAttempts = previous.decisionAttempts + 1;
+        }
+        if (status === 'pending' && previous.decisionAttempts >= 3) patch.status = 'expired';
+        if (patch.status === 'pending' && (now >= previous.expiresAt || (patch.nextDecisionAt ?? previous.nextDecisionAt) >= previous.expiresAt)) patch.status = 'expired';
+        if (patch.status === 'expired') patch.nextDecisionAt = previous.nextDecisionAt;
+        if (patch.status === 'attempted' && !run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `followup:${id}`, now).changes) patch.status = 'unknown';
+        return updateFollowup(previous, patch, now);
+      });
+    },
+    cancelFollowup(id, now = Date.now()) {
+      id = identifier(id, '跟进 ID'); const stamp = followupClock(now);
+      return transaction(() => {
+        const previous = followupRow(get('SELECT * FROM followups WHERE id = ?', id));
+        if (!previous || FOLLOWUP_TERMINAL_STATUSES.includes(previous.status)) return null;
+        return updateFollowup(previous, { status: 'cancelled' }, stamp, 'cancelled');
+      });
+    },
+    resumeFollowup(input) {
+      record(input, '恢复跟进');
+      if (Object.keys(input).some(key => !['id', 'recipientAccountId', 'now'].includes(key))) invalid('恢复跟进参数无效。');
+      const id = identifier(input.id, '跟进 ID'), recipientAccountId = identifier(input.recipientAccountId, '跟进收件人绑定 ID');
+      const now = followupClock(input.now === undefined ? Date.now() : input.now);
+      return transaction(() => {
+        const previous = followupRow(get('SELECT * FROM followups WHERE id = ?', id));
+        if (!previous || previous.status !== 'paused') return null;
+        if (!validFollowupRecipient(accountRow(get('SELECT * FROM accounts WHERE id = ?', recipientAccountId)))) invalid('跟进需要重新验证创建人 QQ 账号。');
+        if (now >= previous.expiresAt || previous.decisionAttempts >= 3) return updateFollowup(previous, { status: 'expired' }, now);
+        if (!currentFollowupSource(previous)) return updateFollowup(previous, { status: 'invalidated' }, now);
+        if (get('SELECT 1 FROM deliveries WHERE key = ?', `followup:${id}`)) return updateFollowup(previous, { status: 'unknown' }, now);
+        return updateFollowup(previous, { status: 'pending', recipientAccountId }, now, 'resumed');
+      });
+    },
+    recoverFollowups(now = Date.now()) {
+      const stamp = followupClock(now);
+      return transaction(() => {
+        const records = all("SELECT * FROM followups WHERE status IN ('deciding', 'attempted')").map(followupRow);
+        for (const item of records) updateFollowup(item, { status: item.status === 'attempted' ? 'unknown' : 'pending' }, stamp, 'recovered');
+        return records.length;
+      });
     },
     receiveFeishuMessage({ key, input, scope, actor }) {
       key = feishuMessageKey(key);
@@ -1088,7 +1270,7 @@ export function createStore(dbPath) {
     },
     exportData() {
       return {
-        schemaVersion: 4, exportedAt: new Date().toISOString(),
+        schemaVersion: 5, exportedAt: new Date().toISOString(),
         persona: personaValue(api.getSetting('persona', null)),
         moodState: normalizeMoodState(api.getSetting('moodState', null)),
         memories: all('SELECT * FROM memories ORDER BY rowid').map(memoryRow),
@@ -1103,16 +1285,18 @@ export function createStore(dbPath) {
         expressionTombstones: all('SELECT * FROM expression_tombstones ORDER BY rowid').map(row => ({ origin: row.origin, hash: row.hash, deletedAt: row.deleted_at })),
         books: all('SELECT * FROM books WHERE deleted_at IS NULL ORDER BY rowid').map(bookRow),
         bookTombstones: all('SELECT * FROM book_tombstones ORDER BY rowid').map(row => ({ bookId: row.book_id, deletedAt: row.deleted_at })),
+        followups: all('SELECT * FROM followups ORDER BY rowid').map(followupRow),
       };
     },
     importData(payload) {
       record(payload, '备份');
-      if (![1, 2, 3, 4].includes(payload.schemaVersion)) invalid('不支持此备份版本。');
+      if (![1, 2, 3, 4, 5].includes(payload.schemaVersion)) invalid('不支持此备份版本。');
       if (payload.schemaVersion >= 2 && (!Array.isArray(payload.expressions) || !Array.isArray(payload.expressionTombstones))) {
-        invalid('版本 2–4 备份必须包含表情及表情删除记录数组。');
+        invalid('版本 2–5 备份必须包含表情及表情删除记录数组。');
       }
-      if (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) invalid('版本 3–4 备份必须包含书籍数组。');
-      if (payload.schemaVersion === 4 && !Array.isArray(payload.conversationBlocks)) invalid('版本 4 备份必须包含对话屏蔽记录数组。');
+      if (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) invalid('版本 3–5 备份必须包含书籍数组。');
+      if (payload.schemaVersion >= 4 && !Array.isArray(payload.conversationBlocks)) invalid('版本 4–5 备份必须包含对话屏蔽记录数组。');
+      if (payload.schemaVersion === 5 && !Array.isArray(payload.followups)) invalid('版本5备份必须包含聊天跟进数组。');
       timestamp(payload.exportedAt, '备份时间');
       const persona = personaValue(payload.persona);
       const moodState = normalizeMoodState(Object.hasOwn(payload, 'moodState') ? payload.moodState : null);
@@ -1222,8 +1406,38 @@ export function createStore(dbPath) {
         if (Object.keys(item).some(key => !['bookId', 'deletedAt'].includes(key))) invalid('书籍删除记录包含未知字段。');
         return { bookId: bookId(item.bookId), deletedAt: timestamp(item.deletedAt, '书籍删除时间') };
       }, item => item.bookId);
+      const followups = payload.schemaVersion === 5 ? rows('followups', normalizeFollowupRecord) : [];
+      const activeFollowups = followups.filter(item => !FOLLOWUP_TERMINAL_STATUSES.includes(item.status));
+      if (activeFollowups.length > 20) invalid('备份中的有效聊天跟进超过20条。');
+      const followupMemories = new Set();
+      const memoryById = new Map(memories.map(item => [item.id, item])), eventById = new Map(events.map(item => [item.id, item]));
+      const messageById = new Map(messages.map(item => [item.id, item])), accountById = new Map(accounts.map(item => [item.id, item]));
+      const revisedIds = new Set(revisions.map(item => item.memoryId)), deletedIds = new Set(tombstones.map(item => item.memoryId));
+      const blockedSources = new Set(conversationBlocks.filter(item => item.scope === 'owner').map(item => item.eventId));
+      for (const item of followups) {
+        if (followupMemories.has(item.memoryId)) invalid('备份中的聊天跟进重复引用了同一记忆。');
+        followupMemories.add(item.memoryId);
+        if (FOLLOWUP_TERMINAL_STATUSES.includes(item.status)) continue;
+        const memory = memoryById.get(item.memoryId), source = eventById.get(item.sourceEventId);
+        if (!memory || memory.deletedAt || memory.scope !== 'owner' || memory.category !== 'promise' || memory.sourceType !== 'conversation'
+          || memory.sourceRef !== item.sourceEventId || memory.createdAt !== item.createdAt || memory.updatedAt !== memory.createdAt
+          || memory.title.length > 80 || memory.content.length > 600 || revisedIds.has(item.memoryId) || deletedIds.has(item.memoryId)
+          || !validFollowupSource(source, messageById.get(source?.metadata?.messageId)) || source.createdAt > item.createdAt
+          || blockedSources.has(item.sourceEventId) || (!validFollowupRecipient(accountById.get(item.recipientAccountId))
+            && !(item.status === 'paused' && !accountById.has(item.recipientAccountId)))) invalid('备份中的有效聊天跟进缺少完整的创建人来源或账号关联。');
+      }
 
       return transaction(() => {
+        const restoredAt = new Date().toISOString();
+        // Local terminal records survive even backups that predate the followup or its source memory.
+        const mergedFollowups = new Map(followups.map(item => [item.id, item]));
+        for (const row of all("SELECT * FROM followups WHERE status IN ('attempted', 'sent', 'unknown', 'cancelled', 'expired', 'invalidated')")) {
+          let local = followupRow(row);
+          if (local.status === 'attempted') local = normalizeFollowupRecord({ ...local, status: 'unknown', revision: local.revision + 1,
+            updatedAt: local.updatedAt > restoredAt ? local.updatedAt : restoredAt });
+          const imported = mergedFollowups.get(local.id);
+          if (!imported || !FOLLOWUP_TERMINAL_STATUSES.includes(imported.status) || local.updatedAt >= imported.updatedAt) mergedFollowups.set(local.id, local);
+        }
         // Preserve deletions made after the backup. Restoring an older backup must not resurrect them.
         const deleted = new Map(all('SELECT * FROM tombstones').map(row => [row.memory_id, row.deleted_at]));
         for (const item of [...tombstones, ...memories.filter(memory => memory.deletedAt).map(memory => ({ memoryId: memory.id, deletedAt: memory.deletedAt }))]) {
@@ -1238,7 +1452,7 @@ export function createStore(dbPath) {
         for (const item of [...bookTombstones, ...books.filter(book => book.deletedAt).map(book => ({ bookId: book.id, deletedAt: book.deletedAt }))]) {
           if (!deletedBooks.has(item.bookId) || deletedBooks.get(item.bookId) < item.deletedAt) deletedBooks.set(item.bookId, item.deletedAt);
         }
-        db.exec('DELETE FROM revisions; DELETE FROM memories; DELETE FROM events; DELETE FROM messages; DELETE FROM accounts; DELETE FROM tombstones; DELETE FROM expressions; DELETE FROM expression_tombstones; DELETE FROM books; DELETE FROM book_tombstones;');
+        db.exec('DELETE FROM revisions; DELETE FROM memories; DELETE FROM events; DELETE FROM messages; DELETE FROM accounts; DELETE FROM tombstones; DELETE FROM expressions; DELETE FROM expression_tombstones; DELETE FROM books; DELETE FROM book_tombstones; DELETE FROM followups;');
         for (const memory of memories) {
           if (deleted.has(memory.id)) {
             memory.deletedAt = deleted.get(memory.id);
@@ -1261,6 +1475,17 @@ export function createStore(dbPath) {
         for (const item of deletedExpressions.values()) run('INSERT INTO expression_tombstones VALUES (?, ?, ?)', item.origin, item.hash, item.deletedAt);
         for (const book of books) if (!deletedBooks.has(book.id)) insertBook(book);
         for (const [id, deletedAt] of deletedBooks) run('INSERT INTO book_tombstones VALUES (?, ?)', id, deletedAt);
+        for (const item of mergedFollowups.values()) {
+          let restored = item;
+          if (!FOLLOWUP_TERMINAL_STATUSES.includes(item.status)) {
+            restored = normalizeFollowupRecord({ ...item, status: item.status === 'attempted' ? 'unknown' : 'paused', revision: item.revision + 1,
+              updatedAt: item.updatedAt > restoredAt ? item.updatedAt : restoredAt });
+            // Preserved memory tombstones or conversation blocks can invalidate a formerly valid backup source.
+            if (restored.status === 'paused' && !currentFollowupSource(restored)) restored.status = 'invalidated';
+          }
+          insertFollowup(restored);
+          if (['attempted', 'sent', 'unknown'].includes(restored.status)) run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `followup:${restored.id}`, restored.updatedAt);
+        }
         // Only persona and the numeric mood snapshot are restored; runtime settings and credentials stay local.
         if (persona !== null) api.setSetting('persona', persona);
         api.setSetting('moodState', moodState);

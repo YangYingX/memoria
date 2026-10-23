@@ -5,6 +5,7 @@ const labels = { chat: '对话实验室', memories: '记忆书架', reading: '�
 const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'reading-note': '读后思考', 'book-note': '读书笔记', promise: '约定' };
 const scopes = { owner: '仅创建人', public: '公开记忆', 'group:demo': '演练群聊' };
 const proactiveOutcomes = { quiet: '这次保持安静', decision: '已考虑本次话题', attempt: '已尝试，等待确认', pending: '等待平台确认', success: '已确认发送', unknown: '发送结果未确认', error: '未能完成', cancelled: '已取消', busy: '等空闲时再聊', limit: '今日额度已用完', deciding: '正在考虑开口', missed: '错过的机会已跳过' };
+const followupStatuses = { pending: '待跟进', paused: '已暂停，需在聊天中恢复', deciding: '正在判断是否关心', attempted: '已尝试发送，等待确认', sent: '已确认发送', unknown: '发送结果未确认，不重发', cancelled: '已取消', expired: '已结束，不再跟进', invalidated: '来源或账号已失效' };
 const state = { status: {}, data: null, page: 'chat', scope: 'owner', memories: [], books: [], expressions: new Map(), busyChat: false, preview: null };
 let toastTimer;
 
@@ -101,6 +102,7 @@ async function loadState({ fill = false } = {}) {
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
   renderMoodStatus();
   renderProactiveStatus(state.data.proactiveStatus);
+  renderFollowups();
   renderBookStatus(state.data.bookStatus);
   const dsh = state.data.dshStatus;
   $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。表情选择：${dsh.expressions?.configuredEngine === 'dsh-meme' ? '按需关键词检索' : '当前图库目录'}。主动拟聊选择：${dsh.proactive?.configuredEngine === 'dsh-speak-up' ? '原版主动搭话插件' : 'DSH 原生回合'}。${dsh.proactive?.lastCompletedTurn ? `本次服务启动后最近完成拟聊：${date(dsh.proactive.lastCompletedTurn.completedAt)}。` : '本次服务启动后尚未完成拟聊回合。'}长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
@@ -501,7 +503,7 @@ function renderProactiveStatus(status = {}) {
   const config = state.data?.settings.proactive || {};
   const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
   $('proactive-summary').textContent = config.enabled
-    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。${state.data?.dshStatus?.enabled ? '优先延续近期私聊，再考虑分享实际见闻。' : '根据实际读过的资料考虑是否分享。'}她会在允许的时段内等待合适的开口机会。`
+    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。先核对到期约定；${state.data?.dshStatus?.enabled ? '随机话题优先延续近期私聊，再考虑实际见闻。' : '随机话题根据实际读过的资料考虑。'}她会在允许的时段内等待合适的开口机会。`
     : '主动私聊已关闭。保存开启后才安排；已经发起的发送无法保证撤回。';
   $('proactive-next').textContent = !config.enabled ? '启用后安排' : inDay && status.nextRunAt
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -512,6 +514,24 @@ function renderProactiveStatus(status = {}) {
   $('proactive-last').textContent = [status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}` : '', status.lastSuccess ? `最近确认发送：${date(status.lastSuccess)}` : ''].filter(Boolean).join(' · ');
   $('proactive-error').hidden = !status.lastError;
   $('proactive-error').textContent = status.lastError || '';
+}
+
+function renderFollowups() {
+  const list = $('followups-list'), timeZone = state.data?.settings.proactive?.timeZone || 'Asia/Shanghai';
+  const items = Array.isArray(state.data?.followups) ? state.data.followups.slice(0, 20) : [];
+  list.replaceChildren();
+  $('followups-summary').textContent = `待跟进优先，最多显示 20 条（含最近结果）。时间按 ${timeZone} 显示；到期后仍需等待允许的时段与空闲机会。`;
+  if (!items.length) { list.append(node('p', '还没有聊天约定。可在创建人私聊中说：明晚20:00问问我考试情况。', 'caption')); return; }
+  const time = value => {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? '时间未记录' : parsed.toLocaleString('zh-CN', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  };
+  for (const item of items) {
+    const row = node('div', null, 'account-row'), info = node('div');
+    info.append(node('strong', item.title), node('p', followupStatuses[item.status] || '状态待核对', 'caption'),
+      node('p', `跟进起点：${time(item.dueAt)} · 截止：${time(item.expiresAt)}`, 'caption'));
+    row.append(info); list.append(row);
+  }
 }
 
 function renderMoodStatus() {
@@ -1088,7 +1108,7 @@ $('preview-form').addEventListener('submit', event => {
     const input = { archive: await file.text(), passphrase: $('restore-passphrase').value };
     const result = await api('/api/backups/preview', { method: 'POST', data: input });
     state.preview = input;
-    const countLabels = { memories: '记忆', events: '经历', messages: '消息', accounts: '账号', revisions: '修订', tombstones: '删除记录', expressions: '表情', books: '书籍' };
+    const countLabels = { memories: '记忆', events: '经历', messages: '消息', accounts: '账号', revisions: '修订', tombstones: '删除记录', expressions: '表情', books: '书籍', followups: '聊天约定' };
     const counts = Object.entries(result.counts || {}).map(([key, value]) => `${countLabels[key] || key} ${value} ${key === 'books' ? '本' : '条'}`).join('，');
     $('restore-details').textContent = `备份检查通过。导出时间：${date(result.exportedAt)}。${counts}`;
     $('restore-preview').hidden = false;

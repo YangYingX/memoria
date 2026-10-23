@@ -105,9 +105,10 @@ export function createDshRuntime({ store, dataDir }) {
         if (Object.keys(args).some(key => !['query', 'items'].includes(key))) throw new Error('表情检索只接受关键词和当前场合目录。');
         args = { query: expressionSearchQuery(args.query), items: expressionSearchItems(args.items) };
       } else if (composing) {
-        if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || Object.keys(args).length !== 1 || !Object.hasOwn(args, 'messageId')
-          || typeof args.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args.messageId)) throw new Error('主动拟聊只接受已验证创建人的消息标识。');
-        args = { messageId: args.messageId };
+        const key = Object.hasOwn(args, 'agendaId') ? 'agendaId' : 'messageId';
+        if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || Object.keys(args).length !== 1 || !Object.hasOwn(args, key)
+          || typeof args[key] !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args[key])) throw new Error('主动拟聊只接受已验证创建人的消息或约定标识。');
+        args = { [key]: args[key] };
       } else if (recalling) {
         if (Object.keys(args).some(key => key !== 'query') || typeof args.query !== 'string' || !args.query.trim() || args.query.length > 500) throw new Error('记忆子代理只接受 1–500 字的查询。');
         args = { query: args.query.trim() };
@@ -164,7 +165,7 @@ export function createDshRuntime({ store, dataDir }) {
       let workspace;
       try {
         const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal, excludeMessageId,
-          ...(composing ? { purpose: 'proactive', messageId: args.messageId } : {}) }) : null;
+          ...(composing ? { purpose: 'proactive', ...args } : {}) }) : null;
         let cacheDirectory;
         if (reading) {
           cacheDirectory = join(resolve(dataDir), 'dsh-cache', 'humanism');
