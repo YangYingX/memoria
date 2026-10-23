@@ -53,7 +53,7 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
 
   function conversation(scope, replyId, time) {
     if (typeof scope !== 'string' || !scopePattern.test(scope)) return null;
-    const items = store.listMessages(scope, 40);
+    const items = store.listConversationHistory(scope, 40);
     const reply = replyId ? items.find(item => item.id === replyId) : items.findLast(item => item.role === 'assistant');
     if (!reply || reply.role !== 'assistant' || reply.actor !== 'agent' || reply.scope !== scope || reply.metadata?.mode !== 'live'
       || typeof reply.id !== 'string' || typeof reply.metadata.replyTo !== 'string' || !fresh(reply.createdAt, time)

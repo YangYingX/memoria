@@ -52,7 +52,18 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
   const status = () => ({ ...(stopped ? lastState : store.getSetting('proactiveStatus', {})), busy });
   const save = state => { if (!stopped) { store.setSetting('proactiveStatus', state); lastState = state; } return state; };
   const latestUser = () => store.listMessages('owner', 100).findLast(message => message.role === 'user' && message.actor === 'owner');
-  const recentMessages = () => store.listMessages('owner', 6).map(({ role, actor, content }) => ({ role, actor, content: content.slice(0, 600) }));
+  function recentContext() {
+    const history = store.listConversationHistory('owner', 6);
+    const conversationIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
+    const historyMessageIds = [];
+    const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
+    for (const item of history.filter(item => item.role === 'assistant')) {
+      historyMessageIds.push(item.id);
+      if (validReference(item.metadata.replyTo)) conversationIds.add(item.metadata.replyTo);
+    }
+    return { messages: history.map(({ role, actor, content }) => ({ role, actor, content: content.slice(0, 600) })),
+      historyMessageIds, conversationIds: [...conversationIds] };
+  }
   const inHours = (time, config) => {
     const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.timeZone, hour: '2-digit', hourCycle: 'h23' }).format(time));
     return hour >= config.startHour && hour < config.endHour;
@@ -130,8 +141,9 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
     state = save({ ...state, decisionAttempts: state.decisionAttempts + 1, lastAttempt: stamp(time), lastOutcome: 'deciding' });
     busy = true;
     const activeController = controller = new AbortController();
+    const context = recentContext();
     const dependencies = () => JSON.stringify({ recipient: getRecipient(), persona: store.getSetting('persona'), model: store.getSetting('model'), qq: store.getSetting('qq'),
-      memory: store.getMemory(selected.memory.id), bookExists: !selected.bookId || Boolean(store.getBook(selected.bookId)), recentMessages: recentMessages(), lastUserId: latestUser()?.id });
+      memory: store.getMemory(selected.memory.id), bookExists: !selected.bookId || Boolean(store.getBook(selected.bookId)), recentContext: recentContext(), lastUserId: latestUser()?.id });
     const snapshot = dependencies();
     const sameState = () => !stopped && store.getSetting('proactiveStatus', {}).dayId === state.dayId;
     const current = () => sameState() && !activeController.signal.aborted && JSON.stringify(settings()) === state.configSignature
@@ -142,7 +154,7 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
     try {
       const decision = await generate({ instructions: PROACTIVE_INSTRUCTIONS, persona: store.getSetting('persona'),
         mood: moodSnapshot(store, now()),
-        recentMessages: recentMessages(),
+        recentMessages: context.messages,
         reading: { type: selected.index.type, title: selected.memory.title, readAt: selected.index.readAt,
           excerpt: selected.memory.content.slice(0, 3200), totalLength: selected.memory.content.length, revisedAt: selected.memory.updatedAt }, signal: activeController.signal });
       check();
@@ -173,7 +185,8 @@ export function createProactiveJobs({ store, generate, send, getRecipient, canGe
       const confirmed = (typeof messageId === 'string' && messageId.length > 0 && messageId.length <= 100 && !messageId.includes('\0')) || Number.isSafeInteger(messageId);
       if (confirmed) {
         store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: message,
-          metadata: { mode: 'live', proactive: true, memoryIds: [selected.memory.id], sourceKey: selected.sourceKey, platform: 'qq', messageId: String(messageId) } });
+          metadata: { mode: 'live', proactive: true, memoryIds: [selected.memory.id], conversationIds: context.conversationIds, historyMessageIds: context.historyMessageIds,
+            sourceKey: selected.sourceKey, platform: 'qq', messageId: String(messageId) } });
         event(selected, 'success', message, { messageId: String(messageId) });
         update({ lastOutcome: 'success', lastSuccess: stamp(now()), lastError: '' });
       } else {

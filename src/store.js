@@ -434,26 +434,28 @@ export function createStore(dbPath) {
     }
     const dependencies = all(`SELECT a.id, u.id AS user_id,
       CASE WHEN json_type(a.metadata, '$.memoryIds') = 'array' THEN json_extract(a.metadata, '$.memoryIds') ELSE '[]' END AS memory_ids,
-      CASE WHEN json_type(a.metadata, '$.conversationIds') = 'array' THEN json_extract(a.metadata, '$.conversationIds') ELSE '[]' END AS conversation_ids
+      CASE WHEN json_type(a.metadata, '$.conversationIds') = 'array' THEN json_extract(a.metadata, '$.conversationIds') ELSE '[]' END AS conversation_ids,
+      CASE WHEN json_type(a.metadata, '$.historyMessageIds') = 'array' THEN json_extract(a.metadata, '$.historyMessageIds') ELSE '[]' END AS history_message_ids
       FROM messages a LEFT JOIN messages u ON u.role = 'user' AND u.scope = a.scope
         AND json_type(a.metadata, '$.replyTo') = 'text' AND u.id = json_extract(a.metadata, '$.replyTo')
       WHERE a.role = 'assistant'`);
     for (const row of dependencies) {
       if (row.user_id) replyUsers.set(row.id, row.user_id);
       if (blockedUsers.has(row.user_id) || JSON.parse(row.memory_ids).some(id => typeof id === 'string' && blockedMemoryIds.has(id))) hiddenAssistants.add(row.id);
-      for (const id of JSON.parse(row.conversation_ids)) {
+      for (const id of [...JSON.parse(row.conversation_ids), ...JSON.parse(row.history_message_ids), ...(row.user_id ? [row.user_id] : [])]) {
         if (typeof id !== 'string') continue;
         if (!dependents.has(id)) dependents.set(id, new Set());
         dependents.get(id).add(row.id);
       }
     }
     // A changed source can propagate through older replies. Keep unrelated user quotes visible.
-    const blockedReplies = new Set(blockedUsers);
+    const blockedReplies = new Set([...blockedUsers, ...hiddenAssistants]);
     for (const id of hiddenAssistants) if (replyUsers.has(id)) blockedReplies.add(replyUsers.get(id));
     const queue = [...blockedReplies];
     for (let index = 0; index < queue.length; index++) {
       for (const id of dependents.get(queue[index]) ?? []) {
         hiddenAssistants.add(id);
+        if (!blockedReplies.has(id)) { blockedReplies.add(id); queue.push(id); }
         const userId = replyUsers.get(id);
         if (userId && !blockedReplies.has(userId)) { blockedReplies.add(userId); queue.push(userId); }
       }
@@ -651,6 +653,8 @@ export function createStore(dbPath) {
           AND m.deleted_at IS NULL AND original.deleted_at IS NULL AND m.source_type = 'reflection' AND m.category = 'reading-note'
           AND m.source_ref = e.source_ref AND r.source_ref = e.source_ref AND original.source_ref = e.source_ref
           AND m.content = e.content AND original.content = r.content AND original.id = json_extract(r.metadata, '$.memoryId')
+          AND m.updated_at = m.created_at AND original.updated_at = original.created_at
+          AND NOT EXISTS (SELECT 1 FROM revisions revision WHERE revision.memory_id IN (m.id, original.id))
         ORDER BY e.created_at DESC, e.rowid DESC LIMIT ?`, ...permitted, limit);
     },
     deleteMemory(id, { auditEvent } = {}) {

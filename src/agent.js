@@ -128,15 +128,12 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   }));
   const history = store.listConversationHistory(scope, 16);
   const conversationIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
+  const historyMessageIds = history.filter(item => item.role === 'assistant').map(item => item.id);
   const dependencyMemoryIds = new Set();
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
   for (const item of history.filter(item => item.role === 'assistant')) {
     // A history boundary can retain an assistant reply without its original user message.
     if (validReference(item.metadata.replyTo)) conversationIds.add(item.metadata.replyTo);
-    else {
-      for (const id of Array.isArray(item.metadata.memoryIds) ? item.metadata.memoryIds : []) if (validReference(id)) dependencyMemoryIds.add(id);
-      for (const id of Array.isArray(item.metadata.conversationIds) ? item.metadata.conversationIds : []) if (validReference(id)) conversationIds.add(id);
-    }
   }
   const incoming = store.addMessage({ scope, role: 'user', content: text || `[${imageNote}]`, actor, metadata });
   const event = store.addEvent({ type: 'message', scope, actor, content: text || `[${imageNote}]`, metadata: { ...metadata, messageId: incoming.id } });
@@ -359,7 +356,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       if (!reply) throw new Error('模型没有返回有效回复，请重试或检查工具调用兼容性。');
     }
     reply = omitImagePayload(reply, images);
-    store.addMessage({ scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])], conversationIds: [...conversationIds], replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } });
+    store.addMessage({ scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])], conversationIds: [...conversationIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } });
     return { reply, mode, memories, expressionIds };
   } catch (error) {
     store.addEvent({ type: 'error', scope, content: `对话未完成：${omitImagePayload(error.message, images)}${images.length ? ' 本次附有图片，请确认所用模型支持视觉输入；未取得完整识图回复。' : ''}`, actor: 'system' });
