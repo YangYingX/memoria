@@ -844,7 +844,7 @@ $('book-file-form').addEventListener('submit', event => {
     const file = $('book-file').files[0], output = $('book-file-result'); let imported = false;
     output.textContent = '';
     if (!file || !/\.txt$/i.test(file.name)) throw new Error('请选择 UTF-8 编码的 TXT 文本文件。');
-    if (!file.size || file.size > 1048576) throw new Error('文本文件须非空，且不超过 1 MiB。');
+    if (!file.size || file.size > 3 * 1024 * 1024) throw new Error('文本文件须非空，且不超过 3 MiB。');
     let content;
     try { content = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()); }
     catch { throw new Error('文件不是有效的 UTF-8 文本，请先转换编码后再导入。'); }

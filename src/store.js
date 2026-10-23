@@ -16,7 +16,7 @@ import { defaultProactiveSettings } from './proactive.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
-const BOOK_LIMITS = { chars: 1000000, bytes: 1024 * 1024, total: 5 * 1024 * 1024, count: 10 };
+const BOOK_LIMITS = { chars: 1000000, bytes: 3 * 1024 * 1024, total: 5 * 1024 * 1024, count: 10 };
 
 function invalid(message) {
   const error = new Error(message);
@@ -282,7 +282,7 @@ function bookId(value) {
 function bookFields(input) {
   record(input, '书籍');
   const content = text(input.text, '书籍正文', BOOK_LIMITS.chars, { trim: false });
-  if (Buffer.byteLength(content, 'utf8') > BOOK_LIMITS.bytes) invalid('单本书正文不能超过 1 MiB。');
+  if (Buffer.byteLength(content, 'utf8') > BOOK_LIMITS.bytes) invalid('单本书正文不能超过 3 MiB。');
   let sourceRef = text(input.sourceRef === undefined ? '' : input.sourceRef, '书籍来源', LIMITS.sourceRef, { empty: true });
   if (sourceRef) {
     if (/[\u0000-\u001f\u007f]/.test(sourceRef)) invalid('书籍来源不能包含控制字符。');

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { assertPublicUrl, fetchPublicResource } from './public-fetch.js';
 
-const MAX_BYTES = 1024 * 1024;
+const MAX_BYTES = 3 * 1024 * 1024;
 const MAX_CHARS = 1000000;
 
 function fileKey(event, file) {
@@ -36,7 +36,7 @@ export function parseQQBookFile(event) {
   else if (!name || /[\\/\u0000-\u001f\u007f]/.test(name)) reason = '文件名无效，请使用普通名称重新发送 TXT 文件。';
   else if (!/\.txt$/i.test(name)) reason = '目前只能收录 TXT 文本书籍，请转换为 UTF-8 编码的 TXT 后发送。';
   else if (rawSize !== undefined && (!Number.isSafeInteger(size) || size < 0)) reason = '文件大小信息无效，请重新发送 TXT 文件。';
-  else if (size > MAX_BYTES) reason = '这本 TXT 超过 1 MiB，请分章后单独发送。';
+  else if (size > MAX_BYTES) reason = '这本 TXT 超过 3 MiB，请分章后单独发送。';
   else if (!id && !url) reason = '没有收到文件下载信息，请重新发送 TXT 文件。';
   return reason ? { ...file, unsupported: true, reason } : file;
 }
@@ -45,7 +45,7 @@ export async function loadQQBookFile({ file, resolveUrl, signal } = {}) {
   if (!file || typeof file !== 'object' || file.unsupported) throw new Error(file?.reason || '文件信息无效，请重新发送 TXT 文件。');
   if (typeof file.name !== 'string' || file.name.length > 512 || !/\.txt$/i.test(file.name)
     || /[\\/\u0000-\u001f\u007f]/.test(file.name)) throw new Error('只支持名称有效的 TXT 文件。');
-  if (file.size !== undefined && (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_BYTES)) throw new Error('TXT 文件不能超过 1 MiB。');
+  if (file.size !== undefined && (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_BYTES)) throw new Error('TXT 文件不能超过 3 MiB。');
   const timeout = AbortSignal.timeout(20000), active = signal ? AbortSignal.any([signal, timeout]) : timeout;
   try {
     active.throwIfAborted();
@@ -64,7 +64,7 @@ export async function loadQQBookFile({ file, resolveUrl, signal } = {}) {
       headers: { Accept: 'text/plain, application/octet-stream;q=0.8' },
     });
     active.throwIfAborted();
-    if (!bytes.length || bytes.length > MAX_BYTES) throw new Error('TXT 文件为空或超过 1 MiB。');
+    if (!bytes.length || bytes.length > MAX_BYTES) throw new Error('TXT 文件为空或超过 3 MiB。');
     const type = String(headers?.['content-type'] || '').split(';')[0].trim().toLowerCase();
     const head = bytes.subarray(0, 8).toString('latin1');
     if (/^(?:image\/|audio\/|video\/|application\/(?:pdf|zip|gzip)|text\/html)/.test(type)
