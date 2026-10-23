@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMemoryAccess } from './memory-access.js';
 import { biliVideoUrl } from './bili-reading.js';
+import { createDshModelAccess } from './dsh-model.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
@@ -59,10 +60,26 @@ export function createDshRuntime({ store, dataDir }) {
     async execute({ scope, actor, name, args = {}, signal, selectVideo }) {
       const browsing = name === 'browse_bili';
       const reading = name === 'read_bili_video' || browsing;
-      const memory = createMemoryAccess({ store, scope: reading ? 'public' : scope, actor });
-      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+      const noting = name === 'note_bili_reading';
+      const memory = createMemoryAccess({ store, scope: reading || noting ? 'public' : scope, actor });
+      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
-      if (browsing) {
+      let noteMessages;
+      if (noting) {
+        const item = args.reading;
+        if (scope !== 'owner' || !['owner', 'scheduler'].includes(actor) || Object.keys(args).some(key => key !== 'reading')
+          || !item || typeof item !== 'object' || Array.isArray(item)
+          || Object.keys(item).some(key => !['title', 'url', 'excerpt', 'readAt', 'truncated', 'partCount', 'totalSavedChars', 'evidence'].includes(key))
+          || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 500
+          || typeof item.url !== 'string' || biliVideoUrl(item.url) !== item.url
+          || typeof item.excerpt !== 'string' || !item.excerpt.trim() || item.excerpt.length > 8000
+          || typeof item.readAt !== 'string' || !Number.isFinite(Date.parse(item.readAt))
+          || typeof item.truncated !== 'boolean' || !Number.isSafeInteger(item.partCount) || item.partCount < 1 || item.partCount > 50
+          || !Number.isSafeInteger(item.totalSavedChars) || item.totalSavedChars < item.excerpt.length || item.totalSavedChars > 1000000
+          || item.evidence?.plugin !== 'dsh-bili-humanism' || JSON.stringify(item).length > 16000) throw new Error('DSH 笔记只接受当次公开 B站阅读摘录。');
+        noteMessages = [{ role: 'user', content: JSON.stringify(item) }];
+        args = { messages: noteMessages };
+      } else if (browsing) {
         if (Object.keys(args).length || typeof selectVideo !== 'function') throw new Error('B站自主浏览需要栖忆选择候选，不能传入网址或其他参数。');
       } else if (reading) {
         if (Object.keys(args).some(key => key !== 'url') || typeof args.url !== 'string' || args.url.length > 4096) throw new Error('视频阅读只接受完整网址。');
@@ -80,6 +97,8 @@ export function createDshRuntime({ store, dataDir }) {
         store.setSetting('dshReadingStatus', { day: usage.day, attempts: usage.attempts + 1, lastAttemptAt: new Date().toISOString() });
       }
       busy = true;
+      const taskController = new AbortController();
+      const modelAccess = createDshModelAccess({ store, signal: taskController.signal });
       let workspace;
       try {
         let cacheDirectory;
@@ -100,14 +119,14 @@ export function createDshRuntime({ store, dataDir }) {
           TEMP: join(workspace, 'tmp'), TMP: join(workspace, 'tmp'), DSH_HOME: join(workspace, 'dsh') });
         return await new Promise((accept, reject) => {
           const child = spawn(settings.nodePath, [hostScript], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-          let result, failure, received = false, selectionRequested = false, requests = 0, stderrBytes = 0;
+          let result, authorizedNote, failure, received = false, selectionRequested = false, modelRequested = false, requests = 0, stderrBytes = 0;
           let killTimer;
           const stop = message => {
-            failure ||= new Error(message); child.kill();
+            failure ||= new Error(message); taskController.abort(); child.kill();
             killTimer ||= setTimeout(() => child.kill('SIGKILL'), 2000);
             killTimer.unref();
           };
-          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : 30000);
+          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : noting ? 90000 : 30000);
           const abort = () => stop('DSH 任务已取消。');
           signal?.addEventListener('abort', abort, { once: true });
           if (signal?.aborted) abort();
@@ -116,12 +135,29 @@ export function createDshRuntime({ store, dataDir }) {
             if (stderrBytes > 65536) stop('DSH 日志超过大小限制。');
           });
           child.on('error', () => stop('DSH 子进程未能启动。'));
+          child.once('disconnect', () => {
+            taskController.abort();
+            if (!received) stop('DSH 连接已中断，未自动重试。');
+          });
           const credentialPath = join(resolve(dataDir), 'bili-credentials.json');
           child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace,
             ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}), operation: { name, args } }));
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
-            if (message.type === 'select-video') {
+            if (message.type === 'model') {
+              if (!noting || received || modelRequested || !Number.isSafeInteger(message.id) || message.id < 1
+                || Object.keys(message).some(key => !['type', 'id', 'args'].includes(key))
+                || !message.args || Object.keys(message.args).some(key => !['messages', 'maxTokens'].includes(key))
+                || message.args.maxTokens !== 650 || JSON.stringify(message.args.messages) !== JSON.stringify(noteMessages)) return stop('DSH 模型请求不属于本次获准的阅读笔记。');
+              modelRequested = true;
+              modelAccess(message.args).then(result => {
+                authorizedNote = result.text;
+                if (!failure && child.connected) child.send({ type: 'model-result', id: message.id, result }, () => {});
+              }).catch(error => {
+                if (!failure && child.connected) child.send({ type: 'model-result', id: message.id,
+                  error: ['DSH_MODEL_LIMIT', 'DSH_MODEL_CANCELLED', 'DSH_MODEL_INVALID_RESPONSE'].includes(error.code) ? error.code : 'DSH_MODEL_FAILED' }, () => {});
+              });
+            } else if (message.type === 'select-video') {
               if (!browsing || selectionRequested || !Number.isSafeInteger(message.id) || message.id < 1
                 || !Array.isArray(message.candidates) || message.candidates.length > 3) return stop('DSH 视频候选格式无效。');
               selectionRequested = true;
@@ -139,7 +175,7 @@ export function createDshRuntime({ store, dataDir }) {
                 if (!failure && child.connected) child.send({ type: 'video-selection', id: message.id, url }, () => {});
               }).catch(() => stop('本次视频选择未完成，未自动重试。'));
             } else if (message.type === 'memory') {
-              if (++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
+              if (noting || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
               let response;
               try { response = { result: memory.execute(message.name, message.args) }; }
               catch (error) { response = { error: error.message }; }
@@ -151,12 +187,15 @@ export function createDshRuntime({ store, dataDir }) {
             else stop('DSH 返回了不支持的消息。');
           });
           child.on('close', code => {
+            taskController.abort();
             clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
+            else if (noting && (!modelRequested || typeof authorizedNote !== 'string' || result?.text !== authorizedNote)) reject(new Error('DSH 未返回有效的阅读笔记。'));
             else accept(result);
           });
         });
       } finally {
+        taskController.abort();
         try {
           if (workspace && dirname(resolve(workspace)) === settings.hostDirectory && realpathSync(workspace) === resolve(workspace)) rmSync(workspace, { recursive: true, force: true });
         } finally { busy = false; }

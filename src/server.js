@@ -12,7 +12,7 @@ import { testModel, requestCompletion } from './model.js';
 import { createBackupJobs, normalizeBackupSettings, publicBackupSettings } from './backup-jobs.js';
 import { parseQQMessage } from './qq-message.js';
 import { loadQQImages } from './images.js';
-import { createAutonomyJobs, defaultAutonomySettings, normalizeAutonomySettings } from './autonomy.js';
+import { createAutonomyJobs, defaultAutonomySettings, normalizeAutonomySettings, reflectReading } from './autonomy.js';
 import { discoverHeyboxPosts, readHeyboxPost } from './browser-reader.js';
 import { getExpressionCatalog, getExpressionPreviews, readExpressionImage, buildExpressionSegments } from './expressions.js';
 import { defaultDrawingSettings, normalizeDrawingSettings, publicDrawingSettings } from './drawing-settings.js';
@@ -91,6 +91,13 @@ function heyboxRuntime() {
 const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy });
 function makeAutonomyJobs() {
   return createAutonomyJobs({ store,
+    reflect: async reading => {
+      if (biliVideoUrl(reading.url) !== reading.url || reading.evidence?.plugin !== 'dsh-bili-humanism') return reflectReading(store, reading);
+      const { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence } = reading;
+      const note = await dshRuntime.execute({ scope: 'owner', actor: 'scheduler', name: 'note_bili_reading',
+        args: { reading: { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence } }, signal: reading.signal });
+      return note.text;
+    },
     browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, ...options }),
     discoverPosts: async (source, options) => {
       if (source !== 'heybox') throw new Error('此社区尚未接入。');

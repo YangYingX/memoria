@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { registerMemoriaLlm } from './dsh-model-adapter.js';
 
 const versions = { dsh: '0.2.1-rc.2', humanism: '1.7.0' };
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
@@ -165,6 +166,24 @@ function requestMemory(name, args, signal) {
   });
 }
 
+function requestCompletion(args) {
+  return new Promise((accept, reject) => {
+    if (lifecycle.signal.aborted || !process.connected) return reject(new Error('DSH_MODEL_CANCELLED'));
+    const id = ++sequence;
+    const finish = (error, result) => {
+      if (!pending.delete(id)) return;
+      clearTimeout(timer); lifecycle.signal.removeEventListener('abort', abort);
+      if (error) reject(Object.assign(new Error(error), { code: error }));
+      else accept(result);
+    };
+    const abort = () => finish('DSH_MODEL_CANCELLED');
+    const timer = setTimeout(() => finish('DSH_MODEL_FAILED'), 65000);
+    pending.set(id, { kind: 'model-result', finish });
+    lifecycle.signal.addEventListener('abort', abort, { once: true });
+    send({ type: 'model', id, args }).catch(() => finish('DSH_MODEL_FAILED'));
+  });
+}
+
 const start = new Promise((accept, reject) => {
   let started = false;
   process.on('message', message => {
@@ -172,12 +191,17 @@ const start = new Promise((accept, reject) => {
     if (message.type === 'start' && !started) {
       started = true;
       accept(message);
-    } else if (['memory-result', 'video-selection'].includes(message.type) && started) {
+    } else if (['memory-result', 'video-selection', 'model-result'].includes(message.type) && started) {
       const request = pending.get(message.id);
       if (!request || request.kind !== message.type) return;
       if (message.type === 'video-selection') {
         if (!fields(message, ['type', 'id', 'url']) || !Object.hasOwn(message, 'url')) request.finish('INVALID_SOURCE');
         else request.finish(null, message.url);
+      } else if (message.type === 'model-result') {
+        if (!fields(message, ['type', 'id', 'result', 'error'])) return request.finish('DSH_MODEL_FAILED');
+        if (Object.hasOwn(message, 'error')) request.finish(['DSH_MODEL_LIMIT', 'DSH_MODEL_CANCELLED'].includes(message.error) ? message.error : 'DSH_MODEL_FAILED');
+        else if (Object.hasOwn(message, 'result')) request.finish(null, message.result);
+        else request.finish('DSH_MODEL_FAILED');
       } else {
         if (!fields(message, ['type', 'id', 'result', 'error'])) return;
         if (Object.hasOwn(message, 'error')) request.finish('MEMORY_UNAVAILABLE');
@@ -201,14 +225,19 @@ async function main(input) {
   operationName = input?.operation?.name;
   const browsing = operationName === 'browse_bili';
   const reading = operationName === 'read_bili_video' || browsing;
+  const noting = operationName === 'note_bili_reading';
   if (Number(process.versions.node.split('.')[0]) !== 24) fail('NODE_VERSION_MISMATCH');
   if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'operation'])
     || ![input.hostDirectory, input.workspace].every(value => typeof value === 'string' && isAbsolute(value))
     || !fields(input.operation, ['name', 'args'])
-    || !['inspect', 'read_bili_video', 'browse_bili', ...memoryTools].includes(operationName)
+    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', ...memoryTools].includes(operationName)
     || !object(input.operation.args)
     || (operationName === 'inspect' && Object.keys(input.operation.args).length)
     || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'credentialPath')))) fail('INVALID_START');
+  if (noting && (!fields(input.operation.args, ['messages']) || !Array.isArray(input.operation.args.messages)
+    || input.operation.args.messages.length !== 1 || !fields(input.operation.args.messages[0], ['role', 'content'])
+    || input.operation.args.messages[0].role !== 'user' || typeof input.operation.args.messages[0].content !== 'string'
+    || input.operation.args.messages[0].content.length > 16000)) fail('INVALID_START');
   let video, cacheDirectory, credentialPath = '';
   if (reading) {
     if (!fields(input.operation.args, browsing ? [] : ['url']) || typeof input.cacheDirectory !== 'string'
@@ -312,10 +341,12 @@ async function main(input) {
   const pluginConfig = { dataDir: cacheDirectory || join(workspace, 'plugin-data'), credentialPath, writePolicyPath: '', accountStateDir: '',
     enableDailyFetching: false, enablePersonalityLearning: false,
     enableHistoryWrites: false, enableFavoriteWrites: false, enableLikeWrites: false, enableCoinWrites: false };
-  writeFileSync(overlay, `- id: bili-humanism\n  config: ${JSON.stringify(pluginConfig)}\n`, { flag: 'wx' });
+  writeFileSync(overlay, `- id: bili-humanism\n  config: ${JSON.stringify(pluginConfig)}\n`
+    + ['llm-deepseek', 'llm-deepseek-account', 'llm-pi-ai'].map(id => `- id: ${id}\n  disabled: true\n`).join(''), { flag: 'wx' });
   const runtime = await runProfile({ environment: loadLayeredEnv('dsh'), profile, patchFiles: [overlay], args: [] });
   shutdown = runtime.shutdown;
   const { ctx } = runtime;
+  const model = await registerMemoriaLlm({ ctx, load, requestCompletion });
 
   // No model prompt or DSH session owns these memories: the parent binds verified identity and scope.
   for (const name of memoryTools) {
@@ -334,7 +365,7 @@ async function main(input) {
       },
     }));
   }
-  const allowedTools = new Set(['bili_humanism_status', 'bili_humanism_guide', ...memoryTools.map(name => `memoria_${name}`),
+  const allowedTools = new Set(['bili_humanism_status', 'bili_humanism_guide', ...(noting ? [] : memoryTools.map(name => `memoria_${name}`)),
     ...(reading ? ['bili_humanism_read', 'bili_humanism_source'] : []), ...(browsing ? ['bili_humanism_candidates'] : [])]);
   ctx.tools.guard(exec => allowedTools.has(exec.name) ? undefined : 'MEMORIA_READ_ONLY');
   let call = 0;
@@ -363,6 +394,23 @@ async function main(input) {
     || ['history', 'favorite', 'like', 'coin'].some(name => tools.includes(`bili_humanism_${name}`))
     || fetchAttempts) fail('READ_ONLY_CHECK_FAILED');
 
+  if (noting) {
+    let text = '', finished = false;
+    for await (const chunk of ctx.llm.stream({ provider: model.provider, model: model.id, maxTokens: 650,
+      messages: input.operation.args.messages.map(item => ({ role: item.role, content: [{ type: 'text', text: item.content }] })),
+      signal: lifecycle.signal })) {
+      lifecycle.signal.throwIfAborted();
+      if (chunk.type === 'text-delta') text += chunk.text;
+      else if (chunk.type === 'error' || chunk.type === 'tool-call-delta') fail('DSH_MODEL_FAILED');
+      else if (chunk.type === 'finish') {
+        if (chunk.reason?.kind !== 'stop') fail('DSH_MODEL_FAILED');
+        finished = true;
+      }
+      if (text.length > 2000) fail('DSH_MODEL_FAILED');
+    }
+    if (!finished || !text.trim() || fetchAttempts) fail('DSH_MODEL_FAILED');
+    return { text };
+  }
   if (browsing) {
     const discovery = await discoverVideos(execute);
     if (!discovery.selection) return { skipped: 'no_unread_videos' };
@@ -381,6 +429,7 @@ async function main(input) {
   if (typeof guide !== 'string') fail('INVALID_TOOL_RESULT');
   if (fetchAttempts) fail('NETWORK_ATTEMPTED');
   return { versions, tools, callableTools: ['inspect', ...memoryTools], guideCharacters: guide.length,
+    modelBridge: { provider: model.provider, mode: 'text-notes', maxCallsPerTask: 1, authority: 'memoria' },
     safety: { dailyFetching: false, personalityLearning: false, platformWrites: false,
       telemetry: false, fetchAttempts, networkPolicy: 'local-only-fetch-blocked', osSandbox: false, memoryAuthority: 'memoria' } };
 }
