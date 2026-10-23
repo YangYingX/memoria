@@ -127,7 +127,7 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
         return { ...status(), busy: false, skipped: 'busy' };
       }
       if (typeof note !== 'string' || !note.trim() || note.length > 4000 || note.includes('\0')) throw new Error('读书笔记须为 1–4000 字的有效文本。');
-      const reading = store.recordBookReading({ bookId: book.id, startOffset, endOffset, note });
+      const reading = store.recordBookReading({ bookId: book.id, startOffset, endOffset, note, previousNotes });
       save({ ...state, lastOutcome: 'success', lastSuccess: new Date(now()).toISOString(), lastMemoryId: reading.memory.id, lastError: '' });
       return { ...status(), busy: false };
     } catch (error) {

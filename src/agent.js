@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { requestCompletion } from './model.js';
 import { expressionSearchQuery, expressionSearchResult } from './expression-search.js';
 import { allowedScopes, withConversationSource, memoryPage, memoryExcerpt, createMemoryAccess } from './memory-access.js';
@@ -47,10 +48,15 @@ const memoryChangeTools = [
 ];
 
 function memoryChangeRequests(text) {
-  const direct = text.replace(/```[\s\S]*?```|^>.*$|“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"|'[^']*'|`[^`]*`/gm, '');
-  const forget = !/(?:别|不要|不能|不想|无需|不用|不必)(?:再)?(?:忘|删除|移除)|(?:never|don['’]?t|do not)\s+(?:forget|delete|remove)/i.test(direct)
+  const direct = text.replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|<(blockquote|q)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
+    .replace(/^[\t ]*>[^\r\n]*(?:\r?\n(?![\t ]*(?:\r?\n|$))[^\r\n]*)*|“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"|'[^']*'|`[^`]*`/gm, ' ').trim();
+  if (/[“”‘’「」『』"'`]|<\/?(?:blockquote|q)(?:\s|>)/i.test(direct)
+    || /转述|引用|原话|台词|举例|例如|比如|示例|假设|假如|如果|要是|以下.{0,12}(?:发言|文字|内容)|(?:他|她|别人|有人|朋友|同事|文章|帖子|网页)(?:告诉我|说|写)|(?:曾经|之前|昨天|刚才).{0,20}(?:说|让|要求)/.test(direct)) {
+    return { revise_memory: false, forget_memory: false };
+  }
+  const forget = !/(?:别|不要|不能|不想|无需|不用|不必)\s*(?:再)?\s*(?:忘|删除|移除)|(?:never|don['’]?t|do not)\s+(?:forget|delete|remove)/i.test(direct)
     && /忘掉|忘记|别再记|不要再记|不再保留|(?:删除|移除)[\s\S]*记忆|(?:记忆)[\s\S]*(?:删除|移除)|\bforget\b|\bdelete\b[\s\S]*\bmemor/i.test(direct);
-  const revise = !/(?:不要|别|无需|不用|不必)(?:再)?(?:更正|纠正|修正|改正|更新|修改)|(?:don['’]?t|do not)\s+(?:correct|update|revise)/i.test(direct)
+  const revise = !/(?:不要|别|无需|不用|不必)\s*(?:再)?\s*(?:更正|纠正|修正|改正|更新|修改)|(?:don['’]?t|do not)\s+(?:correct|update|revise)/i.test(direct)
     && /更正|纠正|修正|改正|记错|记反|改成|改为|更新[\s\S]*(?:记忆|记录)|\b(?:correct|update|revise)\b[\s\S]*\bmemor/i.test(direct);
   return { revise_memory: revise, forget_memory: forget };
 }
@@ -162,10 +168,40 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const conversationIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
   const historyMessageIds = history.filter(item => item.role === 'assistant').map(item => item.id);
   const dependencyMemoryIds = new Set();
+  const bookNoteStates = new Map();
+  const bookNoteSignature = evidence => createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
+  function trackBookNote(memory, { refresh = false } = {}) {
+    if (memory?.scope !== 'owner' || memory.sourceType !== 'book' || memory.category !== 'book-note') return memory;
+    const evidence = store.getBookNoteEvidence(memory.id);
+    if (!evidence || JSON.stringify(evidence.memory) !== JSON.stringify(memory)) throw new Error('读书笔记来源已变化，本次回答已停止。');
+    const signature = bookNoteSignature(evidence);
+    if (!refresh && bookNoteStates.has(memory.id) && bookNoteStates.get(memory.id) !== signature) throw new Error('读书笔记来源已变化，本次回答已停止。');
+    bookNoteStates.set(memory.id, signature);
+    dependencyMemoryIds.add(memory.id);
+    return memory;
+  }
+  function currentBookNotes(notes, bookId) {
+    if (!Array.isArray(notes)) throw new Error('书房未返回有效笔记列表。');
+    const canonical = new Map();
+    const summaries = notes.slice(0, 5).map(note => {
+      const evidence = store.getBookNoteEvidence(note?.id);
+      const memory = evidence?.memory;
+      if (!memory || !memory.sourceRef.startsWith(`book:${bookId}:`)) throw new Error('读书笔记不存在或不属于本轮书籍。');
+      canonical.set(memory.id, memory);
+      return { id: memory.id, title: memory.title, excerpt: memory.content.slice(0, 700), sourceRef: memory.sourceRef };
+    });
+    const result = bookNotes(summaries);
+    for (const note of result) trackBookNote(canonical.get(note.id));
+    return result;
+  }
   let memoryAgentSourcesCurrent;
   function checkMemoryAgentSources() {
     signal?.throwIfAborted(); assertActive?.();
     if (memoryAgentSourcesCurrent && !memoryAgentSourcesCurrent()) throw new Error('记忆子代理引用的资料已变化，本次回答已停止。');
+    for (const [id, signature] of bookNoteStates) {
+      const evidence = store.getBookNoteEvidence(id);
+      if (!evidence || bookNoteSignature(evidence) !== signature) throw new Error('读书笔记来源已变化，本次回答已停止。');
+    }
   }
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
   for (const item of history.filter(item => item.role === 'assistant')) {
@@ -176,6 +212,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const event = store.addEvent({ type: 'message', scope, actor, content: text || `[${imageNote}]`, metadata: { ...metadata, messageId: incoming.id } });
   const conversationAccess = createMemoryAccess({ store, scope, actor, excludeMessageId: incoming.id });
   const memories = store.searchMemories(prompt, allowedScopes(scope), 6);
+  for (const memory of memories) trackBookNote(memory);
   const model = store.getSetting('model');
   const persona = store.getSetting('persona');
   const mode = model.apiKey ? 'live' : 'demo';
@@ -327,7 +364,10 @@ export async function runConversation({ store, readAndRemember, scope, message, 
                   if (!validReference(id)) continue;
                   dependencyMemoryIds.add(id);
                   const memory = store.getMemory(id);
-                  if (memory && !memory.deletedAt && allowedScopes(scope).includes(memory.scope) && !memories.some(item => item.id === id)) memories.push(memory);
+                  if (memory && !memory.deletedAt && allowedScopes(scope).includes(memory.scope)) {
+                    trackBookNote(memory);
+                    if (!memories.some(item => item.id === id)) memories.push(memory);
+                  }
                 }
                 if (Array.isArray(result.conversationIds)) for (const id of result.conversationIds) conversationIds.add(id);
               }
@@ -349,13 +389,13 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               for (const book of result) listedBookIds.add(book.id);
             } else if (call.function.name === 'read_book' || call.function.name === 'read_book_notes') {
               if (typeof args.book_id !== 'string' || !listedBookIds.has(args.book_id)) throw new Error('请先列出书房，从本轮列表中选择书籍 ID。');
-              if (call.function.name === 'read_book_notes') result = bookNotes(await bookActions.notes(args.book_id));
+              if (call.function.name === 'read_book_notes') result = currentBookNotes(await bookActions.notes(args.book_id), args.book_id);
               else {
                 const reading = await bookActions.read(args.book_id);
                 result = { ok: reading.ok === true, skipped: typeof reading.skipped === 'string' ? reading.skipped.slice(0, 80) : undefined,
                   bookId: args.book_id, bookTitle: String(reading.bookTitle || '').slice(0, 200), startOffset: reading.startOffset, endOffset: reading.endOffset,
                   reason: typeof reading.reason === 'string' ? reading.reason.slice(0, 500) : undefined,
-                  ...(reading.ok === true && reading.note ? { note: bookNotes([reading.note])[0] } : {}) };
+                  ...(reading.ok === true && reading.note ? { note: currentBookNotes([reading.note], args.book_id)[0] } : {}) };
               }
             } else if (call.function.name === 'import_book_url') {
               const requested = new URL(args.url); requested.hash = '';
@@ -366,6 +406,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['query', 'offset'].includes(key))) throw new Error('记忆搜索只接受查询词和结果位置，不能改变身份或范围。');
               if (typeof args.query !== 'string' || args.query.length > 500) throw new Error('查询无效。');
               const page = store.searchMemoryPage(args.query, allowedScopes(scope), 6, args.offset === undefined ? 0 : args.offset);
+              for (const memory of page.items) trackBookNote(memory);
               result = { ...page, items: page.items.map(m => withConversationSource(store, memoryExcerpt(m, args.query), scope)) };
               for (const found of result.items) if (!memories.some(m => m.id === found.id)) memories.push(found);
             } else if (call.function.name === 'read_memory') {
@@ -374,11 +415,13 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               const memory = store.getMemory(args.id);
               if (!memory || memory.deletedAt || !allowedScopes(scope).includes(memory.scope)) throw new Error('记忆不存在或当前场合不可用。');
               if (offset >= memory.content.length) throw new Error('记忆正文位置超出范围。');
+              trackBookNote(memory);
               result = withConversationSource(store, memoryPage(memory, offset, 4000), scope);
               if (offset === 0) readMemoryStates.set(memory.id, memory);
               if (!memories.some(m => m.id === memory.id)) memories.push(memory);
             } else if (call.function.name === 'read_memory_source') {
               result = conversationAccess.execute('read_memory_source', args);
+              trackBookNote(store.getMemory(args.id));
               if (!memories.some(m => m.id === args.id)) memories.push(store.getMemory(args.id));
             } else if (['revise_memory', 'forget_memory'].includes(call.function.name)) {
               if (!changeRequests[call.function.name]) throw new Error('本条消息没有明确要求此类记忆更改，请先说明要更正或忘记哪一条。');
@@ -396,11 +439,14 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               if (action === 'revise') {
                 if (current.content.length > 4000 || typeof args.content !== 'string' || args.content.length > 4000) throw new Error('聊天更正仅支持不超过4000字的完整条目，较长记忆请在后台编辑。');
                 const updated = store.saveMemory({ ...current, title: omitImagePayload(args.title, images), content: omitImagePayload(args.content, images) }, { auditEvent });
+                trackBookNote(updated, { refresh: true });
                 const index = memories.findIndex(memory => memory.id === updated.id);
                 if (index >= 0) memories[index] = updated; else memories.push(updated);
                 result = { updated: true, memory: withConversationSource(store, updated, scope) };
               } else {
                 if (!store.deleteMemory(current.id, { auditEvent })) throw new Error('记忆未能移出书架。');
+                bookNoteStates.delete(current.id);
+                dependencyMemoryIds.delete(current.id);
                 const index = memories.findIndex(memory => memory.id === current.id);
                 if (index >= 0) memories.splice(index, 1);
                 result = { forgotten: true, id: current.id, notice: '仅从当前书架移除，原始聊天、经历、修订及旧备份仍保留。' };
@@ -461,8 +507,13 @@ export async function runConversation({ store, readAndRemember, scope, message, 
     }
     reply = omitImagePayload(reply, images);
     checkMemoryAgentSources();
-    const assistant = { scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])], conversationIds: [...conversationIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } };
-    if (deferAssistant) return { reply, mode, memories, expressionIds, commitDeliveredReply: store.prepareAssistantReply(assistant) };
+    const assistant = { scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])],
+      ...(bookNoteStates.size ? { bookNoteVersions: [...bookNoteStates].map(([memoryId, signature]) => ({ memoryId, signature })) } : {}),
+      conversationIds: [...conversationIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } };
+    if (deferAssistant) {
+      const commit = store.prepareAssistantReply(assistant);
+      return { reply, mode, memories, expressionIds, commitDeliveredReply(...args) { checkMemoryAgentSources(); return commit(...args); } };
+    }
     store.addMessage(assistant);
     return { reply, mode, memories, expressionIds };
   } catch (error) {

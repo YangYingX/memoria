@@ -131,6 +131,12 @@ function memoryFields(input) {
   };
 }
 
+function readingRevision(snapshot) {
+  return (snapshot.scope === 'owner' && snapshot.sourceType === 'book' && snapshot.category === 'book-note')
+    || (snapshot.sourceType === 'webpage' && snapshot.category === 'reading')
+    || (snapshot.sourceType === 'reflection' && snapshot.category === 'reading-note');
+}
+
 function eventFields(input) {
   record(input, '经历');
   const type = text(input.type, '经历类型', 40);
@@ -664,6 +670,113 @@ export function createStore(dbPath) {
     insertRevision({ id: randomUUID(), memoryId: memory.id, snapshot: memory, createdAt: now });
   }
 
+  function bookNoteEvidence(id) {
+    const memory = memoryRow(get("SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL AND scope = 'owner' AND source_type = 'book' AND category = 'book-note'", id));
+    if (!memory || get('SELECT 1 FROM tombstones WHERE memory_id = ?', id)) return null;
+    const row = get(`SELECT * FROM events WHERE type = 'book_reading' AND scope = 'owner' AND actor = 'scheduler'
+      AND json_extract(metadata, '$.memoryId') = ? AND source_ref = ? AND created_at = ? ORDER BY rowid DESC LIMIT 1`, id, memory.sourceRef, memory.createdAt);
+    if (!row) return null;
+    const source = eventRow(row), { bookId: idOfBook, startOffset, endOffset } = source.metadata;
+    if (typeof idOfBook !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(idOfBook)
+      || !Number.isSafeInteger(startOffset) || !Number.isSafeInteger(endOffset) || startOffset < 0 || endOffset <= startOffset
+      || endOffset > BOOK_LIMITS.chars || memory.sourceRef !== `book:${idOfBook}:${startOffset}-${endOffset}`) return null;
+    const revisions = all('SELECT * FROM revisions WHERE memory_id = ? ORDER BY created_at DESC, id DESC', id).map(revisionRow);
+    return { memory, source, revisions };
+  }
+
+  function noteDependencies(event) {
+    const supplied = event.metadata.sourceMemoryIds;
+    const legacy = event.type === 'reading_reflection' ? [event.metadata.readingMemoryId] : [];
+    const ids = supplied === undefined ? legacy : supplied;
+    if (!Array.isArray(ids) || ids.length > (event.type === 'book_reading' ? 3 : 4)
+      || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(id))
+      || new Set(ids).size !== ids.length || ids.includes(event.metadata.memoryId)
+      || (event.type === 'reading_reflection' && !ids.includes(event.metadata.readingMemoryId))) return null;
+    return ids;
+  }
+  function noteEvents() {
+    return all("SELECT * FROM events WHERE type IN ('book_reading', 'reading_reflection') AND actor = 'scheduler'").map(eventRow)
+      .filter(event => typeof event.metadata.memoryId === 'string');
+  }
+  function pristineNote(memory, event, importedPristine = new Set()) {
+    if (!memory || memory.deletedAt || memory.id !== event.metadata.memoryId || memory.scope !== event.scope
+      || memory.sourceRef !== event.sourceRef || memory.createdAt !== event.createdAt || memory.updatedAt !== memory.createdAt
+      || (!importedPristine.has(memory.id) && get('SELECT 1 FROM revisions WHERE memory_id = ?', memory.id))
+      || get('SELECT 1 FROM tombstones WHERE memory_id = ?', memory.id)) return false;
+    if (event.type === 'book_reading') return memory.scope === 'owner' && memory.category === 'book-note' && memory.sourceType === 'book'
+      && bookNoteEvidence(memory.id)?.source.id === event.id;
+    return memory.category === 'reading-note' && memory.sourceType === 'reflection' && memory.content === event.content;
+  }
+  function retractNote(memory, now) {
+    const at = now < memory.updatedAt ? memory.updatedAt : now;
+    addRevision(memory, at);
+    invalidateFollowups(memory.id, at, [memory]);
+    run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', at, at, memory.id);
+    run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = MAX(tombstones.deleted_at, excluded.deleted_at)', memory.id, at);
+  }
+  function retractDependentNotes(sources, now, events = noteEvents(), importedPristine = new Set()) {
+    const dependents = new Map();
+    for (const event of events) for (const id of noteDependencies(event) ?? []) {
+      const key = JSON.stringify([event.scope, id]);
+      if (!dependents.has(key)) dependents.set(key, []);
+      dependents.get(key).push(event);
+    }
+    const queue = sources.map(memory => [memory.scope, memory.id]), visited = new Set();
+    for (let index = 0; index < queue.length; index++) {
+      const key = JSON.stringify(queue[index]);
+      if (visited.has(key)) continue;
+      visited.add(key);
+      for (const event of dependents.get(key) ?? []) {
+        const memory = memoryRow(get('SELECT * FROM memories WHERE id = ?', event.metadata.memoryId));
+        // A human correction replaces this generated wording, but its old descendants still depended on the old ID.
+        if (pristineNote(memory, event, importedPristine)) retractNote(memory, now);
+        queue.push([event.scope, event.metadata.memoryId]);
+      }
+    }
+  }
+  function repairNoteDependencies(now, importedPristine) {
+    const events = noteEvents(), invalidSources = [];
+    for (const event of events) {
+      const memory = memoryRow(get('SELECT * FROM memories WHERE id = ?', event.metadata.memoryId));
+      if (!pristineNote(memory, event, importedPristine)) continue;
+      const ids = noteDependencies(event);
+      const valid = ids !== null && ids.every(id => {
+        const source = memoryRow(get('SELECT * FROM memories WHERE id = ?', id));
+        if (!source || source.deletedAt || source.scope !== event.scope || source.updatedAt !== source.createdAt
+          || get('SELECT 1 FROM tombstones WHERE memory_id = ?', id) || get('SELECT 1 FROM revisions WHERE memory_id = ?', id)) return false;
+        if (event.type === 'book_reading') {
+          const evidence = bookNoteEvidence(id);
+          return evidence && evidence.source.metadata.bookId === event.metadata.bookId
+            && evidence.source.metadata.endOffset <= event.metadata.startOffset;
+        }
+        if (id === event.metadata.readingMemoryId) {
+          const row = get("SELECT * FROM events WHERE id = ? AND type = 'reading' AND actor = 'scheduler'", event.metadata.readingEventId);
+          const reading = row && eventRow(row);
+          return reading && source.sourceType === 'webpage' && source.category === 'reading' && source.scope === reading.scope
+            && source.sourceRef === event.sourceRef && source.sourceRef === reading.sourceRef && source.content === reading.content
+            && reading.metadata.memoryId === source.id;
+        }
+        return Boolean(reflectionRow(id, event.scope));
+      });
+      if (!valid) { retractNote(memory, now); invalidSources.push(memory); }
+    }
+    retractDependentNotes(invalidSources, now, events, importedPristine);
+  }
+  function reflectionRow(id, scope) {
+    return get(`SELECT m.id AS memoryId, m.title, e.content AS note, e.source_ref AS sourceRef, e.created_at AS createdAt
+      FROM events e JOIN memories m ON m.id = json_extract(e.metadata, '$.memoryId')
+      JOIN events r ON r.id = json_extract(e.metadata, '$.readingEventId')
+      JOIN memories original ON original.id = json_extract(e.metadata, '$.readingMemoryId')
+      WHERE m.id = ? AND e.scope = ? AND e.type = 'reading_reflection' AND e.actor = 'scheduler'
+        AND r.type = 'reading' AND r.actor = 'scheduler' AND m.scope = e.scope AND r.scope = e.scope AND original.scope = e.scope
+        AND m.deleted_at IS NULL AND original.deleted_at IS NULL AND m.source_type = 'reflection' AND m.category = 'reading-note'
+        AND m.source_ref = e.source_ref AND r.source_ref = e.source_ref AND original.source_ref = e.source_ref
+        AND m.content = e.content AND original.content = r.content AND original.id = json_extract(r.metadata, '$.memoryId')
+        AND m.created_at = e.created_at AND m.updated_at = m.created_at AND original.updated_at = original.created_at
+        AND NOT EXISTS (SELECT 1 FROM revisions revision WHERE revision.memory_id IN (m.id, original.id))
+        AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.memory_id IN (m.id, original.id)) ORDER BY e.rowid DESC LIMIT 1`, id, scope);
+  }
+
   function insertConversationBlock(scope, eventId, blockedAt) {
     run(`INSERT INTO conversation_blocks VALUES (?, ?, ?) ON CONFLICT(scope, event_id)
       DO UPDATE SET blocked_at = MAX(conversation_blocks.blocked_at, excluded.blocked_at)`, scope, eventId, blockedAt);
@@ -762,12 +875,31 @@ export function createStore(dbPath) {
       CASE WHEN json_type(a.metadata, '$.memoryIds') = 'array' THEN json_extract(a.metadata, '$.memoryIds') ELSE '[]' END AS memory_ids,
       CASE WHEN json_type(a.metadata, '$.conversationIds') = 'array' THEN json_extract(a.metadata, '$.conversationIds') ELSE '[]' END AS conversation_ids,
       CASE WHEN json_type(a.metadata, '$.historyMessageIds') = 'array' THEN json_extract(a.metadata, '$.historyMessageIds') ELSE '[]' END AS history_message_ids
+      , CASE WHEN json_type(a.metadata, '$.bookNoteVersions') = 'array' THEN json_extract(a.metadata, '$.bookNoteVersions')
+        WHEN json_type(a.metadata, '$.bookNoteVersions') IS NULL THEN '[]' ELSE 'null' END AS book_note_versions
       FROM messages a LEFT JOIN messages u ON u.role = 'user' AND u.scope = a.scope
         AND json_type(a.metadata, '$.replyTo') = 'text' AND u.id = json_extract(a.metadata, '$.replyTo')
       WHERE a.role = 'assistant'`);
     for (const row of dependencies) {
       if (row.user_id) replyUsers.set(row.id, row.user_id);
       if (blockedUsers.has(row.user_id) || JSON.parse(row.memory_ids).some(id => typeof id === 'string' && blockedMemoryIds.has(id))) hiddenAssistants.add(row.id);
+      const memoryIds = JSON.parse(row.memory_ids), versions = row.book_note_versions === null ? [] : JSON.parse(row.book_note_versions);
+      const versionIds = new Set();
+      if (!Array.isArray(versions) || versions.length > 100) hiddenAssistants.add(row.id);
+      else for (const version of versions) {
+        if (!version || typeof version !== 'object' || Array.isArray(version) || Object.keys(version).some(key => !['memoryId', 'signature'].includes(key))
+          || typeof version.memoryId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(version.memoryId)
+          || typeof version.signature !== 'string' || !/^[a-f0-9]{64}$/.test(version.signature) || versionIds.has(version.memoryId)
+          || !memoryIds.includes(version.memoryId)) { hiddenAssistants.add(row.id); continue; }
+        versionIds.add(version.memoryId);
+        const evidence = bookNoteEvidence(version.memoryId);
+        if (!evidence || createHash('sha256').update(JSON.stringify(evidence)).digest('hex') !== version.signature) hiddenAssistants.add(row.id);
+      }
+      // Old replies have no version stamp. A revised book note cannot safely stand for its old wording.
+      for (const id of memoryIds) if (typeof id === 'string' && !versionIds.has(id) && get(`SELECT 1 FROM revisions r
+        WHERE r.memory_id = ? AND ((json_extract(r.snapshot, '$.scope') = 'owner' AND json_extract(r.snapshot, '$.sourceType') = 'book'
+          AND json_extract(r.snapshot, '$.category') = 'book-note') OR EXISTS (SELECT 1 FROM memories m WHERE m.id = r.memory_id
+            AND m.scope = 'owner' AND m.source_type = 'book' AND m.category = 'book-note')) LIMIT 1`, id)) hiddenAssistants.add(row.id);
       for (const id of [...JSON.parse(row.conversation_ids), ...JSON.parse(row.history_message_ids), ...(row.user_id ? [row.user_id] : [])]) {
         if (typeof id !== 'string') continue;
         if (!dependents.has(id)) dependents.set(id, new Set());
@@ -856,6 +988,9 @@ export function createStore(dbPath) {
     },
     getMemory(id) {
       return memoryRow(get('SELECT * FROM memories WHERE id = ?', identifier(id, '记忆 ID')));
+    },
+    getBookNoteEvidence(id) {
+      return bookNoteEvidence(identifier(id, '读书笔记 ID'));
     },
     isConversationSourceBlocked(scope, eventId) {
       return Boolean(get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', scopeValue(scope), identifier(eventId, '对话来源 ID')));
@@ -953,6 +1088,7 @@ export function createStore(dbPath) {
           blockConversationSource(memory, now);
           invalidateFollowups(id, now, [previous, memory]);
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
+          retractDependentNotes([previous], now);
         } else insertMemory(memory);
         if (audit) insertEvent(audit);
         return memory;
@@ -1045,21 +1181,32 @@ export function createStore(dbPath) {
         return matching ? [{ id: current.id, title: current.title, partIndex: part.partIndex }] : [];
       });
     },
-    recordReadingReflection({ readingEventId, note }) {
+    recordReadingReflection({ readingEventId, note, previousNotes = [] }) {
       readingEventId = identifier(readingEventId, '阅读经历 ID');
       note = text(note, '读后思考', 2000);
+      if (!Array.isArray(previousNotes) || previousNotes.length > 3) invalid('既往思考须为最多3条实际参考记录。');
       return transaction(() => {
         const row = get("SELECT * FROM events WHERE id = ? AND type = 'reading' AND actor = 'scheduler'", readingEventId);
         const reading = row && eventRow(row);
         const original = typeof reading?.metadata?.memoryId === 'string' && memoryRow(get('SELECT * FROM memories WHERE id = ?', reading.metadata.memoryId));
         if (!original || original.deletedAt || original.scope !== reading.scope || original.sourceType !== 'webpage'
-          || original.category !== 'reading' || original.sourceRef !== reading.sourceRef || original.content !== reading.content) invalid('原阅读记录已改变，未保存读后思考。');
+          || original.category !== 'reading' || original.sourceRef !== reading.sourceRef || original.content !== reading.content
+          || original.updatedAt !== original.createdAt || get('SELECT 1 FROM revisions WHERE memory_id = ?', original.id)
+          || get('SELECT 1 FROM tombstones WHERE memory_id = ?', original.id)) invalid('原阅读记录已改变，未保存读后思考。');
+        const sourceMemoryIds = [original.id];
+        for (const previous of previousNotes) {
+          record(previous, '既往思考');
+          if (Object.keys(previous).length !== 5 || Object.keys(previous).some(key => !['memoryId', 'title', 'note', 'sourceRef', 'createdAt'].includes(key))) invalid('既往思考字段无效。');
+          const id = identifier(previous.memoryId, '既往思考 ID'), current = reflectionRow(id, reading.scope);
+          if (!current || sourceMemoryIds.includes(id) || Object.keys(current).some(key => current[key] !== previous[key])) invalid('既往思考已改变，未保存本次思考。');
+          sourceMemoryIds.push(id);
+        }
         if (get("SELECT 1 FROM events WHERE type = 'reading_reflection' AND json_extract(metadata, '$.readingEventId') = ?", readingEventId)) invalid('该次阅读已有思考记录，不重复生成。');
         const now = new Date().toISOString();
         const memory = { id: randomUUID(), ...memoryFields({ title: `读后思考 · ${original.title}`.slice(0, 200), content: note,
           category: 'reading-note', scope: original.scope, sourceType: 'reflection', sourceRef: original.sourceRef }), createdAt: now, updatedAt: now, deletedAt: null };
         const event = { id: randomUUID(), ...eventFields({ type: 'reading_reflection', scope: memory.scope, actor: 'scheduler',
-          content: note, sourceRef: memory.sourceRef, metadata: { title: memory.title, memoryId: memory.id, readingMemoryId: original.id, readingEventId } }), createdAt: now };
+          content: note, sourceRef: memory.sourceRef, metadata: { title: memory.title, memoryId: memory.id, readingMemoryId: original.id, readingEventId, sourceMemoryIds } }), createdAt: now };
         insertMemory(memory); insertEvent(event);
         return { memory, eventId: event.id };
       });
@@ -1094,6 +1241,7 @@ export function createStore(dbPath) {
         invalidateFollowups(id, now, [previous]);
         run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id);
         run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now);
+        retractDependentNotes([previous], now);
         if (audit) insertEvent(audit);
         return true;
       });
@@ -1751,10 +1899,25 @@ export function createStore(dbPath) {
       const id = bookId(input.bookId), note = text(input.note, '读书笔记', 4000);
       const startOffset = integer(input.startOffset, '阅读起点', 0, BOOK_LIMITS.chars);
       const endOffset = integer(input.endOffset, '阅读终点', startOffset + 1, BOOK_LIMITS.chars);
+      const previousNotes = input.previousNotes === undefined ? [] : input.previousNotes;
+      if (!Array.isArray(previousNotes) || previousNotes.length > 3) invalid('既往读书笔记须为最多3条实际参考记录。');
       return transaction(() => {
         const book = bookRow(get('SELECT * FROM books WHERE id = ? AND deleted_at IS NULL', id));
         if (!book) invalid('书籍不存在或已经删除。');
         if (book.currentOffset !== startOffset || endOffset > book.text.length) invalid('阅读位置已变化或超出书籍正文，请重新读取当前进度。');
+        const sourceMemoryIds = [];
+        for (const previous of previousNotes) {
+          record(previous, '既往读书笔记');
+          if (Object.keys(previous).length !== 7 || Object.keys(previous).some(key => !['memoryId', 'sourceRef', 'startOffset', 'endOffset', 'createdAt', 'note', 'truncated'].includes(key))) invalid('既往读书笔记字段无效。');
+          const memoryId = identifier(previous.memoryId, '既往读书笔记 ID'), evidence = bookNoteEvidence(memoryId);
+          if (!evidence || evidence.revisions.length || evidence.memory.updatedAt !== evidence.memory.createdAt
+            || evidence.source.metadata.bookId !== id || evidence.source.metadata.endOffset > startOffset || sourceMemoryIds.includes(memoryId)) invalid('既往读书笔记已改变，未保存本次笔记。');
+          const current = { memoryId, sourceRef: evidence.memory.sourceRef, startOffset: evidence.source.metadata.startOffset,
+            endOffset: evidence.source.metadata.endOffset, createdAt: evidence.memory.createdAt,
+            note: evidence.memory.content.slice(0, 1000), truncated: evidence.memory.content.length > 1000 };
+          if (Object.keys(current).some(key => current[key] !== previous[key])) invalid('既往读书笔记已改变，未保存本次笔记。');
+          sourceMemoryIds.push(memoryId);
+        }
         const sourceRef = `book:${id}:${startOffset}-${endOffset}`;
         if (get("SELECT 1 FROM events WHERE type = 'book_reading' AND source_ref = ? LIMIT 1", sourceRef)) invalid('该书籍片段已有阅读记录，不能重复保存。');
         const now = new Date().toISOString();
@@ -1762,7 +1925,7 @@ export function createStore(dbPath) {
           content: note, category: 'book-note', scope: 'owner', sourceType: 'book', sourceRef }), createdAt: now, updatedAt: now, deletedAt: null };
         const event = { id: randomUUID(), ...eventFields({ type: 'book_reading', scope: 'owner', actor: 'scheduler', sourceRef,
           content: `阅读《${book.title}》第 ${startOffset + 1}–${endOffset} 字，并保存读书笔记。`,
-          metadata: { bookId: id, title: book.title, startOffset, endOffset, totalChars: book.text.length, memoryId: memory.id } }), createdAt: now };
+          metadata: { bookId: id, title: book.title, startOffset, endOffset, totalChars: book.text.length, memoryId: memory.id, sourceMemoryIds } }), createdAt: now };
         insertMemory(memory); insertEvent(event);
         run('UPDATE books SET current_offset = ?, last_read_at = ? WHERE id = ?', endOffset, now, id);
         return { book: bookMetadata({ ...book, currentOffset: endOffset, lastReadAt: now }), memory, eventId: event.id };
@@ -1847,10 +2010,11 @@ export function createStore(dbPath) {
       const memoryIds = new Set(memories.map(memory => memory.id));
       const revisions = rows('revisions', item => {
         const memoryId = identifier(item.memoryId, '修订的记忆 ID');
-        if (!memoryIds.has(memoryId)) invalid('备份修订引用了不存在的记忆。');
         record(item.snapshot, '记忆修订快照');
         const snapshot = importedMemory(item.snapshot);
         if (snapshot.id !== memoryId) invalid('记忆修订快照与记忆 ID 不一致。');
+        // A local correction may outlive a restore from before its reading existed.
+        if (!memoryIds.has(memoryId) && !readingRevision(snapshot)) invalid('备份修订引用了不存在的记忆。');
         return dated(item, { memoryId, snapshot });
       });
       const events = rows('events', item => {
@@ -1939,6 +2103,18 @@ export function createStore(dbPath) {
       }
 
       const imported = transaction(() => {
+        // Source corrections made after a backup remain evidence against its old generated derivatives.
+        const importedPristine = new Set(memories.filter(memory => !revisedIds.has(memory.id)).map(memory => memory.id));
+        const revisionsById = new Map(revisions.map(revision => [revision.id, revision]));
+        for (const row of all(`SELECT * FROM revisions WHERE
+          (json_extract(snapshot, '$.sourceType') = 'book' AND json_extract(snapshot, '$.category') = 'book-note' AND json_extract(snapshot, '$.scope') = 'owner')
+          OR (json_extract(snapshot, '$.sourceType') = 'webpage' AND json_extract(snapshot, '$.category') = 'reading')
+          OR (json_extract(snapshot, '$.sourceType') = 'reflection' AND json_extract(snapshot, '$.category') = 'reading-note')`)) {
+          const local = revisionRow(row), previous = revisionsById.get(local.id);
+          if (previous && JSON.stringify(previous) !== JSON.stringify(local)) invalid('备份与本机的阅读修订记录冲突，未恢复。');
+          if (!previous) { revisionsById.set(local.id, local); revisions.push(local); total++; }
+        }
+        if (revisions.length > 100000 || total > 250000) invalid('保留本机阅读修订后，备份记录超过容量上限。');
         const restoredAt = new Date().toISOString();
         const previousCompanion = api.getSetting('companionState', null);
         // Restored social inbox entries are history, never a renewed permission to publish.
@@ -1990,6 +2166,7 @@ export function createStore(dbPath) {
         for (const item of deletedExpressions.values()) run('INSERT INTO expression_tombstones VALUES (?, ?, ?)', item.origin, item.hash, item.deletedAt);
         for (const book of books) if (!deletedBooks.has(book.id)) insertBook(book);
         for (const [id, deletedAt] of deletedBooks) run('INSERT INTO book_tombstones VALUES (?, ?)', id, deletedAt);
+        repairNoteDependencies(restoredAt, importedPristine);
         for (const item of mergedFollowups.values()) {
           let restored = item;
           if (!FOLLOWUP_TERMINAL_STATUSES.includes(item.status)) {

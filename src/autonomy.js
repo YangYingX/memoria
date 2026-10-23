@@ -274,20 +274,30 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
       if (typeof reflect === 'function' && store.getSetting('model')?.apiKey) {
         if (isBusy()) reflection.lastReflectionOutcome = 'busy';
         else try {
-          const previousNotes = store.listReadingReflections(['owner'], 3).filter(item => {
+          // The native Bili note path currently receives only this reading's excerpt.
+          const previousNotes = source === 'bilibili' ? [] : store.listReadingReflections(['owner'], 3).filter(item => {
             try { const address = new URL(item.sourceRef); return biliVideoUrl(item.sourceRef) === item.sourceRef
               || (address.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(address.pathname) && !address.search && !address.hash); }
             catch { return false; }
-          }).map(item => ({ title: item.title, note: item.note.slice(0, 800), sourceRef: item.sourceRef, createdAt: item.createdAt }));
+          });
+          const reflectionInputs = () => JSON.stringify({ model: store.getSetting('model'), persona: store.getSetting('persona'),
+            reading: { memory: store.getMemory(reading.memory.id), revisions: store.listRevisions(reading.memory.id) },
+            previousNotes: previousNotes.map(item => ({ memory: store.getMemory(item.memoryId), revisions: store.listRevisions(item.memoryId) })) });
+          const reflectionSnapshot = reflectionInputs();
           const parts = page.parts || [page.text];
           const note = await reflect({ title, url, excerpt: page.text.slice(0, 8000), readAt: page.readAt,
             truncated: Boolean(page.truncated || page.text.length > 8000 || parts.length > 1),
             partCount: parts.length, totalSavedChars: parts.reduce((sum, part) => sum + part.length, 0),
-            ...(page.evidence === undefined ? {} : { evidence: page.evidence }), previousNotes, signal: activeController.signal });
+            ...(page.evidence === undefined ? {} : { evidence: page.evidence }),
+            previousNotes: previousNotes.map(item => ({ ...item, note: item.note.slice(0, 800), truncated: item.note.length > 800 })),
+            signal: activeController.signal });
           check();
-          if (isBusy()) reflection.lastReflectionOutcome = 'busy';
+          if (reflectionSnapshot !== reflectionInputs()) {
+            reflection.lastReflectionOutcome = 'cancelled';
+            reflection.lastReflectionError = '本次读后思考所用资料或配置已变化，原阅读记录已保留；不自动重试。';
+          } else if (isBusy()) reflection.lastReflectionOutcome = 'busy';
           else {
-            const saved = store.recordReadingReflection({ readingEventId: reading.eventId, note });
+            const saved = store.recordReadingReflection({ readingEventId: reading.eventId, note, previousNotes });
             reflection.lastReflectionOutcome = 'success'; reflection.lastReflectionMemoryId = saved.memory.id;
           }
         } catch {
