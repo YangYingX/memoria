@@ -7,6 +7,7 @@ import { setTimeout } from 'node:timers/promises';
 import { DOMParser } from 'linkedom';
 import { androidDevice, verifyHeyboxApk } from './android-runtime.js';
 import { createHeyboxPostJournal, validateHeyboxPost, verifyHeyboxPostView } from './heybox-post.js';
+import { parseHeyboxComments, validateHeyboxComment, verifyHeyboxComment } from './heybox-comment.js';
 
 const POST_PAGES = new Set(['PicturePostPageActivityV2', 'WebNewsPostPageActivityV2']
   .map(name => `${androidDevice.package}/.module.bbs.post.ui.activitys.v2.${name}`));
@@ -180,7 +181,9 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
           const readingBody = POST_PAGES.has(activity) && (node['resource-id'] === `${androidDevice.package}:id/tv_desc`
             || (!node['resource-id'] && node.class === 'android.widget.TextView'));
           const draftBody = activity === `${androidDevice.package}/.module.bbs.post_edit.PostTabActivity` && node['resource-id'] === `${androidDevice.package}:id/et_content`;
-          return { id: node['resource-id'] || '', text: password ? '[密码字段已隐藏]' : redact(node.text, readingBody ? 8000 : draftBody ? 1600 : 200),
+          const commentBody = POST_PAGES.has(activity) && ['tv_comment', 'tv_sub_comment_content', 'tv_editor_comment_reply_msg'].some(id => node['resource-id'] === `${androidDevice.package}:id/${id}`);
+          const limit = readingBody ? 8000 : draftBody ? 1600 : commentBody ? 1200 : 200;
+          return { id: node['resource-id'] || '', text: password ? '[密码字段已隐藏]' : redact(node.text, limit), truncated: String(node.text || '').length > limit,
             description: password ? '[密码字段已隐藏]' : redact(node['content-desc']), bounds: node.bounds || '', className: node.class || '',
             clickable: node.interactions?.includes('CLICKABLE') === true, focused: node.state?.includes('FOCUSED') === true,
             enabled: node.enabled !== false && !node.state?.includes('DISABLED') };
@@ -201,6 +204,7 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
       const document = new DOMParser().parseFromString(xml, 'text/html');
       const nodes = Array.from(document.querySelectorAll('node')).filter(node => node.getAttribute('package') === androidDevice.package)
         .map(node => ({ id: node.getAttribute('resource-id') || '', text: node.getAttribute('password') === 'true' ? '[密码字段已隐藏]' : redact(node.getAttribute('text')),
+          truncated: String(node.getAttribute('text') || '').length > 200,
           description: node.getAttribute('password') === 'true' ? '[密码字段已隐藏]' : redact(node.getAttribute('content-desc')),
             bounds: node.getAttribute('bounds') || '', className: node.getAttribute('class') || '',
             clickable: node.getAttribute('clickable') === 'true', focused: node.getAttribute('focused') === 'true',
@@ -262,6 +266,7 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
   }
   async function openHeyboxProfile() {
     let view = await closeAvatarMenu(await readHeyboxView());
+    if (POST_PAGES.has(view.activity)) view = await closeEmptyCommentEditor(view);
     if (view.activity === `${androidDevice.package}/.MainActivity`
       && view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_title` && node.text === '要继续编辑作品吗？')
       && view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_negative_button` && node.text === '存草稿')) {
@@ -532,7 +537,7 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     try { url = new URL(value); } catch { throw new Error('请输入有效的小黑盒公开帖子地址。'); }
     if (url.origin !== 'https://www.xiaoheihe.cn' || !/^\/app\/bbs\/link\/\d{1,20}$/.test(url.pathname)
       || url.username || url.password || url.search || url.hash) throw new Error('仅支持无查询参数的小黑盒公开帖子地址。');
-    await ownProfileHome();
+    const home = await ownProfileHome();
     signal?.throwIfAborted();
     const linkId = url.pathname.split('/').at(-1);
     const shareUrl = `https://c.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=${linkId}`;
@@ -542,11 +547,139 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     const started = await androidShell(`am start -W -a android.intent.action.VIEW -d ${shareUrl} -p ${androidDevice.package}`);
     if (!/^Status: ok\s*$/m.test(started)) throw new Error('小黑盒客户端未确认打开帖子。');
     signal?.throwIfAborted();
-    return { ...await readHeyboxView(), url: url.href, accountVerified: true };
+    return { ...await readHeyboxView(), url: url.href, accountVerified: true,
+      accountNickname: home.nodes.find(node => node.id === `${androidDevice.package}:id/tv_me_home_fragment_username`)?.text || '' };
+  }
+  async function closeEmptyCommentEditor(view) {
+    const editors = view.nodes.filter(node => node.id === `${androidDevice.package}:id/et_editor`);
+    if (!editors.length) return view;
+    if (editors.length !== 1 || editors[0].truncated) throw new Error('评论输入框无法核对，未离开页面。');
+    const value = editors[0].text.replace(/\u00a0/g, ' ');
+    let empty = ['', '来说点什么吧!'].includes(value);
+    if (!empty && value.startsWith('回复 ')) {
+      const quotes = view.nodes.filter(node => node.id === `${androidDevice.package}:id/tv_editor_comment_reply_msg` && !node.truncated);
+      const targets = parseHeyboxComments(view).filter(comment => value === `回复 ${comment.author}` && quotes.length === 1 && quotes[0].text === comment.text);
+      empty = targets.length === 1;
+    }
+    if (!empty) throw new Error('评论编辑器中有未发送文字，已保留草稿，请先处理后再继续。');
+    if (view.nodes.some(node => node.id === `${androidDevice.package}:id/v_mask` && node.clickable)) {
+      await tapHeyboxNode(view, `${androidDevice.package}:id/v_mask`);
+      view = await readHeyboxView();
+      if (view.nodes.some(node => node.id === `${androidDevice.package}:id/v_mask`)) throw new Error('评论编辑器尚未关闭，未离开页面。');
+    }
+    return view;
+  }
+  async function openHeyboxComments(url, options = {}) {
+    if (![adb, androidCli].every(existsSync)) throw new Error('读取或发送评论需要 Google Android CLI 和 SDK Platform Tools，以核对完整评论与回复对象。');
+    const page = await readHeyboxArticle(url, options);
+    options.signal?.throwIfAborted();
+    const view = await readHeyboxView();
+    if (!POST_PAGES.has(view.activity)) throw new Error('帖子界面已变化，未进入评论。');
+    await tapHeyboxLabel(view, '评论', `${androidDevice.package}:id/tv_tab_title`);
+    return { ...await readHeyboxView(), url: page.url, title: page.title, accountVerified: true, accountNickname: page.accountNickname };
+  }
+  async function readHeyboxComments(url, options = {}) {
+    const view = await openHeyboxComments(url, options);
+    return { url: view.url, title: view.title, readAt: new Date().toISOString(), truncated: true,
+      comments: parseHeyboxComments(view).map(({ bounds, ...comment }) => comment) };
+  }
+  async function openHeyboxCommentReply(url, { expectedTitle, commentKey, signal } = {}) {
+    if (typeof commentKey !== 'string' || !/^[a-f0-9]{64}$/.test(commentKey)) throw new Error('请提供已读取评论的标识。');
+    const view = await openHeyboxComments(url, { expectedTitle, signal });
+    const target = parseHeyboxComments(view).find(comment => comment.key === commentKey);
+    if (!target) throw new Error('目标评论已变化或不在可核对范围内，未打开回复。');
+    signal?.throwIfAborted();
+    const node = view.nodes.find(node => node.id === `${androidDevice.package}:id/tv_comment` && node.bounds === target.bounds);
+    await tapHeyboxTarget(view, node);
+    return { ...await readHeyboxView(), url, title: view.title, target: { key: target.key, author: target.author, text: target.text } };
+  }
+  function commentEditorMatches(view, comment, { filled = false } = {}) {
+    if (!POST_PAGES.has(view.activity)) return false;
+    const fields = id => view.nodes.filter(node => node.id === `${androidDevice.package}:id/${id}`);
+    const editor = fields('et_editor'), quote = fields('tv_editor_comment_reply_msg'), send = fields('tv_send');
+    if (editor.length !== 1 || editor[0].truncated || send.length !== 1 || send[0].text !== '发送' || !send[0].enabled) return false;
+    if (filled ? editor[0].text !== comment.text : !['', comment.replyTo ? `回复 ${comment.replyTo.author}` : '来说点什么吧!'].includes(editor[0].text.replace(/\u00a0/g, ' '))) return false;
+    return comment.replyTo ? quote.length === 1 && !quote[0].truncated && quote[0].text === comment.replyTo.text
+      && parseHeyboxComments(view).filter(item => item.key === comment.replyTo.key).length === 1 : quote.length === 0;
+  }
+  async function prepareHeyboxComment(input, { signal } = {}) {
+    const comment = validateHeyboxComment(input);
+    if (!postJournal) throw new Error('请先绑定小黑盒专用账号。');
+    let view = await openHeyboxComments(comment.url, { expectedTitle: comment.title, signal });
+    const nickname = view.accountNickname;
+    if (typeof nickname !== 'string' || !nickname.trim()) throw new Error('没有核对到专用账号昵称。');
+    if (verifyHeyboxComment(view, comment, nickname)) throw new Error('当前列表已有相同的本人表达，未重复发送。');
+    const targets = parseHeyboxComments(view);
+    if (comment.replyTo) {
+      const target = targets.find(item => item.key === comment.replyTo.key && item.author === comment.replyTo.author && item.text === comment.replyTo.text);
+      if (!target) throw new Error('目标评论已变化或位置不明确，未发送回复。');
+      await tapHeyboxTarget(view, view.nodes.find(node => node.id === `${androidDevice.package}:id/tv_comment` && node.bounds === target.bounds));
+    } else await tapHeyboxNode(view, `${androidDevice.package}:id/et_editor`);
+    view = await readHeyboxView();
+    if (!commentEditorMatches(view, comment)) throw new Error('评论输入框或回复对象不一致，未输入文字。');
+    signal?.throwIfAborted();
+    postJournal.setCommentDraft(comment, nickname);
+    await tapHeyboxNode(view, `${androidDevice.package}:id/et_editor`);
+    view = await readHeyboxView();
+    if (!view.nodes.some(node => node.id === `${androidDevice.package}:id/et_editor` && node.focused)) throw new Error('评论输入框未取得焦点。');
+    await sdkCommand(serial => ['input', `--device=${serial}`, 'text', '--match=single', '--wait=3000', '--', comment.text,
+      `id=${androidDevice.package}:id/et_editor,class=android.widget.EditText,focused=true`]);
+    view = await readHeyboxView();
+    if (!commentEditorMatches(view, comment, { filled: true })) throw new Error('评论全文或回复对象回读不一致，未发送。');
+    signal?.throwIfAborted();
+    postJournal.setCommentDraft(comment, nickname, 'ready');
+    return { prepared: true, accountVerified: true };
+  }
+  async function publishHeyboxComment(input, { signal, ...policy } = {}) {
+    const comment = validateHeyboxComment(input);
+    if (!postJournal) throw new Error('请先绑定小黑盒专用账号。');
+    const blocked = postJournal.guardComment(comment, policy); if (blocked) return blocked;
+    await prepareHeyboxComment(comment, { signal });
+    signal?.throwIfAborted();
+    const view = await readHeyboxView();
+    if (!commentEditorMatches(view, comment, { filled: true })) throw new Error('发送前评论回读不一致，未点击发送。');
+    const nickname = postJournal.load().commentDraft.nickname;
+    const attempt = postJournal.reserveComment(comment, policy); if (attempt.ok === false) return attempt;
+    let dispatched = false;
+    try {
+      signal?.throwIfAborted();
+      dispatched = true;
+      await tapHeyboxNode(view, `${androidDevice.package}:id/tv_send`);
+      for (let poll = 0; poll < 5; poll++) {
+        await setTimeout(600);
+        const result = await readHeyboxView();
+        if (result.nodes.some(node => node.id === `${androidDevice.package}:id/v_mask`)) continue;
+        if (verifyHeyboxComment(result, comment, nickname)) {
+          postJournal.finish(attempt.id, 'success');
+          return { ok: true, confirmed: true, confirmation: comment.replyTo ? 'reply_view' : 'comment_view' };
+        }
+      }
+      throw new Error('未回读到对应目标下的本人文字。');
+    } catch {
+      postJournal.finish(attempt.id, dispatched ? 'unknown' : 'rejected');
+      return { ok: false, unknown: dispatched, message: dispatched ? '评论结果未确认，已计次并保留记录，不自动重发。' : '未发送评论。' };
+    }
+  }
+  async function discardHeyboxCommentDraft(input) {
+    const comment = validateHeyboxComment(input), draft = postJournal?.load().commentDraft;
+    if (!draft || JSON.stringify(draft.comment) !== JSON.stringify(comment)) throw new Error('没有相符的本项目评论草稿。');
+    const state = postJournal.load();
+    if (state.attempts.some(item => item.hash === draft.hash && item.outcome !== 'rejected')) throw new Error('这份评论已有发送尝试，先保留原始记录。');
+    let view = await readHeyboxView();
+    if (!commentEditorMatches(view, comment, { filled: true })) throw new Error('当前编辑器不是原来的评论草稿，未清除。');
+    await tapHeyboxNode(view, `${androidDevice.package}:id/et_editor`);
+    await sdkCommand(serial => ['input', `--device=${serial}`, 'text', '--match=single', '--wait=3000', '--', '',
+      `id=${androidDevice.package}:id/et_editor,class=android.widget.EditText,focused=true`]);
+    view = await readHeyboxView();
+    if (!commentEditorMatches(view, comment)) throw new Error('评论草稿尚未核对清空。');
+    await closeEmptyCommentEditor(view);
+    postJournal.clearCommentDraft(comment);
+    return { cleared: true, submitted: false };
   }
   async function readHeyboxArticle(url, { expectedTitle, signal } = {}) {
     if (typeof expectedTitle !== 'string' || !expectedTitle.trim() || expectedTitle.length > 500) throw new Error('客户端阅读需要公开列表中的帖子标题来核对来源。');
     let view = await openHeyboxArticle(url, { signal });
+    const accountNickname = view.accountNickname;
     const expected = expectedTitle.replace(/\s+/g, ' ').trim();
     for (let attempt = 0; attempt < 4; attempt++) {
       signal?.throwIfAborted();
@@ -574,7 +707,7 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
       if (titles.length === 1 && body.length >= 40) {
         const text = `【客户端可访问的正文文字摘录；未读取图片、视频或未显示的内容】\n${body}`;
         return { url: view.url || url, title: expected, text, excerpt: text.slice(0, 300), truncated: true,
-          readAt: new Date().toISOString(), source: 'android_ui' };
+          readAt: new Date().toISOString(), source: 'android_ui', accountNickname };
       }
       if (attempt < 3) { await setTimeout(500); view = await readHeyboxView(); }
     }
@@ -1014,6 +1147,12 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     publishHeyboxPost: (post, options) => exclusive(() => publishHeyboxPost(post, options)),
     openHeyboxArticle: url => exclusive(() => openHeyboxArticle(url)),
     readHeyboxArticle: (url, options) => exclusive(() => readHeyboxArticle(url, options)),
+    openHeyboxComments: (url, options) => exclusive(() => openHeyboxComments(url, options)),
+    readHeyboxComments: (url, options) => exclusive(() => readHeyboxComments(url, options)),
+    openHeyboxCommentReply: (url, options) => exclusive(() => openHeyboxCommentReply(url, options)),
+    prepareHeyboxComment: (comment, options) => exclusive(() => prepareHeyboxComment(comment, options)),
+    publishHeyboxComment: (comment, options) => exclusive(() => publishHeyboxComment(comment, options)),
+    discardHeyboxCommentDraft: comment => exclusive(() => discardHeyboxCommentDraft(comment)),
     openHeyboxSettings: () => exclusive(profileSettings),
     openHeyboxEditor: () => exclusive(profileEditor),
     updateHeyboxProfile: input => exclusive(() => updateHeyboxProfile(input)),

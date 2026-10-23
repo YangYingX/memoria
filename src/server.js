@@ -118,6 +118,11 @@ function makeSelfExpressionJobs() {
       try { return Boolean(heyboxRuntime()); } catch { return false; }
     },
     getAvatars: platform => platform === 'qq' ? getExpressionCatalog().filter(entry => ['hello', 'happy', 'thinking', 'comfort'].includes(entry.id)) : [],
+    getDiscussion: async (reading, { signal }) => {
+      const runtime = heyboxRuntime();
+      await runtime.openHeybox(); signal.throwIfAborted();
+      return runtime.readHeyboxComments(reading.url, { expectedTitle: reading.title, signal });
+    },
     generate: async ({ instructions, signal, ...context }) => {
       const result = await requestCompletion({ store, signal, maxTokens: 900, messages: [
         { role: 'system', content: instructions },
@@ -130,13 +135,15 @@ function makeSelfExpressionJobs() {
     },
     perform: async (platform, action, payload, { signal }) => {
       if (platform === 'heybox') {
-        if (action !== 'post') throw new Error('小黑盒当前只开放自主发帖。');
+        if (!['post', 'comment', 'reply'].includes(action)) throw new Error('小黑盒当前不支持此表达动作。');
         const settings = normalizeExpressionSettings({}, store.getSetting('selfExpression'), expressionPlatforms);
-        if (!settings.enabled || !settings.platforms.heybox.enabled || !settings.platforms.heybox.post) throw new Error('小黑盒自主发帖尚未启用。');
+        if (!settings.enabled || !settings.platforms.heybox.enabled || !settings.platforms.heybox[action]) throw new Error('小黑盒此自主表达动作尚未启用。');
         const runtime = heyboxRuntime();
         await runtime.openHeybox(); signal.throwIfAborted();
-        return runtime.publishHeyboxPost({ title: payload.title, text: payload.text, topic: settings.platforms.heybox.topic }, {
-          signal, dailyLimit: Math.min(settings.dailyLimit, settings.platforms.heybox.dailyLimit), cooldownMinutes: settings.cooldownMinutes, timeZone: settings.timeZone });
+        const policy = { signal, dailyLimit: Math.min(settings.dailyLimit, settings.platforms.heybox.dailyLimit), cooldownMinutes: settings.cooldownMinutes, timeZone: settings.timeZone };
+        if (action === 'post') return runtime.publishHeyboxPost({ title: payload.title, text: payload.text, topic: settings.platforms.heybox.topic }, policy);
+        if ((action === 'reply') !== Boolean(payload.replyTo)) throw new Error('评论动作和回复目标不一致。');
+        return runtime.publishHeyboxComment(payload, policy);
       }
       const config = store.getSetting('qq');
       if (platform !== 'qq' || !config.enabled) throw new Error('此平台尚未启用。');

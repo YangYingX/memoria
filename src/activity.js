@@ -16,9 +16,10 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
   const readingToday = currentDay(readingStatus, time), expressionToday = currentDay(expressionStatus, time);
   const events = store.listEvents({ scope: 'owner', limit: 200 });
   const posts = events.filter(item => item.type === 'self_expression' && item.actor === 'scheduler'
-    && item.metadata?.action === 'post' && Object.hasOwn(expressionPlatforms, item.metadata.platform) && item.metadata.outcome !== 'attempt')
-    .slice(0, 5).map(item => ({ platform: item.metadata.platform, outcome: outcome(item.metadata.outcome),
+    && ['post', 'comment', 'reply'].includes(item.metadata?.action) && Object.hasOwn(expressionPlatforms, item.metadata.platform) && item.metadata.outcome !== 'attempt')
+    .slice(0, 5).map(item => ({ platform: item.metadata.platform, action: item.metadata.action, outcome: outcome(item.metadata.outcome),
       attemptedAt: date(item.metadata.at), recordedAt: date(item.createdAt),
+      ...(item.metadata.action !== 'post' ? { targetUrl: text(item.metadata.targetUrl, 2048) } : {}),
       ...(['success', 'review'].includes(item.metadata.outcome) ? { title: text(item.metadata.title, 30), text: text(item.content, 800) } : {}) }));
   return {
     asOf: new Date(time).toISOString(),
@@ -35,8 +36,12 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
       budgetTimeZone: expressionToday ? text(expressionStatus.timeZone, 80) : expression.timeZone,
       nextRunAt: expression.enabled && expressionToday ? date(expressionStatus.nextRunAt) : '',
       platforms: Object.entries(expressionPlatforms).map(([id, platform]) => ({ id, name: platform.name,
-        enabled: expression.platforms[id].enabled, postEnabled: expression.platforms[id].post, dailyLimit: expression.platforms[id].dailyLimit,
-        attempts: expressionToday ? count(expressionStatus.platformAttempts?.[id]?.post) : 0,
+        enabled: expression.platforms[id].enabled, postEnabled: expression.platforms[id].post,
+        commentEnabled: expression.platforms[id].comment === true, replyEnabled: expression.platforms[id].reply === true, dailyLimit: expression.platforms[id].dailyLimit,
+        attempts: expressionToday ? ['post', 'comment', 'reply'].reduce((sum, action) => sum + count(expressionStatus.platformAttempts?.[id]?.[action]), 0) : 0,
+        actions: ['post', 'comment', 'reply'].filter(action => expressionPlatforms[id].actions.includes(action)).map(action => ({ action,
+          attempts: expressionToday ? count(expressionStatus.platformAttempts?.[id]?.[action]) : 0,
+          outcome: outcome(expressionStatus.outcomes?.[id]?.[action]?.outcome), lastAttempt: date(expressionStatus.outcomes?.[id]?.[action]?.at) })),
         lastPostOutcome: outcome(expressionStatus.outcomes?.[id]?.post?.outcome),
         lastAttempt: date(expressionStatus.outcomes?.[id]?.post?.at) })),
       recentPosts: posts,
