@@ -10,7 +10,7 @@ const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'c
 const outcome = value => outcomes.has(value) ? value : 'unrecorded';
 
 // Only project selected fields: raw scheduler state can contain private settings and errors.
-export function activitySnapshot(store, { readingStatus = {}, expressionStatus = {}, time = Date.now() } = {}) {
+export function activitySnapshot(store, { readingStatus = {}, expressionStatus = {}, dshStatus = {}, time = Date.now() } = {}) {
   const reading = normalizeAutonomySettings({}, store.getSetting('autonomy', {}));
   const expression = normalizeExpressionSettings({}, store.getSetting('selfExpression', {}));
   const readingToday = currentDay(readingStatus, time), expressionToday = currentDay(expressionStatus, time);
@@ -23,13 +23,17 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
       ...(['success', 'review'].includes(item.metadata.outcome) ? { title: text(item.metadata.title, 30), text: text(item.content, 800) } : {}) }));
   return {
     asOf: new Date(time).toISOString(),
-    reading: { enabled: reading.enabled, busy: readingStatus.busy === true, dailyMax: reading.dailyMax,
+    reading: { enabled: reading.enabled, sources: reading.sources, busy: readingStatus.busy === true, dailyMax: reading.dailyMax,
       attempts: readingToday ? count(readingStatus.attempts) : 0,
       plannedLimit: readingToday ? Math.min(count(readingStatus.target), reading.dailyMax) : null,
       nextRunAt: reading.enabled && readingToday ? date(readingStatus.nextRunAt) : '',
       budgetTimeZone: readingToday ? text(readingStatus.timeZone, 80) : reading.timeZone,
       lastOutcome: outcome(readingStatus.lastOutcome), lastAttempt: date(readingStatus.lastAttempt),
-      recentReadings: store.listRecentReadings(['owner'], 5) },
+      recentReadings: store.listRecentReadings(['owner'], 5),
+      dsh: dshStatus.reading && /^\d{4}-\d{2}-\d{2}$/.test(dshStatus.reading.day) ? {
+        enabled: dshStatus.enabled === true, busy: dshStatus.busy === true, day: dshStatus.reading.day, timeZone: 'UTC',
+        attempts: count(dshStatus.reading.attempts), dailyLimit: count(dshStatus.reading.dailyLimit), remaining: count(dshStatus.reading.remaining),
+      } : null },
     expression: { enabled: expression.enabled, busy: expressionStatus.busy === true, desire: expression.desire,
       dailyLimit: expression.dailyLimit, attempts: expressionToday ? count(expressionStatus.postAttempts) : 0,
       cooldownMinutes: expression.cooldownMinutes,

@@ -427,6 +427,8 @@ function fillSettings() {
   $('reading-interval').value = reading.intervalMinutes;
   $('reading-limit').value = reading.dailyLimit;
   $('autonomy-enabled').checked = Boolean(autonomy.enabled);
+  $('autonomy-source-heybox').checked = (autonomy.sources || ['heybox']).includes('heybox');
+  $('autonomy-source-bilibili').checked = (autonomy.sources || ['heybox']).includes('bilibili');
   $('autonomy-interests').value = autonomy.interests ?? '游戏与玩家社区';
   $('autonomy-daily-min').value = autonomy.dailyMin ?? 3;
   $('autonomy-daily-max').value = autonomy.dailyMax ?? 6;
@@ -550,8 +552,8 @@ function renderAutonomyStatus(status = {}) {
   const count = inDay ? status.attempts || 0 : 0;
   const limit = inDay ? Math.min(status.target, config.dailyMax) : null;
   $('autonomy-schedule-summary').textContent = config.enabled
-    ? `小黑盒 · 每天计划 ${config.dailyMin}–${config.dailyMax} 次，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
-    : '自主浏览尚未启用。可以在「人格与设置」中安排她的小黑盒日常。';
+    ? `${(config.sources || ['heybox']).map(source => source === 'bilibili' ? 'B站' : '小黑盒').join('、')} · 每天合计计划 ${config.dailyMin}–${config.dailyMax} 次，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
+    : '自主浏览尚未启用。可以在「人格与设置」中选择来源并安排日常。';
   let next = config.enabled ? '等待安排' : '启用后安排';
   if (config.enabled && inDay) {
     next = '今天暂无后续安排';
@@ -924,7 +926,7 @@ $('settings-form').addEventListener('submit', event => {
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups') },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
-        autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox'], interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
+        autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox', 'bilibili'].filter(source => $('autonomy-source-' + source).checked), interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },
         selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) }, heybox: { enabled: $('self-expression-heybox-enabled').checked, post: $('self-expression-heybox-post').checked, comment: $('self-expression-heybox-comment').checked, reply: $('self-expression-heybox-reply').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-heybox-daily-limit').value), topic: $('self-expression-heybox-topic').value.trim() } } },
         proactive: { enabled: $('proactive-enabled').checked, desire: Number($('proactive-desire').value), dailyLimit: Number($('proactive-daily-limit').value), cooldownMinutes: Number($('proactive-cooldown').value), idleMinutes: Number($('proactive-idle').value), startHour: Number($('proactive-start-hour').value), endHour: Number($('proactive-end-hour').value), timeZone: $('proactive-time-zone').value.trim() },

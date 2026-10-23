@@ -56,12 +56,15 @@ export function createDshRuntime({ store, dataDir }) {
       try { return { enabled: config().enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus() }; }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
     },
-    async execute({ scope, actor, name, args = {}, signal }) {
-      const reading = name === 'read_bili_video';
+    async execute({ scope, actor, name, args = {}, signal, selectVideo }) {
+      const browsing = name === 'browse_bili';
+      const reading = name === 'read_bili_video' || browsing;
       const memory = createMemoryAccess({ store, scope: reading ? 'public' : scope, actor });
-      if (!['inspect', ...memoryTools, 'read_bili_video'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
-      if (reading) {
+      if (browsing) {
+        if (Object.keys(args).length || typeof selectVideo !== 'function') throw new Error('B站自主浏览需要栖忆选择候选，不能传入网址或其他参数。');
+      } else if (reading) {
         if (Object.keys(args).some(key => key !== 'url') || typeof args.url !== 'string' || args.url.length > 4096) throw new Error('视频阅读只接受完整网址。');
         const url = biliVideoUrl(args.url);
         if (!url) throw new Error('请提供完整 B站 BV 视频网址。');
@@ -97,8 +100,13 @@ export function createDshRuntime({ store, dataDir }) {
           TEMP: join(workspace, 'tmp'), TMP: join(workspace, 'tmp'), DSH_HOME: join(workspace, 'dsh') });
         return await new Promise((accept, reject) => {
           const child = spawn(settings.nodePath, [hostScript], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-          let result, failure, received = false, requests = 0, stderrBytes = 0;
-          const stop = message => { failure ||= new Error(message); child.kill(); };
+          let result, failure, received = false, selectionRequested = false, requests = 0, stderrBytes = 0;
+          let killTimer;
+          const stop = message => {
+            failure ||= new Error(message); child.kill();
+            killTimer ||= setTimeout(() => child.kill('SIGKILL'), 2000);
+            killTimer.unref();
+          };
           const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : 30000);
           const abort = () => stop('DSH 任务已取消。');
           signal?.addEventListener('abort', abort, { once: true });
@@ -113,7 +121,24 @@ export function createDshRuntime({ store, dataDir }) {
             ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}), operation: { name, args } }));
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
-            if (message.type === 'memory') {
+            if (message.type === 'select-video') {
+              if (!browsing || selectionRequested || !Number.isSafeInteger(message.id) || message.id < 1
+                || !Array.isArray(message.candidates) || message.candidates.length > 3) return stop('DSH 视频候选格式无效。');
+              selectionRequested = true;
+              const candidates = [];
+              try {
+                for (const item of message.candidates) {
+                  if (!item || typeof item !== 'object' || typeof item.url !== 'string' || biliVideoUrl(item.url) !== item.url
+                    || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 500
+                    || typeof item.author !== 'string' || item.author.length > 200 || !Number.isFinite(item.duration) || item.duration <= 0) throw new Error();
+                  candidates.push({ url: item.url, title: item.title, author: item.author, duration: item.duration });
+                }
+              } catch { return stop('DSH 视频候选格式无效。'); }
+              Promise.resolve().then(() => selectVideo(candidates)).then(url => {
+                if (url !== null && !candidates.some(item => item.url === url)) return stop('栖忆返回了无效的视频选择。');
+                if (!failure && child.connected) child.send({ type: 'video-selection', id: message.id, url }, () => {});
+              }).catch(() => stop('本次视频选择未完成，未自动重试。'));
+            } else if (message.type === 'memory') {
               if (++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
               let response;
               try { response = { result: memory.execute(message.name, message.args) }; }
@@ -126,7 +151,7 @@ export function createDshRuntime({ store, dataDir }) {
             else stop('DSH 返回了不支持的消息。');
           });
           child.on('close', code => {
-            clearTimeout(timeout); signal?.removeEventListener('abort', abort);
+            clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
             else accept(result);
           });

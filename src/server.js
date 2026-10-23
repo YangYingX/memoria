@@ -26,6 +26,7 @@ import { activitySnapshot, communityReadingResult, inspectRecentPost } from './a
 import { createDshRuntime, defaultDshReadingSettings, normalizeDshReadingSettings } from './dsh-runtime.js';
 import { biliVideoUrl, biliReadingPage } from './bili-reading.js';
 import { createBiliAccount } from './bili-account.js';
+import { browseBiliVideos } from './bili-browse.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -90,6 +91,7 @@ function heyboxRuntime() {
 const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy });
 function makeAutonomyJobs() {
   return createAutonomyJobs({ store,
+    browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, ...options }),
     discoverPosts: async (source, options) => {
       if (source !== 'heybox') throw new Error('此社区尚未接入。');
       return { url: 'https://www.xiaoheihe.cn/app/bbs/home', posts: await discoverHeyboxPosts(options) };
@@ -248,11 +250,17 @@ async function importOnlineBook(url, title) {
 }
 
 const activityActions = {
-  status: () => activitySnapshot(store, { readingStatus: autonomyJobs.status(), expressionStatus: selfExpressionJobs.status() }),
+  status: () => activitySnapshot(store, { readingStatus: autonomyJobs.status(), expressionStatus: selfExpressionJobs.status(), dshStatus: dshRuntime.status() }),
   browse: async () => {
     if (communityConversation || postInspection) return { ok: false, skipped: 'busy' };
     communityConversation = true;
-    try { return communityReadingResult(store, await autonomyJobs.run({ force: true })); }
+    try { return communityReadingResult(store, await autonomyJobs.run({ force: true, source: 'heybox' })); }
+    finally { communityConversation = false; }
+  },
+  browseBilibili: async () => {
+    if (communityConversation || postInspection) return { ok: false, skipped: 'busy' };
+    communityConversation = true;
+    try { return communityReadingResult(store, await autonomyJobs.run({ force: true, source: 'bilibili' })); }
     finally { communityConversation = false; }
   },
   checkPost: async () => {
@@ -680,7 +688,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (path === '/api/autonomy/run' && req.method === 'POST') {
         const status = await autonomyJobs.run({ force: true });
-        const blocked = status.skipped && !['no_unread_posts', 'already_read'].includes(status.skipped);
+        const blocked = status.skipped && !['no_unread_posts', 'no_unread_videos', 'already_read'].includes(status.skipped);
         return json(res, blocked ? 409 : 200, blocked ? { error: '当前无法开始活动，请检查启用状态、今日额度和其他任务。', status } : { status });
       }
       if (path === '/api/backups/status' && req.method === 'GET') return json(res, 200, { status: backupJobs.status() });
