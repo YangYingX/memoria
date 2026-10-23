@@ -21,7 +21,7 @@ const bookToolDefinitions = [
 ];
 
 const activityToolDefinitions = [
-  { type: 'function', function: { name: 'get_activity_status', description: '查询近期实际阅读、公开动态尝试、核对记录和今日额度。只读取本机记录，不访问平台，不发布内容。历史成功不代表本次或当前仍公开；先按时间和平台区分。', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
+  { type: 'function', function: { name: 'get_activity_status', description: '查询近期实际阅读、公开动态尝试、核对记录和今日额度。chat是QQ智能对话尝试，expression是公开发布，分别计数；不是模型请求余额。只读取本机记录，不访问平台，不发布内容。历史成功不代表本次或当前仍公开；先按时间和平台区分。', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
   { type: 'function', function: { name: 'browse_community', description: '应创建人当前要求现在去小黑盒逛一篇未读公开帖子，并尝试写读后笔记。沿用已配置兴趣，消耗今日一次原定阅读机会，不发帖或评论；每轮浏览与帖子核对合计最多一次，失败也不重试。', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
   { type: 'function', function: { name: 'browse_bilibili', description: '应创建人当前要求现在去B站逛一条未读热门视频，取得文字资料并尝试写笔记。需要已在自主浏览来源中启用B站，同时计入一次自主活动和DSH阅读尝试，不发帖、评论或完整观影；每轮与其他浏览或核对合计最多一次。', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
   { type: 'function', function: { name: 'check_recent_post', description: '应创建人要求，用专用小黑盒客户端回读最近已提交的本人帖子，核对当前审核显示状态。只读，不能提交、重发或改变额度。每轮与浏览合计最多一次；结果未知且没有可靠正文的尝试暂不能核对。', parameters: { type: 'object', properties: {}, additionalProperties: false } } },

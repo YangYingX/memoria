@@ -10,7 +10,7 @@ const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'c
 const outcome = value => outcomes.has(value) ? value : 'unrecorded';
 
 // Only project selected fields: raw scheduler state can contain private settings and errors.
-export function activitySnapshot(store, { readingStatus = {}, expressionStatus = {}, dshStatus = {}, time = Date.now() } = {}) {
+export function activitySnapshot(store, { readingStatus = {}, expressionStatus = {}, dshStatus = {}, qqChatStatus = {}, time = Date.now() } = {}) {
   const reading = normalizeAutonomySettings({}, store.getSetting('autonomy', {}));
   const expression = normalizeExpressionSettings({}, store.getSetting('selfExpression', {}));
   const readingToday = currentDay(readingStatus, time), expressionToday = currentDay(expressionStatus, time);
@@ -23,6 +23,8 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
       ...(['success', 'review'].includes(item.metadata.outcome) ? { title: text(item.metadata.title, 30), text: text(item.content, 800) } : {}) }));
   return {
     asOf: new Date(time).toISOString(),
+    chat: { platform: 'qq', day: typeof qqChatStatus.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(qqChatStatus.day) ? qqChatStatus.day : '', timeZone: 'UTC',
+      dailyLimit: count(qqChatStatus.dailyLimit), attempts: count(qqChatStatus.attempts), remaining: count(qqChatStatus.remaining) },
     reading: { enabled: reading.enabled, sources: reading.sources, busy: readingStatus.busy === true, dailyMax: reading.dailyMax,
       attempts: readingToday ? count(readingStatus.attempts) : 0,
       plannedLimit: readingToday ? Math.min(count(readingStatus.target), reading.dailyMax) : null,

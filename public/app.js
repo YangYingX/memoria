@@ -109,6 +109,8 @@ async function loadState({ fill = false } = {}) {
   $('bili-account-summary').textContent = biliAccount?.configured ? `已保存专用账号 ${biliAccount.accountId || ''} 的本机登录状态。此状态不表示当前平台认证仍有效。`
     : biliAccount?.browserOpen ? '专用登录窗口已打开。登录完成后点击“完成登录，保存状态”。' : '尚未保存 B站专用账号；读取时使用匿名公开接口。';
   $('bili-login-confirm').disabled = !biliAccount?.browserOpen;
+  const qqChat = state.data.qqChatStatus;
+  $('qq-chat-summary').textContent = qqChat ? `今日 QQ 智能对话 ${qqChat.attempts} / ${qqChat.dailyLimit} 次，剩余 ${qqChat.remaining} 次（UTC）。${qqChat.dailyLimit === 0 ? '已暂停新的智能对话。' : ''}` : '正在读取 QQ 智能对话额度…';
   if (fill) { fillSettings(); fillBackupSettings(); }
 }
 
@@ -419,6 +421,7 @@ function fillSettings() {
   $('model-clear-api-key').checked = false;
   $('model-key-status').textContent = model.hasApiKey ? '已配置密钥。留空保存会保留当前密钥。' : '尚未配置密钥，目前使用离线演示。';
   $('qq-enabled').checked = qq.enabled;
+  $('qq-chat-limit').value = qq.dailyChatLimit ?? 200;
   $('qq-api-url').value = qq.apiBaseUrl;
   $('qq-bot-id').value = qq.botId;
   $('qq-access-token').value = '';
@@ -979,7 +982,7 @@ $('settings-form').addEventListener('submit', event => {
         mood: { enabled: $('mood-enabled').checked, intervalMinutes: Number($('mood-interval').value), dailyLimit: Number($('mood-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
-        qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups') },
+        qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value) },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
         autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox', 'bilibili'].filter(source => $('autonomy-source-' + source).checked), interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },

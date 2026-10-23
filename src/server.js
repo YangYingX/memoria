@@ -29,6 +29,7 @@ import { createBiliAccount } from './bili-account.js';
 import { browseBiliVideos } from './bili-browse.js';
 import { defaultMoodSettings, normalizeMoodSettings, moodSnapshot } from './mood.js';
 import { createMoodJobs } from './mood-jobs.js';
+import { createQQChatBudget, defaultQQChatLimit, normalizeQQChatLimit } from './qq-chat-budget.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -42,7 +43,7 @@ const biliAccount = createBiliAccount({ dataDir });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
-  qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '' },
+  qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit },
   reading: { enabled: false, urls: [], intervalMinutes: 60, dailyLimit: 5 },
   autonomy: defaultAutonomySettings,
   drawing: defaultDrawingSettings,
@@ -54,6 +55,7 @@ const defaults = {
   backup: { enabled: false, intervalHours: 6, keepLocal: 30, localDirectory: resolve(process.env.PERSONA_BACKUP_DIR || join(root, 'backups')), passphrase: '', webdav: { enabled: false, url: '', username: '', password: '' } },
 };
 for (const [key, value] of Object.entries(defaults)) if (!store.getSetting(key)) store.setSetting(key, value);
+const qqChatBudget = createQQChatBudget({ store });
 const setupKeyPath = join(dataDir, 'setup-key.txt');
 if (!store.getSetting('admin') && !existsSync(setupKeyPath)) writeFileSync(setupKeyPath, randomBytes(24).toString('base64url'), { mode: 0o600 });
 const sessions = createSessions();
@@ -231,8 +233,10 @@ function getProactiveRecipient() {
 }
 
 function makeProactiveJobs() {
-  return createProactiveJobs({ store, getRecipient: getProactiveRecipient,
+  return createProactiveJobs({ store, getRecipient: getProactiveRecipient, canGenerate: () => qqChatBudget.status().remaining > 0,
     generate: async ({ instructions, signal, ...context }) => {
+      signal?.throwIfAborted();
+      if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
       const result = await requestCompletion({ store, signal, maxTokens: 600, messages: [
         { role: 'system', content: instructions },
         { role: 'user', content: JSON.stringify(context) },
@@ -272,7 +276,7 @@ async function importOnlineBook(url, title) {
 }
 
 const activityActions = {
-  status: () => activitySnapshot(store, { readingStatus: autonomyJobs.status(), expressionStatus: selfExpressionJobs.status(), dshStatus: dshRuntime.status() }),
+  status: () => activitySnapshot(store, { readingStatus: autonomyJobs.status(), expressionStatus: selfExpressionJobs.status(), dshStatus: dshRuntime.status(), qqChatStatus: qqChatBudget.status() }),
   browse: async () => {
     if (communityConversation || postInspection) return { ok: false, skipped: 'busy' };
     communityConversation = true;
@@ -358,6 +362,7 @@ function publicSettings() {
   const persona = store.getSetting('persona'), model = store.getSetting('model'), qq = store.getSetting('qq');
   const { apiKey, ...modelView } = model;
   const { accessToken, ...qqView } = qq;
+  qqView.dailyChatLimit = normalizeQQChatLimit(qq.dailyChatLimit);
   return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
@@ -377,7 +382,7 @@ function saveSettings(input) {
     if (typeof q.enabled !== 'boolean') throw new Error('QQ 开关无效。');
     if (q.botId && !/^\d{1,20}$/.test(String(q.botId))) throw new Error('机器人 QQ 号格式无效。');
     if (q.enabled && !q.botId) throw new Error('启用 QQ 前须填写机器人 QQ 号。');
-    next.qq = { enabled: q.enabled, apiBaseUrl: endpoint(q.apiBaseUrl), botId: String(q.botId || ''), accessToken: q.accessToken ? text(q.accessToken, 'OneBot Token', 1000) : previous.accessToken, webhookSecret: q.webhookSecret ? text(q.webhookSecret, 'Webhook Secret', 200, 24) : previous.webhookSecret, allowedUsers: ids(q.allowedUsers || []), allowedGroups: ids(q.allowedGroups || []) };
+    next.qq = { enabled: q.enabled, apiBaseUrl: endpoint(q.apiBaseUrl), botId: String(q.botId || ''), accessToken: q.accessToken ? text(q.accessToken, 'OneBot Token', 1000) : previous.accessToken, webhookSecret: q.webhookSecret ? text(q.webhookSecret, 'Webhook Secret', 200, 24) : previous.webhookSecret, allowedUsers: ids(q.allowedUsers || []), allowedGroups: ids(q.allowedGroups || []), dailyChatLimit: normalizeQQChatLimit(q.dailyChatLimit === undefined ? previous.dailyChatLimit : q.dailyChatLimit) };
   }
   if (input.reading) {
     const r = input.reading;
@@ -493,6 +498,13 @@ async function testQQ(signal) {
     message: !online ? '协议端可连接，但 QQ 当前未登录或不在线。' : botId !== config.botId ? `协议端已登录，请把机器人 QQ 号设置为 ${botId} 后保存。` : 'QQ 在线且账号匹配；请再发送测试消息验证事件上报。' };
 }
 
+function reserveQQChat() {
+  const reservation = qqChatBudget.reserve();
+  if (reservation.firstLimited) store.addEvent({ type: 'chat_limit', scope: 'owner', actor: 'onebot', content: 'QQ 今日智能对话额度已用完，后续新对话暂不处理。',
+    metadata: { platform: 'qq', day: reservation.day, attempts: reservation.attempts, dailyLimit: reservation.dailyLimit } });
+  return reservation.allowed;
+}
+
 async function handleQQ(event, config) {
   const privateFileNotice = event.post_type === 'notice' && event.notice_type === 'private_file';
   if (!privateFileNotice && (event.post_type !== 'message' || !['private', 'group'].includes(event.message_type))) return;
@@ -577,6 +589,7 @@ async function handleQQ(event, config) {
     await sendQQ(config, target, bookReply);
     return;
   }
+  if (!reserveQQChat()) return;
   if (imageUrls.length && !store.getSetting('model').apiKey) {
     await sendQQ(config, target, '收到了图片，但尚未配置支持图片的模型。请创建人在后台配置模型后重试。');
     return;
@@ -655,7 +668,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mood: moodSnapshot(store), moodStatus: moodJobs.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
       if (path === '/api/bili/login/import' && req.method === 'POST') return json(res, 200, await biliAccount.importLogin(input));

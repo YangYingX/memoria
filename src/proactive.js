@@ -42,7 +42,7 @@ function dayBounds(time, timeZone) {
   return { day, timeZone, dayStartAt: boundary(time - 2 * DAY_MS, time, true), dayEndAt: boundary(time, time + 2 * DAY_MS, false) };
 }
 
-export function createProactiveJobs({ store, generate, send, getRecipient, isBusy = () => false, clock = Date.now, random = Math.random }) {
+export function createProactiveJobs({ store, generate, send, getRecipient, canGenerate = () => true, isBusy = () => false, clock = Date.now, random = Math.random }) {
   let busy = false, stopped = false, controller;
   let lastState = store.getSetting('proactiveStatus', {});
   const now = () => Number(clock());
@@ -109,6 +109,7 @@ export function createProactiveJobs({ store, generate, send, getRecipient, isBus
     if (!config.dailyLimit || !config.desire) return { ...status(), skipped: 'quiet' };
     const recipient = getRecipient();
     if (!recipient || !store.getSetting('model')?.apiKey) return { ...status(), skipped: recipient ? 'no_model' : 'no_recipient' };
+    if (!canGenerate()) return { ...status(), skipped: 'platform_limit' };
     let state = plan(config, time);
     if (time < Date.parse(state.dayStartAt) || !inHours(time, config)) return { ...status(), skipped: 'outside_hours' };
     if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), skipped: 'daily_limit' };
