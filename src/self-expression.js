@@ -246,9 +246,21 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     save(state); busy = true;
     const activeController = controller = new AbortController();
     let bili, biliQuiet = false;
+    const sourceVersions = new Map();
+    function sourcesCurrent() {
+      try { return [...sourceVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, ['owner'])?.signature === signature); }
+      catch { return false; }
+    }
+    function sourceMemory(id) {
+      const evidence = store.getMemoryVersionEvidence(id, ['owner']);
+      const memory = evidence?.memory;
+      if (!memory || memory.updatedAt !== memory.createdAt || store.listRevisions(memory.id).length) return null;
+      return evidence;
+    }
+    const rememberSource = evidence => sourceVersions.set(evidence.memory.id, evidence.signature);
     const sameState = () => !stopped && store.getSetting('selfExpressionStatus', {}).dayId === state.dayId;
     const current = () => sameState() && !activeController.signal.aborted && now() >= Date.parse(state.dayStartAt)
-      && now() < Date.parse(state.dayEndAt) && JSON.stringify(settings()) === state.configSignature;
+      && now() < Date.parse(state.dayEndAt) && JSON.stringify(settings()) === state.configSignature && sourcesCurrent();
     const check = () => { if (!current()) throw new Error('自主表达已取消。'); };
     const update = patch => { if (sameState()) state = save({ ...store.getSetting('selfExpressionStatus', {}), ...patch }); };
     const ready = async platform => {
@@ -284,7 +296,16 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
         check();
       }
       const recentEvents = bili ? [] : store.listEvents({ scope: 'owner', limit: 200 });
-      const readings = recentEvents.map(publicReading).filter(Boolean).slice(0, 6);
+      const readings = [];
+      for (const item of recentEvents) {
+        const reading = publicReading(item);
+        if (!reading || typeof item.metadata?.memoryId !== 'string') continue;
+        const evidence = sourceMemory(item.metadata.memoryId), memory = evidence?.memory;
+        if (!memory || memory.sourceType !== 'webpage' || memory.category !== 'reading' || memory.sourceRef !== item.sourceRef
+          || memory.content !== item.content || memory.createdAt !== item.createdAt) continue;
+        rememberSource(evidence); readings.push(reading);
+        if (readings.length === 6) break;
+      }
       let discussion = null;
       if (allowed.some(platform => platform.id === 'heybox' && platform.actions.some(action => DISCUSSION_ACTIONS.includes(action)))) {
         if (isBusy()) { update({ lastOutcome: 'busy' }); return { ...status(), busy: false, skipped: 'busy' }; }
@@ -301,13 +322,28 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
           return { ...status(), busy: false, skipped: 'no_discussion' };
         }
       }
-      const previousPosts = recentEvents.filter(item => item.type === 'self_expression' && item.scope === 'owner' && item.actor === 'scheduler'
-        && item.metadata?.action === 'post' && item.metadata.platform === 'heybox' && item.metadata.outcome === 'success')
-        .slice(0, 3).map(item => ({ text: clipped(item.content, 800), at: item.createdAt }));
+      const previousPosts = [];
+      const shelf = bili ? [] : store.listMemories({ scope: 'owner' });
+      for (const item of recentEvents) {
+        if (item.type !== 'self_expression' || item.scope !== 'owner' || item.actor !== 'scheduler'
+          || item.metadata?.action !== 'post' || item.metadata.platform !== 'heybox' || item.metadata.outcome !== 'success') continue;
+        const record = shelf.find(memory => memory.sourceType === 'self-expression' && memory.sourceRef === item.id
+          && memory.content.slice(memory.content.indexOf('\n') + 1) === item.content);
+        const evidence = record && sourceMemory(record.id);
+        if (!evidence) continue;
+        rememberSource(evidence); previousPosts.push({ text: clipped(item.content, 800), at: item.createdAt });
+        if (previousPosts.length === 3) break;
+      }
       const readingNotes = (bili ? [] : store.listReadingReflections(['owner'], 3)).filter(item => {
         try { const url = new URL(item.sourceRef); return url.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(url.pathname) && !url.search && !url.hash; }
         catch { return false; }
-      }).map(item => ({ title: clipped(item.title, 300), note: clipped(item.note, 1200), url: item.sourceRef, createdAt: item.createdAt }));
+      }).flatMap(item => {
+        const evidence = sourceMemory(item.memoryId), memory = evidence?.memory;
+        if (!memory || memory.sourceType !== 'reflection' || memory.category !== 'reading-note' || memory.sourceRef !== item.sourceRef
+          || memory.content !== item.note || memory.title !== item.title || memory.createdAt !== item.createdAt) return [];
+        rememberSource(evidence);
+        return [{ title: clipped(item.title, 300), note: clipped(item.note, 1200), url: item.sourceRef, createdAt: item.createdAt }];
+      });
       if (isBusy()) { update({ lastOutcome: 'busy' }); return { ...status(), busy: false, skipped: 'busy' }; }
       check();
       update({ decisionAttempts: state.decisionAttempts + 1, lastAttempt: stamp(now()), lastOutcome: 'deciding' });
@@ -374,17 +410,23 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
         if (isBili && bili.finish(outcome.outcome === 'success' ? 'sent' : biliReserved ? 'unknown' : 'failed', { replyId: outcome.replyId, text: action.text }) === false && outcome.outcome === 'success') {
           outcome.archiveWarning = 'B站已返回回复编号，但保存对话记忆未完成，请检查本机存储。';
         }
+        const archiveCurrent = current();
+        if (!isBili && !archiveCurrent && ['success', 'review'].includes(outcome.outcome)) {
+          delete outcome.postText;
+          outcome.archiveWarning = '平台已返回结果；来源随后变化，未保存失效的表达正文。';
+        }
         outcome = { ...outcome, ...target };
         if (!sameState()) return { ...status(), busy: false, skipped: stopped ? 'stopped' : 'cancelled' };
         // A request can finish after cancellation. Record its actual result, but dispatch no further action.
         update({ outcomes: { ...state.outcomes, [action.platform]: { ...state.outcomes?.[action.platform], [action.type]: outcome } }, lastOutcome: outcome.outcome,
           ...(['success', 'review'].includes(outcome.outcome) ? { ...(outcome.outcome === 'success' ? { lastSuccess: stamp(now()) } : { lastSubmitted: stamp(now()) }), lastError: outcome.archiveWarning || '',
-            ...(action.type === 'post' ? { lastPostTid: outcome.tid || '', lastPostTitle: action.title || '', lastPostText: outcome.postText || action.text, lastPostPlatform: action.platform, lastPostState: outcome.outcome } : {}),
-            ...(action.type === 'signature' ? { lastSignature: action.text } : {}), ...(action.type === 'avatar' ? { lastAvatarId: action.avatarId } : {}) }
+            ...(action.type === 'post' ? { lastPostTid: outcome.tid || '', lastPostTitle: archiveCurrent ? action.title || '' : '', lastPostText: archiveCurrent ? outcome.postText || action.text : '', lastPostPlatform: action.platform, lastPostState: outcome.outcome } : {}),
+            ...(action.type === 'signature' && archiveCurrent ? { lastSignature: action.text } : {}), ...(action.type === 'avatar' ? { lastAvatarId: action.avatarId } : {}) }
             : { lastError: outcome.message }) });
-        const recorded = event(action.type, outcome.outcome, ['success', 'review'].includes(outcome.outcome) ? (action.type === 'avatar' ? '已更新头像。' : outcome.postText || action.text) : outcome.message,
-          { platform: action.platform, ...outcome, ...(action.title ? { title: action.title } : {}), ...(action.type === 'avatar' ? { avatarId: action.avatarId } : {}) });
-        if (!isBili && recorded && PUBLIC_ACTIONS.includes(action.type) && ['success', 'review'].includes(outcome.outcome)) {
+        const recorded = event(action.type, outcome.outcome, ['success', 'review'].includes(outcome.outcome)
+          ? !archiveCurrent ? '平台已返回结果；背景随后变化，未保存失效的表达正文。' : (action.type === 'avatar' ? '已更新头像。' : outcome.postText || action.text) : outcome.message,
+          { platform: action.platform, ...outcome, ...(action.title && archiveCurrent ? { title: action.title } : {}), ...(action.type === 'avatar' ? { avatarId: action.avatarId } : {}) });
+        if (!isBili && archiveCurrent && recorded && PUBLIC_ACTIONS.includes(action.type) && ['success', 'review'].includes(outcome.outcome)) {
           try {
             const name = clipped(platforms[action.platform].name, 80) || action.platform;
             const label = action.type === 'post' ? '发帖' : action.type === 'reply' ? '回复' : '评论';
@@ -393,6 +435,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
               sourceType: 'self-expression', sourceRef: recorded.id });
           } catch { update({ lastError: '公开表达结果已记录，但保存到记忆书架未完成，请检查本机存储。' }); }
         }
+        if (!archiveCurrent) return { ...status(), busy: false, skipped: 'cancelled' };
       }
       return { ...status(), busy: false };
     } catch (error) {

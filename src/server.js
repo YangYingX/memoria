@@ -315,7 +315,8 @@ function makeProactiveJobs() {
     try { proposal = JSON.parse(result.text); }
     catch { throw new Error('原生主动私聊未返回有效决定。'); }
     return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
-      historyMessageIds: result.historyMessageIds, sourcesCurrent: result.sourcesCurrent };
+      historyMessageIds: result.historyMessageIds, userMessageIds: result.userMessageIds,
+      memoryVersions: result.memoryVersions, sourcesCurrent: result.sourcesCurrent };
   };
   return createProactiveJobs({ store, getRecipient: getProactiveRecipient,
     canGenerate: recipient => recipient.platform === 'feishu' ? feishuChat.status().chat.remaining > 0 : qqChatBudget.status().remaining > 0,

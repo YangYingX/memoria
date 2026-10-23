@@ -81,17 +81,17 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
   const seedOrigin = agendaMode ? readOrigin(eventOriginReader, originalEvidence.source.id) : readOrigin(originReader, originalSeed?.id);
   const persona = store.getSetting('persona', {}), moodState = store.getSetting('moodState', null);
   const initial = JSON.stringify({ seed: originalSeed, history, persona, moodState, ...(agendaMode ? { evidence: originalEvidence } : {}), ...(memoryMode ? { theme: originalTheme } : {}) });
-  const conversationIds = new Set([...(messageId ? [messageId] : []), ...history.filter(item => item.role === 'user').map(item => item.id)]);
+  const conversationIds = new Set(), userMessageIds = new Set([...(messageId ? [messageId] : []), ...history.filter(item => item.role === 'user').map(item => item.id)]);
   const historyMessageIds = history.filter(item => item.role === 'assistant').map(item => item.id);
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
-  for (const item of history.filter(item => item.role === 'assistant')) if (validReference(item.metadata.replyTo)) conversationIds.add(item.metadata.replyTo);
-  const memories = new Map(), conversations = new Map(), memoryIds = new Set(agendaMode ? [originalEvidence.memory.id] : []);
-  const forbiddenIds = new Set([...(messageId ? [messageId] : []), ...history.map(item => item.id), ...conversationIds]);
+  const memories = new Map(), conversations = new Map(), memoryIds = new Set();
+  const forbiddenIds = new Set([...(messageId ? [messageId] : []), ...history.map(item => item.id), ...userMessageIds]);
   if (agendaMode) for (const id of [agendaId, originalEvidence.memory.id, originalEvidence.source.id, originalEvidence.followup.recipientAccountId]) forbiddenIds.add(id);
   if (memoryMode) for (const id of [memoryId, originalTheme.source.eventId]) forbiddenIds.add(id);
   let invalidated = false;
   const memory = id => {
-    const item = store.getMemory(id), source = store.getMemorySource(id, ['owner', 'public']);
+    const evidence = store.getMemoryVersionEvidence(id, ['owner', 'public']);
+    const item = evidence?.memory, source = store.getMemorySource(id, ['owner', 'public']);
     let sourceBlocked = false;
     if (item?.sourceType === 'conversation') {
       try {
@@ -102,28 +102,34 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
     const readingEvidence = item?.scope === 'public' && (item.sourceType === 'webpage' && item.category === 'reading'
       || item.sourceType === 'reflection' && item.category === 'reading-note') ? store.getCompanionMemoryEvidence(id) : undefined;
     if (readingEvidence === null) sourceBlocked = true;
-    return { memory: item, source, parts: store.getReadingParts(id, ['owner', 'public']), sourceBlocked, readingEvidence };
+    return { memory: item, signature: evidence?.signature, source, parts: store.getReadingParts(id, ['owner', 'public']), sourceBlocked, readingEvidence };
   };
   const conversation = id => store.getConversation(id, ['owner', 'public']);
   function remember(map, id, value) {
-    if (value?.sourceBlocked) { invalidated = true; throw new Error('主动拟聊的资料已变化。'); }
+    if (!value || value.sourceBlocked || (map === memories && !value.signature)) { invalidated = true; throw new Error('主动拟聊的资料已变化。'); }
+    if (!map.has(id) && map.size >= 100) throw new Error('主动拟聊的来源超过保存上限。');
     const encoded = JSON.stringify(value);
     if (map.has(id) && map.get(id) !== encoded) invalidated = true;
     else map.set(id, encoded);
     if (map === memories) {
       memoryIds.add(id);
-      const parts = value?.readingEvidence?.parts || [];
-      for (const part of [...parts, ...parts.flatMap(item => item.parts || [])]) if (validReference(part.memory?.id)) memoryIds.add(part.memory.id);
     }
     forbiddenIds.add(id);
     for (const reference of [value?.source?.eventId, value?.memory?.sourceRef, ...(value?.parts || []).map(part => part.id)]) {
       if (validReference(reference)) forbiddenIds.add(reference);
     }
   }
+  function rememberMemory(id) {
+    const value = memory(id);
+    remember(memories, id, value);
+    const parts = value.readingEvidence?.parts || [];
+    const partIds = new Set([...(value.parts || []).map(part => part.id), ...[...parts, ...parts.flatMap(item => item.parts || [])].map(part => part.memory?.id)]);
+    for (const partId of partIds) if (validReference(partId)) remember(memories, partId, memory(partId));
+  }
   const themeParts = memoryMode ? [...originalTheme.parts, ...originalTheme.parts.flatMap(part => part.parts || [])] : [];
   const themeMemoryIds = memoryMode ? [...new Set([memoryId, ...themeParts.flatMap(part => part.memory?.id ? [part.memory.id] : [])])] : [];
   const originalThemeMemory = memoryMode ? memory(memoryId) : null;
-  for (const id of themeMemoryIds) remember(memories, id, id === memoryId ? originalThemeMemory : memory(id));
+  for (const id of [...themeMemoryIds, ...(agendaMode ? [originalEvidence.memory.id] : [])]) rememberMemory(id);
   function agendaEvidenceForSnapshot(current) {
     const previous = originalEvidence?.followup, next = current?.followup;
     if (previous?.status === 'deciding' && next?.status === 'attempted' && next.revision === previous.revision + 1) {
@@ -162,13 +168,17 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
         : { seed: { actor: originalSeed.actor, ...originLabel(seedOrigin), recordedAt: originalSeed.createdAt, ...proactiveTextExcerpt(originalSeed.content, 3000),
           ...proactiveQuoteContext(seedQuote, originalSeed.content) } }),
       recentMessages: proactiveRecentMessages(history, originReader) },
-    conversationIds: [...conversationIds], historyMessageIds, get memoryIds() { return [...memoryIds]; },
+    get conversationIds() { return [...conversationIds]; }, get userMessageIds() { return [...userMessageIds]; },
+    historyMessageIds, get memoryIds() { return [...memoryIds]; },
+    get memoryVersions() { return [...memories].map(([memoryId, value]) => ({ memoryId, signature: JSON.parse(value).signature })); },
     track(name, args, result) {
       if (result.error) return;
-      if (name === 'search_memory') for (const item of result.items) remember(memories, item.id, memory(item.id));
-      else if (name === 'search_conversations') for (const item of result.items) remember(conversations, item.id, conversation(item.id));
-      else if (name === 'read_conversation') remember(conversations, args.id, conversation(args.id));
-      else remember(memories, args.id, memory(args.id));
+      if (name === 'search_memory') for (const item of result.items) rememberMemory(item.id);
+      else if (name === 'search_conversations' || name === 'read_conversation') for (const item of name === 'search_conversations' ? result.items : [result]) {
+        remember(conversations, item.id, conversation(item.id));
+        (item.assistantHidden === true ? userMessageIds : conversationIds).add(item.id);
+      }
+      else rememberMemory(args.id);
       if (!sourcesCurrent()) throw new Error('主动拟聊的资料已变化。');
     },
     validateText(text) {

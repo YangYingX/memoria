@@ -131,12 +131,6 @@ function memoryFields(input) {
   };
 }
 
-function readingRevision(snapshot) {
-  return (snapshot.scope === 'owner' && snapshot.sourceType === 'book' && snapshot.category === 'book-note')
-    || (snapshot.sourceType === 'webpage' && snapshot.category === 'reading')
-    || (snapshot.sourceType === 'reflection' && snapshot.category === 'reading-note');
-}
-
 function eventFields(input) {
   record(input, '经历');
   const type = text(input.type, '经历类型', 40);
@@ -684,6 +678,29 @@ export function createStore(dbPath) {
     return { memory, source, revisions };
   }
 
+  function memoryVersionEvidence(id, permitted) {
+    if (!permitted.length) return null;
+    // Filter the current scope before reading any body, source or revision evidence.
+    const memory = memoryRow(get(`SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL
+      AND scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted));
+    if (!memory || get('SELECT 1 FROM tombstones WHERE memory_id = ?', id)) return null;
+    const book = memory.sourceType === 'book' && memory.category === 'book-note' ? bookNoteEvidence(id) : null;
+    if (memory.sourceType === 'book' && memory.category === 'book-note' && !book) return null;
+    const revisions = all('SELECT * FROM revisions WHERE memory_id = ? ORDER BY created_at DESC, id DESC', id).map(revisionRow);
+    const sources = all(`SELECT * FROM events WHERE scope = ? AND (
+      (json_extract(metadata, '$.memoryId') = ? AND created_at = ? AND source_ref = ? AND ((? = 'book' AND type = 'book_reading')
+        OR (? = 'webpage' AND type = 'reading' AND json_extract(metadata, '$.reusedMemory') IS NOT 1)
+        OR (? = 'reflection' AND type = 'reading_reflection'))) OR
+      (id = ? AND ((? = 'conversation' AND type = 'message') OR (? = 'self-expression' AND type = 'self_expression'))))
+      ORDER BY created_at DESC, id DESC`, memory.scope, id, memory.createdAt, memory.sourceRef, memory.sourceType, memory.sourceType, memory.sourceType,
+    memory.sourceRef, memory.sourceType, memory.sourceType).map(eventRow);
+    const sourceBlocked = memory.sourceType === 'conversation'
+      && Boolean(get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', memory.scope, memory.sourceRef));
+    const evidence = { memory, revisions, sources, sourceBlocked, book,
+      source: api.getMemorySource(id, permitted), parts: api.getReadingParts(id, permitted) };
+    return { memory, signature: createHash('sha256').update(JSON.stringify(evidence)).digest('hex') };
+  }
+
   function noteDependencies(event) {
     const supplied = event.metadata.sourceMemoryIds;
     const legacy = event.type === 'reading_reflection' ? [event.metadata.readingMemoryId] : [];
@@ -874,32 +891,52 @@ export function createStore(dbPath) {
     const dependencies = all(`SELECT a.id, u.id AS user_id,
       CASE WHEN json_type(a.metadata, '$.memoryIds') = 'array' THEN json_extract(a.metadata, '$.memoryIds') ELSE '[]' END AS memory_ids,
       CASE WHEN json_type(a.metadata, '$.conversationIds') = 'array' THEN json_extract(a.metadata, '$.conversationIds') ELSE '[]' END AS conversation_ids,
-      CASE WHEN json_type(a.metadata, '$.historyMessageIds') = 'array' THEN json_extract(a.metadata, '$.historyMessageIds') ELSE '[]' END AS history_message_ids
+      CASE WHEN json_type(a.metadata, '$.historyMessageIds') = 'array' THEN json_extract(a.metadata, '$.historyMessageIds') ELSE '[]' END AS history_message_ids,
+      CASE WHEN json_type(a.metadata, '$.userMessageIds') = 'array' THEN json_extract(a.metadata, '$.userMessageIds') ELSE '[]' END AS user_message_ids,
+      a.scope,
+      CASE WHEN json_type(a.metadata, '$.memoryVersions') = 'array' THEN json_extract(a.metadata, '$.memoryVersions')
+        WHEN json_type(a.metadata, '$.memoryVersions') IS NULL THEN '[]' ELSE 'null' END AS memory_versions
       , CASE WHEN json_type(a.metadata, '$.bookNoteVersions') = 'array' THEN json_extract(a.metadata, '$.bookNoteVersions')
         WHEN json_type(a.metadata, '$.bookNoteVersions') IS NULL THEN '[]' ELSE 'null' END AS book_note_versions
       FROM messages a LEFT JOIN messages u ON u.role = 'user' AND u.scope = a.scope
         AND json_type(a.metadata, '$.replyTo') = 'text' AND u.id = json_extract(a.metadata, '$.replyTo')
       WHERE a.role = 'assistant'`);
+    const versionEvidence = new Map();
     for (const row of dependencies) {
       if (row.user_id) replyUsers.set(row.id, row.user_id);
-      if (blockedUsers.has(row.user_id) || JSON.parse(row.memory_ids).some(id => typeof id === 'string' && blockedMemoryIds.has(id))) hiddenAssistants.add(row.id);
+      if (blockedUsers.has(row.user_id) || JSON.parse(row.user_message_ids).some(id => typeof id === 'string' && blockedUsers.has(id))) hiddenAssistants.add(row.id);
       const memoryIds = JSON.parse(row.memory_ids), versions = row.book_note_versions === null ? [] : JSON.parse(row.book_note_versions);
-      const versionIds = new Set();
-      if (!Array.isArray(versions) || versions.length > 100) hiddenAssistants.add(row.id);
-      else for (const version of versions) {
+      const versionIds = new Set(), currentVersions = new Set();
+      const memoryVersions = JSON.parse(row.memory_versions);
+      if (!Array.isArray(memoryVersions) || memoryVersions.length > 100) hiddenAssistants.add(row.id);
+      else for (const version of memoryVersions) {
         if (!version || typeof version !== 'object' || Array.isArray(version) || Object.keys(version).some(key => !['memoryId', 'signature'].includes(key))
           || typeof version.memoryId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(version.memoryId)
           || typeof version.signature !== 'string' || !/^[a-f0-9]{64}$/.test(version.signature) || versionIds.has(version.memoryId)
           || !memoryIds.includes(version.memoryId)) { hiddenAssistants.add(row.id); continue; }
         versionIds.add(version.memoryId);
+        const key = JSON.stringify([row.scope, version.memoryId]);
+        if (!versionEvidence.has(key)) versionEvidence.set(key, memoryVersionEvidence(version.memoryId, [...new Set([row.scope, 'public'])]));
+        const evidence = versionEvidence.get(key);
+        if (!evidence || evidence.signature !== version.signature) hiddenAssistants.add(row.id);
+        else currentVersions.add(version.memoryId);
+      }
+      const bookVersionIds = new Set();
+      if (!Array.isArray(versions) || versions.length > 100) hiddenAssistants.add(row.id);
+      else for (const version of versions) {
+        if (!version || typeof version !== 'object' || Array.isArray(version) || Object.keys(version).some(key => !['memoryId', 'signature'].includes(key))
+          || typeof version.memoryId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(version.memoryId)
+          || typeof version.signature !== 'string' || !/^[a-f0-9]{64}$/.test(version.signature) || bookVersionIds.has(version.memoryId)
+          || !memoryIds.includes(version.memoryId)) { hiddenAssistants.add(row.id); continue; }
+        bookVersionIds.add(version.memoryId);
         const evidence = bookNoteEvidence(version.memoryId);
         if (!evidence || createHash('sha256').update(JSON.stringify(evidence)).digest('hex') !== version.signature) hiddenAssistants.add(row.id);
       }
-      // Old replies have no version stamp. A revised book note cannot safely stand for its old wording.
-      for (const id of memoryIds) if (typeof id === 'string' && !versionIds.has(id) && get(`SELECT 1 FROM revisions r
-        WHERE r.memory_id = ? AND ((json_extract(r.snapshot, '$.scope') = 'owner' AND json_extract(r.snapshot, '$.sourceType') = 'book'
-          AND json_extract(r.snapshot, '$.category') = 'book-note') OR EXISTS (SELECT 1 FROM memories m WHERE m.id = r.memory_id
-            AND m.scope = 'owner' AND m.source_type = 'book' AND m.category = 'book-note')) LIMIT 1`, id)) hiddenAssistants.add(row.id);
+      // Legacy IDs mean an unknown old version. Current generic stamps can identify a corrected body.
+      for (const id of memoryIds) if (typeof id === 'string') {
+        if (blockedMemoryIds.has(id) && !currentVersions.has(id)) hiddenAssistants.add(row.id);
+        if (!currentVersions.has(id) && !bookVersionIds.has(id) && get('SELECT 1 FROM revisions WHERE memory_id = ? LIMIT 1', id)) hiddenAssistants.add(row.id);
+      }
       for (const id of [...JSON.parse(row.conversation_ids), ...JSON.parse(row.history_message_ids), ...(row.user_id ? [row.user_id] : [])]) {
         if (typeof id !== 'string') continue;
         if (!dependents.has(id)) dependents.set(id, new Set());
@@ -988,6 +1025,10 @@ export function createStore(dbPath) {
     },
     getMemory(id) {
       return memoryRow(get('SELECT * FROM memories WHERE id = ?', identifier(id, '记忆 ID')));
+    },
+    getMemoryVersionEvidence(id, scopes) {
+      id = identifier(id, '记忆 ID');
+      return memoryVersionEvidence(id, conversationScopes(scopes));
     },
     getBookNoteEvidence(id) {
       return bookNoteEvidence(identifier(id, '读书笔记 ID'));
@@ -2007,14 +2048,12 @@ export function createStore(dbPath) {
         return clean;
       }
       const memories = rows('memories', importedMemory);
-      const memoryIds = new Set(memories.map(memory => memory.id));
       const revisions = rows('revisions', item => {
         const memoryId = identifier(item.memoryId, '修订的记忆 ID');
         record(item.snapshot, '记忆修订快照');
         const snapshot = importedMemory(item.snapshot);
         if (snapshot.id !== memoryId) invalid('记忆修订快照与记忆 ID 不一致。');
-        // A local correction may outlive a restore from before its reading existed.
-        if (!memoryIds.has(memoryId) && !readingRevision(snapshot)) invalid('备份修订引用了不存在的记忆。');
+        // Validated correction evidence can outlive a restore from before the memory existed.
         return dated(item, { memoryId, snapshot });
       });
       const events = rows('events', item => {
@@ -2106,15 +2145,12 @@ export function createStore(dbPath) {
         // Source corrections made after a backup remain evidence against its old generated derivatives.
         const importedPristine = new Set(memories.filter(memory => !revisedIds.has(memory.id)).map(memory => memory.id));
         const revisionsById = new Map(revisions.map(revision => [revision.id, revision]));
-        for (const row of all(`SELECT * FROM revisions WHERE
-          (json_extract(snapshot, '$.sourceType') = 'book' AND json_extract(snapshot, '$.category') = 'book-note' AND json_extract(snapshot, '$.scope') = 'owner')
-          OR (json_extract(snapshot, '$.sourceType') = 'webpage' AND json_extract(snapshot, '$.category') = 'reading')
-          OR (json_extract(snapshot, '$.sourceType') = 'reflection' AND json_extract(snapshot, '$.category') = 'reading-note')`)) {
+        for (const row of all('SELECT * FROM revisions')) {
           const local = revisionRow(row), previous = revisionsById.get(local.id);
-          if (previous && JSON.stringify(previous) !== JSON.stringify(local)) invalid('备份与本机的阅读修订记录冲突，未恢复。');
+          if (previous && JSON.stringify(previous) !== JSON.stringify(local)) invalid('备份与本机的记忆修订记录冲突，未恢复。');
           if (!previous) { revisionsById.set(local.id, local); revisions.push(local); total++; }
         }
-        if (revisions.length > 100000 || total > 250000) invalid('保留本机阅读修订后，备份记录超过容量上限。');
+        if (revisions.length > 100000 || total > 250000) invalid('保留本机记忆修订后，备份记录超过容量上限。');
         const restoredAt = new Date().toISOString();
         const previousCompanion = api.getSetting('companionState', null);
         // Restored social inbox entries are history, never a renewed permission to publish.

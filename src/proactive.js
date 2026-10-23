@@ -65,15 +65,15 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
   const latestUser = () => store.latestOwnerMessage();
   function recentContext() {
     const history = store.listConversationHistory('owner', 6);
-    const conversationIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
+    const userMessageIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
     const historyMessageIds = [];
     const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
     for (const item of history.filter(item => item.role === 'assistant')) {
       historyMessageIds.push(item.id);
-      if (validReference(item.metadata.replyTo)) conversationIds.add(item.metadata.replyTo);
+      if (validReference(item.metadata.replyTo)) userMessageIds.add(item.metadata.replyTo);
     }
     return { messages: proactiveRecentMessages(history, id => store.getConversationOrigin(id)).map(({ text, ...item }) => ({ ...item, content: text })),
-      historyMessageIds, conversationIds: [...conversationIds] };
+      historyMessageIds, userMessageIds: [...userMessageIds] };
   }
   const inHours = (time, config) => {
     const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.timeZone, hour: '2-digit', hourCycle: 'h23' }).format(time));
@@ -149,12 +149,19 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     if (!decision || typeof decision !== 'object' || Array.isArray(decision) || typeof decision.sourcesCurrent !== 'function') throw new Error('主动拟聊未返回有效来源核对。');
     const references = {};
     let count = 0;
-    for (const key of ['memoryIds', 'conversationIds', 'historyMessageIds']) {
-      if (!Array.isArray(decision[key]) || decision[key].length > 100
-        || decision[key].some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(id))) throw new Error('主动拟聊来源索引无效。');
-      references[key] = [...new Set(decision[key])]; count += references[key].length;
+    for (const key of ['memoryIds', 'conversationIds', 'historyMessageIds', 'userMessageIds']) {
+      const ids = key === 'userMessageIds' && decision[key] === undefined ? [] : decision[key];
+      if (!Array.isArray(ids) || ids.length > 100
+        || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(id))) throw new Error('主动拟聊来源索引无效。');
+      references[key] = [...new Set(ids)]; count += references[key].length;
     }
     if (count > 100) throw new Error('主动拟聊来源索引超过上限。');
+    const versions = decision.memoryVersions === undefined ? [] : decision.memoryVersions;
+    if (!Array.isArray(versions) || versions.length !== references.memoryIds.length || versions.some(item => !item || typeof item !== 'object' || Array.isArray(item)
+      || Object.keys(item).length !== 2 || !Object.hasOwn(item, 'memoryId') || !Object.hasOwn(item, 'signature')
+      || !references.memoryIds.includes(item.memoryId) || typeof item.signature !== 'string' || !/^[a-f0-9]{64}$/.test(item.signature))
+      || new Set(versions.map(item => item.memoryId)).size !== versions.length) throw new Error('主动拟聊记忆版本索引无效。');
+    references.memoryVersions = versions.map(({ memoryId, signature }) => ({ memoryId, signature }));
     return references;
   }
 
@@ -226,6 +233,13 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     busy = true;
     const activeController = controller = new AbortController();
     const context = recentContext();
+    const memoryVersions = new Map();
+    const versionsCurrent = () => [...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, ['owner', 'public'])?.signature === signature);
+    const captureMemory = memory => {
+      const evidence = store.getMemoryVersionEvidence(memory.id, ['owner', 'public']);
+      if (!evidence || JSON.stringify(evidence.memory) !== JSON.stringify(memory)) throw new Error('主动拟聊的记忆来源已变化。');
+      memoryVersions.set(memory.id, evidence.signature);
+    };
     let sourcesCurrent = () => true;
     const agendaEvidence = candidate => {
       const evidence = store.getFollowupEvidence(candidate.agenda.id);
@@ -254,14 +268,14 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
           && (selected.kind !== 'agenda' || now() >= Date.parse(selected.agenda.dueAt) && now() < Date.parse(selected.agenda.expiresAt))
           && commonSnapshot === commonDependencies()
           && (selecting ? candidates : [selected]).every(candidate => snapshots.get(candidate) === dependencies(candidate))
-          && sourcesCurrent() === true;
+          && versionsCurrent() && sourcesCurrent() === true;
       } catch { return false; }
     };
     const check = () => { if (!current() || isBusy()) throw new Error('主动私聊已取消。'); };
     const update = patch => { if (sameState()) state = save({ ...store.getSetting('proactiveStatus', {}), ...patch }); };
     let assessingCompanion = false;
     try {
-      let decision, references = { memoryIds: [], conversationIds: [], historyMessageIds: [] };
+      let decision, references = { memoryIds: [], memoryVersions: [], conversationIds: [], historyMessageIds: [], userMessageIds: [] };
       let impulse;
       check();
       const readiness = new Map();
@@ -300,6 +314,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       }
       selecting = false;
       check();
+      if (['reading', 'theme'].includes(selected.kind)) captureMemory(selected.memory);
+      else if (selected.kind === 'agenda') captureMemory(selected.evidence.memory);
       if (selected.kind === 'agenda') {
         const deciding = store.transitionFollowup(selected.agenda.id, selected.agenda.revision, 'deciding', { now: now() });
         if (deciding?.status !== 'deciding') return { ...status(), busy: false, skipped: 'changed' };
@@ -364,14 +380,24 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         mood: moodSnapshot(store, now()), recentMessages: context.messages,
         reading: { type: selected.index.type, title: selected.memory.title, readAt: selected.index.readAt,
           excerpt: selected.memory.content.slice(0, 3200), totalLength: selected.memory.content.length, revisedAt: selected.memory.updatedAt }, signal: activeController.signal });
+      for (const { memoryId, signature } of references.memoryVersions) {
+        if (memoryVersions.has(memoryId) && memoryVersions.get(memoryId) !== signature) throw new Error('主动拟聊的记忆版本已变化。');
+        memoryVersions.set(memoryId, signature);
+      }
       check();
       if (!decision || typeof decision.text !== 'string' || decision.text.length > 600 || decision.text.includes('\0') || /https?:\/\/|www\./i.test(decision.text)) throw new Error('主动私聊内容格式无效。');
       const text = decision.text.trim();
       if (!text) { update({ lastOutcome: 'quiet' }); return { ...status(), busy: false, skipped: 'quiet' }; }
       const memoryIds = [...new Set([...(['reading', 'theme'].includes(selected.kind) ? [selected.memory.id] : selected.kind === 'agenda' ? [selected.evidence.memory.id] : []), ...references.memoryIds])];
-      const conversationIds = [...new Set([...context.conversationIds, ...(selected.kind === 'conversation' ? [selected.message.id] : selected.kind === 'agenda' ? [selected.evidence.message.id] : []), ...references.conversationIds])];
+      const conversationIds = references.conversationIds;
+      const userMessageIds = [...new Set([...context.userMessageIds, ...(selected.kind === 'conversation' ? [selected.message.id] : selected.kind === 'agenda' ? [selected.evidence.message.id] : []), ...references.userMessageIds])];
       const historyMessageIds = [...new Set([...context.historyMessageIds, ...references.historyMessageIds])];
-      if (memoryIds.length + conversationIds.length + historyMessageIds.length > 120) throw new Error('主动拟聊来源索引超过保存上限。');
+      if (memoryIds.length + conversationIds.length + historyMessageIds.length + userMessageIds.length > 120) throw new Error('主动拟聊来源索引超过保存上限。');
+      const recordedVersions = memoryIds.map(memoryId => ({ memoryId, signature: memoryVersions.get(memoryId) }));
+      if (recordedVersions.some(item => !item.signature)) throw new Error('主动拟聊缺少实际读取的记忆版本。');
+      const assistantMetadata = { mode: 'live', proactive: true, kind: selected.kind, memoryIds, memoryVersions: recordedVersions,
+        conversationIds, userMessageIds, historyMessageIds, sourceKey: selected.sourceKey, platform: recipient.platform || 'qq' };
+      if (JSON.stringify({ ...assistantMetadata, messageId: 'x'.repeat(recipient.platform === 'feishu' ? 128 : 100) }).length > 16000) throw new Error('主动拟聊来源索引超过保存大小上限。');
       const message = text + (selected.url ? `\n\n来源：${selected.url}` : '');
       let result, attempted = false;
       const beforeSend = () => {
@@ -402,8 +428,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       const confirmed = (typeof messageId === 'string' && messageId.length > 0 && messageId.length <= (recipient.platform === 'feishu' ? 128 : 100) && !messageId.includes('\0')) || Number.isSafeInteger(messageId);
       if (confirmed && current()) {
         store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: message,
-          metadata: { mode: 'live', proactive: true, kind: selected.kind, memoryIds, conversationIds, historyMessageIds,
-            sourceKey: selected.sourceKey, platform: recipient.platform || 'qq', messageId: String(messageId) } });
+          metadata: { ...assistantMetadata, messageId: String(messageId) } });
         event(selected, 'success', message, { messageId: String(messageId) });
         update({ lastOutcome: 'success', lastSuccess: stamp(now()), lastError: '' });
         if (selected.attempt) store.transitionFollowup(selected.attempt.id, selected.attempt.revision, 'sent', { now: now() });

@@ -17,18 +17,24 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials }) {
     if (!record) return null;
     const scopes = [record.scope, 'public'];
     const history = store.listConversationHistory(record.scope, 6).filter(item => item.id !== record.messageId);
-    const memoryCurrent = memory => {
-      if (memory.sourceType !== 'conversation') return true;
-      try { return !store.isConversationSourceBlocked(memory.scope, memory.sourceRef); }
-      catch { return false; }
-    };
-    const memories = store.searchMemories(record.notice.content, scopes, 6).filter(memoryCurrent);
+    const memoryVersions = new Map();
+    const memories = store.searchMemories(record.notice.content, scopes, 6).flatMap(memory => {
+      const evidence = store.getMemoryVersionEvidence(memory.id, scopes);
+      if (!evidence || JSON.stringify(evidence.memory) !== JSON.stringify(memory)) return [];
+      memoryVersions.set(memory.id, evidence.signature);
+      return [memory];
+    });
+    const assistantMetadata = { mode: 'live', platform: 'bilibili', replyTo: record.messageId, sourceNoticeKey: record.key,
+      userMessageIds: [record.messageId, ...history.filter(item => item.role === 'user').map(item => item.id)],
+      memoryIds: memories.map(item => item.id), memoryVersions: [...memoryVersions].map(([memoryId, signature]) => ({ memoryId, signature })),
+      historyMessageIds: history.filter(item => item.role === 'assistant').map(item => item.id) };
+    if (JSON.stringify({ ...assistantMetadata, replyId: '9'.repeat(16) }).length > 16000) throw new Error('B站回复来源索引超过保存大小上限。');
     const snapshot = JSON.stringify({ record, history, memories });
     const url = `https://www.bilibili.com/video/${record.notice.bvid}/`;
     function sourcesCurrent() {
       try {
         const current = store.getBiliNotice(record.key);
-        if (!current || !memories.every(memoryCurrent)) return false;
+        if (!current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)) return false;
         // Only our own delivery state may change while the request is in flight.
         const original = { ...current, state: record.state, updatedAt: record.updatedAt };
         delete original.replyId;
@@ -52,12 +58,10 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials }) {
       finish(state, { replyId, text } = {}) {
         const saved = store.finishBiliReply(record.key, state, replyId ? { replyId } : {});
         if (state !== 'sent' || !text) return true;
-        if (saved?.state !== 'sent' || !sourcesCurrent()) return false;
-        const conversationIds = [record.messageId, ...history.filter(item => item.role === 'user').map(item => item.id)];
+        if (saved?.state !== 'sent' || signal?.aborted || !sourcesCurrent()) return false;
         try {
           store.addMessage({ scope: record.scope, role: 'assistant', actor: 'agent', content: text,
-            metadata: { mode: 'live', platform: 'bilibili', replyId, replyTo: record.messageId, sourceNoticeKey: record.key, conversationIds,
-              memoryIds: memories.map(item => item.id), historyMessageIds: history.filter(item => item.role === 'assistant').map(item => item.id) } });
+            metadata: { ...assistantMetadata, replyId } });
           store.saveMemory({ title: `评论区交流：${record.notice.title || record.notice.content.slice(0, 40)}`.slice(0, 200), scope: record.scope, category: 'event',
             content: `【B站公开评论；已回复并取得平台编号，不代表已通过所有审核】\n对方写道：${record.notice.content}\n来源：${url}`,
             sourceType: 'conversation', sourceRef: record.sourceEventId });
