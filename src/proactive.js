@@ -158,18 +158,18 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     return references;
   }
 
-  function dueAgenda(time) {
+  function dueAgendas(time) {
+    const candidates = [];
     for (const item of store.listFollowups({ includeTerminal: false, limit: 20 })) {
       if (item.status !== 'pending') continue;
       if (time >= Date.parse(item.expiresAt)) { store.transitionFollowup(item.id, item.revision, 'expired', { now: time }); continue; }
       const evidence = store.getFollowupEvidence(item.id);
       if (!evidence) { store.transitionFollowup(item.id, item.revision, 'invalidated', { now: time }); continue; }
       const recipient = getRecipient({ sourceEventId: item.sourceEventId, allowLegacyQQ: true, legacyAccountId: item.recipientAccountId });
-      if (!recipient) continue;
-      if (item.recipientAccountId !== recipient.accountId) { store.transitionFollowup(item.id, item.revision, 'paused', { now: time }); continue; }
-      if (time >= Date.parse(item.dueAt) && time >= Date.parse(item.nextDecisionAt)) return { kind: 'agenda', agenda: item, evidence, recipient, url: '' };
+      if (recipient && item.recipientAccountId !== recipient.accountId) { store.transitionFollowup(item.id, item.revision, 'paused', { now: time }); continue; }
+      if (time >= Date.parse(item.dueAt) && time >= Date.parse(item.nextDecisionAt)) candidates.push({ kind: 'agenda', agenda: item, evidence, recipient, url: '' });
     }
-    return null;
+    return candidates;
   }
 
   async function run() {
@@ -179,10 +179,12 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     if (!config.enabled || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
     if (!recovered) { store.recoverFollowups(time); recovered = true; }
     if (!config.dailyLimit || !config.desire) return { ...status(), skipped: 'quiet' };
-    let selected = dueAgenda(time);
-    let recipient = selected?.recipient || getRecipient();
-    if (!recipient || !store.getSetting('model')?.apiKey) return { ...status(), skipped: recipient ? 'no_model' : 'no_recipient' };
-    if (!canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
+    const agendas = dueAgendas(time);
+    let selected = agendas[0];
+    let recipient = selected ? selected.recipient : getRecipient();
+    if (!recipient && !selected) return { ...status(), skipped: 'no_recipient' };
+    if (!store.getSetting('model')?.apiKey) return { ...status(), skipped: 'no_model' };
+    if (!selected && !canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
     let state = plan(config, time);
     if (time < Date.parse(state.dayStartAt) || !inHours(time, config)) return { ...status(), skipped: 'outside_hours' };
     if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), skipped: 'daily_limit' };
@@ -208,45 +210,51 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     }
     if (!selected && companion && typeof generateTheme === 'function' && canGenerateConversation() === true) selected = theme(time);
     selected ||= reading(time);
-    const recipientSource = selected?.kind === 'agenda' ? { sourceEventId: selected.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: selected.agenda.recipientAccountId }
-      : selected?.kind === 'conversation' ? { messageId: selected.message.id }
-        : selected?.kind === 'theme' && selected.memory.sourceType === 'conversation' ? { sourceEventId: selected.memory.sourceRef } : {};
-    recipient = getRecipient(recipientSource);
-    if (!recipient) return { ...status(), skipped: 'no_recipient' };
-    if (!canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
+    const recipientSource = candidate => candidate?.kind === 'agenda' ? { sourceEventId: candidate.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: candidate.agenda.recipientAccountId }
+      : candidate?.kind === 'conversation' ? { messageId: candidate.message.id }
+        : candidate?.kind === 'theme' && candidate.memory.sourceType === 'conversation' ? { sourceEventId: candidate.memory.sourceRef } : {};
+    recipient = getRecipient(recipientSource(selected));
+    if (!recipient && selected?.kind !== 'agenda') return { ...status(), skipped: 'no_recipient' };
+    if (selected?.kind !== 'agenda' && !canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
     if (!selected || (selected.kind !== 'agenda' && draw() >= config.desire / 100)) {
       save({ ...state, lastOutcome: 'quiet' });
       return { ...status(), skipped: selected ? 'quiet' : 'no_reading' };
     }
-    if (selected.kind === 'agenda') {
-      selected.sourceKey = createHash('sha256').update(`agenda:${selected.agenda.id}:${selected.agenda.revision}`).digest('hex');
-    }
+    selected.recipient = recipient;
+    const candidates = selected.kind === 'agenda' ? agendas : [selected];
+    for (const candidate of agendas) candidate.sourceKey = createHash('sha256').update(`agenda:${candidate.agenda.id}:${candidate.agenda.revision}`).digest('hex');
     busy = true;
     const activeController = controller = new AbortController();
     const context = recentContext();
     let sourcesCurrent = () => true;
-    const agendaEvidence = () => {
-      const evidence = store.getFollowupEvidence(selected.agenda.id);
+    const agendaEvidence = candidate => {
+      const evidence = store.getFollowupEvidence(candidate.agenda.id);
       // Only our exact transitions may keep the original pending evidence current.
-      return evidence && [selected.deciding, selected.attempt].some(own => own && JSON.stringify(evidence.followup) === JSON.stringify(own))
-        ? { ...evidence, followup: selected.evidence.followup } : evidence;
+      return evidence && [candidate.deciding, candidate.attempt].some(own => own && JSON.stringify(evidence.followup) === JSON.stringify(own))
+        ? { ...evidence, followup: candidate.evidence.followup } : evidence;
     };
-    const dependencies = () => JSON.stringify({ recipient: getRecipient(recipientSource), persona: store.getSetting('persona'), model: store.getSetting('model'),
-      channel: store.getSetting(recipient.platform || 'qq'),
-      ...(selected.kind === 'reading' ? { memory: store.getMemory(selected.memory.id), bookExists: !selected.bookId || Boolean(store.getBook(selected.bookId)) }
-        : selected.kind === 'agenda' ? { agenda: agendaEvidence(), conversationAvailable: canGenerateConversation() === true }
-        : selected.kind === 'theme' ? { theme: store.getCompanionMemoryEvidence(selected.memory.id), conversationAvailable: canGenerateConversation() === true }
-        : { seed: conversationSeed(now(), selected.message.id), conversationAvailable: canGenerateConversation() === true }),
+    const commonDependencies = () => JSON.stringify({ persona: store.getSetting('persona'), model: store.getSetting('model'),
       ...(companion ? { companionAvailable: canAssessCompanion() === true } : {}),
       recentContext: recentContext(), lastUserId: latestUser()?.id });
-    const snapshot = dependencies();
+    const dependencies = candidate => JSON.stringify({ recipient: getRecipient(recipientSource(candidate)),
+      channel: candidate.recipient ? store.getSetting(candidate.recipient.platform || 'qq')
+        : { qq: store.getSetting('qq'), feishu: store.getSetting('feishu') },
+      ...(candidate.kind === 'reading' ? { memory: store.getMemory(candidate.memory.id), bookExists: !candidate.bookId || Boolean(store.getBook(candidate.bookId)) }
+        : candidate.kind === 'agenda' ? { agenda: agendaEvidence(candidate), conversationAvailable: canGenerateConversation() === true }
+        : candidate.kind === 'theme' ? { theme: store.getCompanionMemoryEvidence(candidate.memory.id), conversationAvailable: canGenerateConversation() === true }
+        : { seed: conversationSeed(now(), candidate.message.id), conversationAvailable: canGenerateConversation() === true }) });
+    const commonSnapshot = commonDependencies();
+    const snapshots = new Map(candidates.map(candidate => [candidate, dependencies(candidate)]));
+    let selecting = true;
     const sameState = () => !stopped && store.getSetting('proactiveStatus', {}).dayId === state.dayId;
     const current = () => {
       try {
         return sameState() && !activeController.signal.aborted && JSON.stringify(settings()) === state.configSignature
           && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt) && inHours(now(), config)
           && (selected.kind !== 'agenda' || now() >= Date.parse(selected.agenda.dueAt) && now() < Date.parse(selected.agenda.expiresAt))
-          && snapshot === dependencies() && sourcesCurrent() === true;
+          && commonSnapshot === commonDependencies()
+          && (selecting ? candidates : [selected]).every(candidate => snapshots.get(candidate) === dependencies(candidate))
+          && sourcesCurrent() === true;
       } catch { return false; }
     };
     const check = () => { if (!current() || isBusy()) throw new Error('主动私聊已取消。'); };
@@ -256,19 +264,42 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       let decision, references = { memoryIds: [], conversationIds: [], historyMessageIds: [] };
       let impulse;
       check();
-      let ready = false;
-      try { ready = await isRecipientReady(recipient, { signal: activeController.signal }) === true; }
-      catch { /* An unavailable recipient must not consume a model decision. */ }
-      check();
-      if (!ready) {
+      const readiness = new Map();
+      let chosen = false, unavailable;
+      for (const candidate of candidates) {
+        selected = candidate; recipient = candidate.recipient;
+        check();
+        state = store.getSetting('proactiveStatus', {});
+        if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), busy: false, skipped: 'daily_limit' };
+        if (!recipient) { unavailable ||= candidate; continue; }
+        if (!canGenerate(recipient)) continue;
+        const key = JSON.stringify({ recipient, channel: store.getSetting(recipient.platform || 'qq') });
+        let ready = readiness.get(key);
+        if (ready === undefined) {
+          ready = false;
+          try { ready = await isRecipientReady(recipient, { signal: activeController.signal }) === true; }
+          catch { /* An unavailable recipient must not consume a model decision. */ }
+          check();
+          readiness.set(key, ready);
+        }
+        check();
+        state = store.getSetting('proactiveStatus', {});
+        if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), busy: false, skipped: 'daily_limit' };
+        if (!ready) { unavailable ||= candidate; continue; }
+        if (!canGenerate(recipient)) continue;
+        chosen = true;
+        break;
+      }
+      if (!chosen) {
+        if (!unavailable) return { ...status(), busy: false, skipped: 'platform_limit' };
+        selected = unavailable; recipient = selected.recipient;
         const message = '原聊天渠道当前不可用，本次未调用模型或发送消息。';
         update({ lastOutcome: 'unavailable', lastError: message });
         event(selected, 'unavailable', message);
         return { ...status(), busy: false, skipped: 'unavailable' };
       }
-      if (!canGenerate(recipient)) return { ...status(), busy: false, skipped: 'platform_limit' };
-      state = store.getSetting('proactiveStatus', {});
-      if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), busy: false, skipped: 'daily_limit' };
+      selecting = false;
+      check();
       if (selected.kind === 'agenda') {
         const deciding = store.transitionFollowup(selected.agenda.id, selected.agenda.revision, 'deciding', { now: now() });
         if (deciding?.status !== 'deciding') return { ...status(), busy: false, skipped: 'changed' };
