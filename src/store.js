@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { imageMimeType } from './images.js';
 import { assertPublicUrl } from './public-fetch.js';
 import { normalizeMoodState } from './mood.js';
+import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -111,25 +112,38 @@ function memoryFields(input) {
 
 function eventFields(input) {
   record(input, '经历');
+  const type = text(input.type, '经历类型', 40);
+  const content = text(input.content, '经历正文', LIMITS.event);
+  const metadata = metadataValue(input.metadata);
+  if (Object.hasOwn(metadata, 'qqBatchSources')) {
+    if (type !== 'message') invalid('QQ 合并消息来源只能保存在消息经历中。');
+    metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
+  }
   return {
-    type: text(input.type, '经历类型', 40),
+    type,
     scope: scopeValue(input.scope),
     actor: text(input.actor === undefined ? 'owner' : input.actor, '参与者', 160),
-    content: text(input.content, '经历正文', LIMITS.event),
+    content,
     sourceRef: text(input.sourceRef === undefined ? '' : input.sourceRef, '来源引用', LIMITS.sourceRef, { empty: true }),
-    metadata: metadataValue(input.metadata),
+    metadata,
   };
 }
 
 function messageFields(input) {
   record(input, '消息');
   if (!['user', 'assistant'].includes(input.role)) invalid('消息角色须为 user 或 assistant。');
+  const content = text(input.content, '消息正文', input.role === 'user' ? 8000 : 16000);
+  const metadata = metadataValue(input.metadata);
+  if (Object.hasOwn(metadata, 'qqBatchSources')) {
+    if (input.role !== 'user') invalid('QQ 合并消息来源只能保存在用户消息中。');
+    metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
+  }
   return {
     scope: scopeValue(input.scope),
     role: input.role,
-    content: text(input.content, '消息正文', input.role === 'user' ? 8000 : 16000),
+    content,
     actor: text(input.actor === undefined ? 'owner' : input.actor, '参与者', 160),
-    metadata: metadataValue(input.metadata),
+    metadata,
   };
 }
 
@@ -504,7 +518,8 @@ export function createStore(dbPath) {
       if (blockedUsers.has(user.id) || !reply) continue;
       const assistantHidden = hiddenAssistants.has(reply.id);
       turns.push({ id: user.id, scope: user.scope, actor: user.actor, createdAt: user.createdAt, user: user.content,
-        assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden });
+        assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden,
+        ...qqBatchSourceInfo(user.metadata.qqBatchSources, user.content) });
     }
     return { messages, turns, blockedUsers, hiddenAssistants };
   }
@@ -544,11 +559,13 @@ export function createStore(dbPath) {
       if (!Array.isArray(scopes) || scopes.length > 100) invalid('来源查询须提供最多 100 个明确的可见范围。');
       const permitted = [...new Set(scopes.map(scopeValue))];
       if (!permitted.length) return null;
-      const source = get(`SELECT e.id AS eventId, e.actor, e.created_at AS createdAt, e.content
+      const source = get(`SELECT e.id AS eventId, e.actor, e.created_at AS createdAt, e.content, e.metadata AS sourceMetadata
         FROM memories m JOIN events e ON e.id = m.source_ref AND e.scope = m.scope
         WHERE m.id = ? AND m.deleted_at IS NULL AND m.source_type = 'conversation' AND e.type = 'message'
           AND m.scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted);
-      return source ? { ...source } : null;
+      if (!source) return null;
+      const { sourceMetadata, ...quote } = source;
+      return { ...quote, ...qqBatchSourceInfo(JSON.parse(sourceMetadata).qqBatchSources, source.content) };
     },
     saveMemory(input, { auditEvent } = {}) {
       const fields = memoryFields(input);
@@ -806,9 +823,11 @@ export function createStore(dbPath) {
         score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens) }))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.turn) : [];
       const total = matches.length;
-      const items = offset < total ? matches.slice(offset, offset + limit).map(turn => ({ ...turn,
-        user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
-        userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 })) : [];
+      const items = offset < total ? matches.slice(offset, offset + limit).map(turn => {
+        const { qqBatchNotice, ...summary } = turn;
+        return { ...summary, user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
+          userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 };
+      }) : [];
       return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null };
     },
     getConversation(id, scopes, excludeMessageId = '') {

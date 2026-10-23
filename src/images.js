@@ -16,23 +16,27 @@ function checkCount(images) {
   if (!Array.isArray(images) || images.length > MAX_IMAGES) throw new Error('每条消息最多支持 4 张图片。');
 }
 
-export async function loadQQImages(urls) {
+export async function loadQQImages(urls, options = {}) {
+  options.signal?.throwIfAborted();
   checkCount(urls);
   if (!urls.length) return [];
   const addresses = urls.map(value => {
     if (typeof value !== 'string' || !value) throw new Error('QQ 图片缺少公开下载地址，请重新发送原图。');
     return assertPublicUrl(value).href;
   });
-  const signal = AbortSignal.timeout(20000);
+  const timeout = AbortSignal.timeout(20000);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   const images = [];
   let total = 0;
   for (const url of addresses) {
+    signal.throwIfAborted();
     const remaining = MAX_TOTAL_BYTES - total;
     if (!remaining) throw new Error('每条消息的图片合计不能超过 20 MiB。');
     const { bytes } = await fetchPublicResource(url, {
       signal, maxBytes: Math.min(MAX_IMAGE_BYTES, remaining), timeoutMs: 20000, maxRedirects: 3,
       headers: { Accept: 'image/jpeg, image/png, image/webp, image/gif' },
     });
+    signal.throwIfAborted();
     const mimeType = imageMimeType(bytes);
     total += bytes.length;
     images.push({ mimeType, dataUrl: `data:${mimeType};base64,${bytes.toString('base64')}` });

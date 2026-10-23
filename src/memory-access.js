@@ -7,7 +7,8 @@ export function allowedScopes(scope) {
 export function withConversationSource(store, memory, scope) {
   const source = store.getMemorySource(memory.id, allowedScopes(scope));
   const parts = store.getReadingParts(memory.id, allowedScopes(scope));
-  return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt } } : {}),
+  return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt,
+    ...(source.qqBatchCount ? { qqBatchCount: source.qqBatchCount } : {}) } } : {}),
     ...(parts?.length ? { readingParts: parts } : {}) };
 }
 
@@ -61,12 +62,13 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
       if (name === 'read_conversation') {
         const turn = store.getConversation(args.id, scopes, excludeMessageId);
         if (!turn) throw new Error('对话不存在、未完成或当前场合不可检索。');
-        const userHeader = `用户原话（${turn.createdAt}，发言者 ${turn.actor}）：\n`;
+        const userHeader = `用户原话（${turn.createdAt}，发言者 ${turn.actor}${turn.qqBatchCount ? `，${turn.qqBatchCount}条QQ消息合并` : ''}）：\n`;
         const assistantHeader = turn.assistantHidden ? '\n\n助手历史回复因引用了已更正或忘记的来源而不提供。\n'
           : `\n\n助手历史回复（${turn.replyAt}，可能有误，不代表用户事实）：\n`;
         const content = userHeader + turn.user + assistantHeader + turn.assistant;
         if (offset >= content.length) throw new Error('对话正文位置超出范围。');
         return memoryPage({ id: turn.id, scope: turn.scope, actor: turn.actor, createdAt: turn.createdAt, replyAt: turn.replyAt, assistantHidden: turn.assistantHidden, content,
+          ...(turn.qqBatchCount ? { qqBatchCount: turn.qqBatchCount, qqBatchNotice: turn.qqBatchNotice } : {}),
           sections: [{ role: 'user', startOffset: userHeader.length, endOffset: userHeader.length + turn.user.length },
             { role: 'assistant', startOffset: userHeader.length + turn.user.length + assistantHeader.length, endOffset: content.length }] }, offset, 4000);
       }
@@ -81,6 +83,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
       if (offset >= source.content.length) throw new Error('对话原话位置超出范围。');
       const end = Math.min(offset + 4000, source.content.length);
       return { memoryId: args.id, eventId: source.eventId, actor: source.actor, recordedAt: source.createdAt,
+        ...(source.qqBatchCount ? { qqBatchCount: source.qqBatchCount, qqBatchNotice: source.qqBatchNotice } : {}),
         content: source.content.slice(offset, end), offset, totalLength: source.content.length,
         nextOffset: end < source.content.length ? end : null };
     },
