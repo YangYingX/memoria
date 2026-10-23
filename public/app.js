@@ -518,7 +518,7 @@ function renderProactiveStatus(status = {}) {
   const config = state.data?.settings.proactive || {};
   const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
   $('proactive-summary').textContent = config.enabled
-    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。先核对到期约定；${state.data?.dshStatus?.enabled ? state.data?.mateStatus?.enabled && state.data?.mateStatus?.ready ? '随机话题优先延续近期私聊，也可从核验过的旧主题生发。' : '随机话题优先延续近期私聊，再考虑实际见闻。' : '随机话题根据实际读过的资料考虑。'}她会在允许的时段内等待合适的开口机会。`
+    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。先核对到期约定；${state.data?.dshStatus?.enabled ? state.data?.mateStatus?.enabled && state.data?.mateStatus?.ready ? '随机话题优先延续近期私聊，也可从核验过的旧主题生发。' : '随机话题优先延续近期私聊、分享实际见闻；没有新线索时也可核对旧主题，未回应后暂停这条补充路径。' : '随机话题根据实际读过的资料考虑。'}她会在允许的时段内等待合适的开口机会。`
     : '主动私聊已关闭。保存开启后才安排；已经发起的发送无法保证撤回。';
   $('proactive-next').textContent = !config.enabled ? '启用后安排' : inDay && status.nextRunAt
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })

@@ -217,6 +217,12 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     }
     if (!selected && companion && typeof generateTheme === 'function' && canGenerateConversation() === true) selected = theme(time);
     selected ||= reading(time);
+    let nativeTheme = false;
+    if (!selected && !companion && typeof generateTheme === 'function' && canGenerateConversation() === true
+      && store.getCompanionStats({ now: time }).unanswered === 0) {
+      selected = theme(time);
+      nativeTheme = Boolean(selected);
+    }
     const recipientSource = candidate => candidate?.kind === 'agenda' ? { sourceEventId: candidate.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: candidate.agenda.recipientAccountId }
       : candidate?.kind === 'conversation' ? { messageId: candidate.message.id }
         : candidate?.kind === 'theme' && candidate.memory.sourceType === 'conversation' ? { sourceEventId: candidate.memory.sourceRef } : {};
@@ -248,7 +254,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         ? { ...evidence, followup: candidate.evidence.followup } : evidence;
     };
     const commonDependencies = () => JSON.stringify({ persona: store.getSetting('persona'), model: store.getSetting('model'),
-      ...(companion ? { companionAvailable: canAssessCompanion() === true } : {}),
+      ...(companion || nativeTheme ? { companionAvailable: canAssessCompanion() === true } : {}),
       recentContext: recentContext(), lastUserId: latestUser()?.id });
     const dependencies = candidate => JSON.stringify({ recipient: getRecipient(recipientSource(candidate)),
       channel: candidate.recipient ? store.getSetting(candidate.recipient.platform || 'qq')
@@ -259,13 +265,14 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         : { seed: conversationSeed(now(), candidate.message.id), conversationAvailable: canGenerateConversation() === true }) });
     const commonSnapshot = commonDependencies();
     const snapshots = new Map(candidates.map(candidate => [candidate, dependencies(candidate)]));
-    let selecting = true;
+    let selecting = true, attempted = false;
     const sameState = () => !stopped && store.getSetting('proactiveStatus', {}).dayId === state.dayId;
     const current = () => {
       try {
         return sameState() && !activeController.signal.aborted && JSON.stringify(settings()) === state.configSignature
           && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt) && inHours(now(), config)
           && (selected.kind !== 'agenda' || now() >= Date.parse(selected.agenda.dueAt) && now() < Date.parse(selected.agenda.expiresAt))
+          && (!nativeTheme || store.getCompanionStats({ now: now() }).unanswered === (attempted ? 1 : 0))
           && commonSnapshot === commonDependencies()
           && (selecting ? candidates : [selected]).every(candidate => snapshots.get(candidate) === dependencies(candidate))
           && versionsCurrent() && sourcesCurrent() === true;
@@ -399,7 +406,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         conversationIds, userMessageIds, historyMessageIds, sourceKey: selected.sourceKey, platform: recipient.platform || 'qq' };
       if (JSON.stringify({ ...assistantMetadata, messageId: 'x'.repeat(recipient.platform === 'feishu' ? 128 : 100) }).length > 16000) throw new Error('主动拟聊来源索引超过保存大小上限。');
       const message = text + (selected.url ? `\n\n来源：${selected.url}` : '');
-      let result, attempted = false;
+      let result;
       const beforeSend = () => {
         check();
         if (selected.kind === 'agenda') {

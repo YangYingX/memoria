@@ -1661,6 +1661,12 @@ export function createStore(dbPath) {
       if (Object.keys(input).some(key => key !== 'now')) invalid('陪伴输入参数无效。');
       return companionInputs(input.now === undefined ? Date.now() : input.now);
     },
+    getCompanionStats(input = {}) {
+      record(input, '陪伴统计');
+      if (Object.keys(input).some(key => key !== 'now')) invalid('陪伴统计参数无效。');
+      const now = integer(input.now === undefined ? Date.now() : input.now, '陪伴统计时间', 0, 8640000000000000);
+      return companionStats(companionContacts(), now);
+    },
     commitCompanionState(input) {
       record(input, '陪伴状态提交');
       const keys = ['expectedRevision', 'expectedOwnerId', 'state', 'ownerCursor', 'opportunityKey'];
