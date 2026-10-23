@@ -436,7 +436,7 @@ function fillSettings() {
   $('drawing-weekly-limit').value = drawing.weeklyLimit ?? 3;
   $('self-expression-enabled').checked = Boolean(selfExpression.enabled);
   $('self-expression-desire').value = selfExpression.desire ?? 45;
-  $('self-expression-daily-limit').value = selfExpression.dailyLimit ?? 20;
+  $('self-expression-daily-limit').value = selfExpression.dailyLimit ?? 80;
   $('self-expression-cooldown').value = selfExpression.cooldownMinutes ?? 360;
   $('self-expression-start-hour').value = selfExpression.startHour ?? 9;
   $('self-expression-end-hour').value = selfExpression.endHour ?? 23;
@@ -444,14 +444,14 @@ function fillSettings() {
   $('self-expression-avatar-days').value = selfExpression.avatarIntervalDays ?? 7;
   const expressionQQ = selfExpression.platforms?.qq || {};
   for (const name of ['enabled', 'post', 'signature', 'avatar']) $('self-expression-qq-' + name).checked = expressionQQ[name] ?? true;
-  $('self-expression-qq-daily-limit').value = expressionQQ.dailyLimit ?? 20;
+  $('self-expression-qq-daily-limit').value = expressionQQ.dailyLimit ?? 80;
   $('self-expression-qq-visibility').value = expressionQQ.qzoneVisibility ?? 4;
   const expressionHeybox = selfExpression.platforms?.heybox || {};
   $('self-expression-heybox-enabled').checked = Boolean(expressionHeybox.enabled);
   $('self-expression-heybox-post').checked = expressionHeybox.post ?? true;
   $('self-expression-heybox-comment').checked = Boolean(expressionHeybox.comment);
   $('self-expression-heybox-reply').checked = Boolean(expressionHeybox.reply);
-  $('self-expression-heybox-daily-limit').value = expressionHeybox.dailyLimit ?? 20;
+  $('self-expression-heybox-daily-limit').value = expressionHeybox.dailyLimit ?? 80;
   $('self-expression-heybox-topic').value = expressionHeybox.topic || '盒友杂谈';
   $('books-enabled').checked = Boolean(books.enabled);
   $('books-daily-limit').value = books.dailyLimit ?? 2;
@@ -494,7 +494,7 @@ function renderSelfExpressionStatus(status = {}) {
   const qqCounts = inDay ? status.platformAttempts?.qq || {} : {};
   const heybox = config.platforms?.heybox || {};
   const heyboxCounts = inDay ? status.platformAttempts?.heybox || {} : {};
-  const outcomes = { success: '已确认完成', review: '已提交，待平台审核', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
+  const outcomes = { success: '已确认完成', review: '已提交，待平台审核', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', checking: '正在检查平台连接', unavailable: '平台接入暂不可用', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
   const actionNames = { post: '空间动态', signature: '签名', avatar: '头像' };
   const avatarNames = { hello: '打招呼', happy: '开心', thinking: '思考', comfort: '安慰' };
   $('self-expression-summary').textContent = !config.enabled ? '自主表达尚未启用。可以在「人格与设置」中安排表达习惯。'
@@ -506,10 +506,10 @@ function renderSelfExpressionStatus(status = {}) {
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
     : '今天暂无后续机会';
   $('self-expression-next').textContent = next;
-  $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 20} 次（全平台合计）`;
+  $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 80} 次（全平台合计）`;
   $('self-expression-outcome').textContent = status.busy ? '正在考虑表达…' : outcomes[status.lastOutcome] || '还没有记录';
   const heyboxTotal = (heyboxCounts.post || 0) + (heyboxCounts.comment || 0) + (heyboxCounts.reply || 0);
-  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} / ${Math.max(6, config.dailyLimit ?? 20)} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 20} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次；小黑盒公开表达 ${heyboxTotal} / ${heybox.dailyLimit ?? 20} 次（发帖 ${heyboxCounts.post || 0}、评论 ${heyboxCounts.comment || 0}、回复 ${heyboxCounts.reply || 0}）。尝试失败也计次。`;
+  $('self-expression-decisions').textContent = `今日已思考 ${inDay ? status.decisionAttempts || 0 : 0} / ${Math.max(6, config.dailyLimit ?? 80)} 次；QQ 动态 ${qqCounts.post || 0} / ${qq.dailyLimit ?? 80} 次，签名 ${qqCounts.signature || 0} / 1 次，头像 ${qqCounts.avatar || 0} 次；小黑盒公开表达 ${heyboxTotal} / ${heybox.dailyLimit ?? 80} 次（发帖 ${heyboxCounts.post || 0}、评论 ${heyboxCounts.comment || 0}、回复 ${heyboxCounts.reply || 0}）。尝试失败也计次。`;
   const platformStatus = $('self-expression-platform-status');
   platformStatus.replaceChildren();
   for (const [name, label] of Object.entries(actionNames)) {

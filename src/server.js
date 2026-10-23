@@ -117,6 +117,13 @@ function makeSelfExpressionJobs() {
       if (platform === 'qq') return store.getSetting('qq').enabled;
       try { return Boolean(heyboxRuntime()); } catch { return false; }
     },
+    isPlatformReady: async (platform, { signal }) => {
+      signal.throwIfAborted();
+      if (platform === 'qq') return (await testQQ(signal)).ok === true;
+      const state = await heyboxRuntime().check();
+      signal.throwIfAborted();
+      return state.configured === true && state.booted === true && state.heyboxInstalled === true;
+    },
     getAvatars: platform => platform === 'qq' ? getExpressionCatalog().filter(entry => ['hello', 'happy', 'thinking', 'comfort'].includes(entry.id)) : [],
     getDiscussion: async (reading, { signal }) => {
       const runtime = heyboxRuntime();

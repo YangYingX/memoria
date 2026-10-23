@@ -73,7 +73,7 @@ export function createHeyboxPostJournal({ path, accountId, index, createdTimesta
     try { writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 }); renameSync(temporary, path); }
     finally { if (existsSync(temporary)) unlinkSync(temporary); }
   }
-  function guardDigest(digest, { dailyLimit = 20, cooldownMinutes = 360, timeZone = 'Asia/Shanghai' } = {}) {
+  function guardDigest(digest, { dailyLimit = 80, cooldownMinutes = 360, timeZone = 'Asia/Shanghai' } = {}) {
     if (!Number.isInteger(dailyLimit) || dailyLimit < 0 || dailyLimit > 100 || !Number.isInteger(cooldownMinutes)
       || cooldownMinutes < 60 || cooldownMinutes > 1440 || typeof timeZone !== 'string' || timeZone.length > 80) throw new Error('小黑盒发布额度配置无效。');
     let day;

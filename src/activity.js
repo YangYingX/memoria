@@ -6,7 +6,7 @@ const text = (value, limit) => typeof value === 'string' ? value.slice(0, limit)
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 const date = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : '';
 const currentDay = (state, time) => Date.parse(state.dayStartAt) <= time && time < Date.parse(state.dayEndAt);
-const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'cancelled', 'skipped', 'quiet', 'busy', 'limit', 'missed', 'deciding', 'decided']);
+const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'cancelled', 'skipped', 'quiet', 'busy', 'limit', 'missed', 'deciding', 'decided', 'checking', 'unavailable']);
 const outcome = value => outcomes.has(value) ? value : 'unrecorded';
 
 // Only project selected fields: raw scheduler state can contain private settings and errors.
