@@ -30,6 +30,9 @@ import { browseBiliVideos } from './bili-browse.js';
 import { defaultMoodSettings, normalizeMoodSettings, moodSnapshot } from './mood.js';
 import { createMoodJobs } from './mood-jobs.js';
 import { createQQChatBudget, defaultQQChatLimit, normalizeQQChatLimit } from './qq-chat-budget.js';
+import { defaultFeishuSettings, normalizeFeishuSettings } from './feishu-message.js';
+import { createFeishuChat } from './feishu.js';
+import { createFeishuRuntime } from './feishu-runtime.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -44,6 +47,7 @@ const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
   qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit },
+  feishu: defaultFeishuSettings,
   reading: { enabled: false, urls: [], intervalMinutes: 60, dailyLimit: 5 },
   autonomy: defaultAutonomySettings,
   drawing: defaultDrawingSettings,
@@ -66,6 +70,13 @@ let readingBusy = false;
 let activeMutation = 0;
 let attempts = [];
 let pendingBinding = null;
+let feishuChat;
+const feishuRuntime = createFeishuRuntime({ dataDir,
+  getSettings: () => normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)),
+  onEvent: event => feishuChat.receive(event), onReady: () => { void feishuChat.tick(); }, onPause: () => feishuChat?.disconnect() });
+feishuChat = createFeishuChat({ store, transport: feishuRuntime,
+  chat: (scope, message, actor, options) => chat(scope, message, actor, [], '', options),
+  onError: code => store.addEvent({ type: 'error', scope: 'owner', actor: 'feishu', content: '飞书消息处理未完成，未自动重发。', metadata: { platform: 'feishu', code } }) });
 function bindHeyboxOwner(userId) {
   const configPath = join(dataDir, 'android-runtime.json');
   let agentAccountId = '';
@@ -94,7 +105,7 @@ function heyboxRuntime() {
   return createMumuRuntime({ root: config.root, manager: config.manager, index: config.index, createdTimestamp: config.createdTimestamp,
     deviceName: config.deviceName, androidVersion: config.androidVersion, expectedAccountId: config.expectedAccountId, androidCli: config.androidCli });
 }
-const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy || moodJobs?.status().busy });
+const backupJobs = createBackupJobs({ store, root, dataDir, isBusy: () => activeMutation > 0 || readingBusy || feishuChat.status().busy || autonomyJobs?.status().busy || selfExpressionJobs?.status().busy || bookJobs?.status().busy || proactiveJobs?.status().busy || moodJobs?.status().busy });
 function makeAutonomyJobs() {
   return createAutonomyJobs({ store,
     reflect: async reading => {
@@ -374,11 +385,12 @@ function publicSettings() {
   const { apiKey, ...modelView } = model;
   const { accessToken, ...qqView } = qq;
   qqView.dailyChatLimit = normalizeQQChatLimit(qq.dailyChatLimit);
-  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
+  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, feishu: normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)), reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
 function saveSettings(input) {
   const next = {};
+  if (input.feishu) next.feishu = normalizeFeishuSettings(input.feishu);
   if (input.persona) next.persona = { name: text(input.persona.name, '名字', 40), description: text(input.persona.description, '人格设定', 4000) };
   if (input.model) {
     const previous = store.getSetting('model');
@@ -419,7 +431,10 @@ function saveSettings(input) {
   if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) bookJobs.cancel();
   if (['proactive', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) proactiveJobs.cancel();
   if (['mood', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) moodJobs.cancel();
+  if (['feishu', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) feishuChat.cancel();
+  const reconnectFeishu = next.feishu && ['enabled', 'botId', 'expectedFingerprint'].some(key => next.feishu[key] !== store.getSetting('feishu', defaultFeishuSettings)[key]);
   for (const [key, value] of Object.entries(next)) store.setSetting(key, value);
+  if (reconnectFeishu) void feishuRuntime.restart().catch(() => {});
   return publicSettings();
 }
 
@@ -434,7 +449,8 @@ async function readAndRemember(url, scope, actor = 'owner') {
   } finally { readingJobs.delete(key); activeMutation--; }
 }
 
-async function chat(scope, message, actor = 'owner', imageUrls = [], origin = '') {
+async function chat(scope, message, actor = 'owner', imageUrls = [], origin = '', options = {}) {
+  options.signal?.throwIfAborted(); options.assertActive?.();
   moodJobs.cancel();
   if (scope === 'owner' && actor === 'owner') proactiveJobs.cancel();
   const queue = conversationQueues.get(scope) || { tail: Promise.resolve(), pending: 0 };
@@ -442,15 +458,16 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
   queue.pending++; activeMutation++;
   conversationQueues.set(scope, queue);
   const task = queue.tail.then(async () => {
+    options.signal?.throwIfAborted(); options.assertActive?.();
     if (activeConversations.size >= 3) throw new Error('已有 3 个对话同时处理，请稍后再试。');
     activeConversations.add(scope);
     try {
       const images = imageUrls.length ? await loadQQImages(imageUrls) : [];
-      const expressions = [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])];
+      const expressions = options.textOnly ? [] : [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])];
       const collectExpression = origin ? input => store.saveExpression({ ...input, scope, origin, actor }) : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, collectExpression,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, collectExpression, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
-          ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId }) }) } : {}),
+          ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions } : {}) });
       try { moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
@@ -681,7 +698,8 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/feishu/reconnect' && req.method === 'POST') { feishuChat.disconnect(); await feishuRuntime.restart(); return json(res, 200, { status: feishuChat.status(), connection: feishuRuntime.status() }); }
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
       if (path === '/api/bili/login/import' && req.method === 'POST') return json(res, 200, await biliAccount.importLogin(input));
@@ -783,8 +801,9 @@ const server = http.createServer(async (req, res) => {
         pendingBinding = { hash: createHash('sha256').update(code).digest('hex'), expires: Date.now() + 10 * 60000 };
         return json(res, 200, { code, expiresAt: new Date(pendingBinding.expires).toISOString(), command: `绑定 ${code}` });
       }
+      if (path === '/api/bindings/feishu/code' && req.method === 'POST') return json(res, 200, feishuChat.createBinding());
       if (path === '/api/bindings/heybox' && req.method === 'POST') return json(res, 201, { account: bindHeyboxOwner(input.userId) });
-      if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { proactiveJobs.cancel(); store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
+      if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { proactiveJobs.cancel(); feishuChat.cancel(); store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
       if (path === '/api/backups/export' && req.method === 'POST') {
         if (activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再备份。' });
         const archive = encryptBackup(store.exportData(), input.passphrase);
@@ -796,9 +815,12 @@ const server = http.createServer(async (req, res) => {
         if (![1, 2, 3, 4].includes(payload.schemaVersion) || !['memories', 'messages', 'events', 'accounts', 'revisions', 'tombstones'].every(key => Array.isArray(payload[key])) || (payload.schemaVersion >= 2 && !['expressions', 'expressionTombstones'].every(key => Array.isArray(payload[key]))) || (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) || (payload.schemaVersion === 4 && !Array.isArray(payload.conversationBlocks))) throw new Error('备份数据格式不兼容。');
         if (path.endsWith('/preview')) return json(res, 200, { exportedAt: payload.exportedAt, counts: Object.fromEntries(['memories', 'events', 'messages', 'accounts', 'expressions', 'books'].map(key => [key, payload[key]?.length || 0])) });
         if (input.confirm !== true) throw new Error('请先预览并确认恢复。');
-        if (activeMutation || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再恢复。' });
+        if (activeMutation || readingBusy || feishuChat.status().busy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再恢复。' });
         const rollback = join(dataDir, `before-restore-${Date.now()}.pab`);
         writeFileSync(rollback, encryptBackup(store.exportData(), input.passphrase), { mode: 0o600 });
+        feishuChat.cancel();
+        store.setSetting('feishu', { ...store.getSetting('feishu', defaultFeishuSettings), enabled: false });
+        void feishuRuntime.stop().catch(() => {});
         store.importData(payload);
         store.setSetting('reading', { ...store.getSetting('reading'), enabled: false });
         store.setSetting('qq', { ...store.getSetting('qq'), enabled: false });
@@ -821,7 +843,7 @@ const server = http.createServer(async (req, res) => {
         store.setSetting('moodPending', null);
         moodJobs = makeMoodJobs();
         pendingBinding = null;
-        return json(res, 200, { ok: true, rollback, message: '已恢复。QQ、自主活动、自主表达、主动私聊、自主读书、心情评估、定时阅读和自动备份已暂停，跨平台账号绑定已清除，需要重新验证。模型密钥与登录密码保持不变。' });
+        return json(res, 200, { ok: true, rollback, message: '已恢复。QQ、飞书、自主活动、自主表达、主动私聊、自主读书、心情评估、定时阅读和自动备份已暂停，跨平台账号绑定已清除，需要重新验证。模型密钥与登录密码保持不变。' });
       }
       return json(res, 404, { error: '接口不存在。' });
     }
@@ -853,12 +875,14 @@ const timer = setInterval(() => {
   proactiveJobs.tick().catch(error => console.error('Proactive scheduler:', error.message));
   moodJobs.tick().catch(error => console.error('Mood scheduler:', error.message));
   backupJobs.tick().catch(error => console.error('Backup scheduler:', error.message));
+  feishuChat.tick().catch(() => {});
 }, 30000);
 timer.unref();
 server.listen(port, '127.0.0.1', () => {
   console.log(`Persona Agent v${version} — http://127.0.0.1:${port}`);
   console.log(`Data: ${dataDir}`);
+  void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); void biliAccount.close(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const dshStopped = dshRuntime.stop(); server.close(async () => { await dshStopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([feishuRuntime.stop(), feishuChat.stop()]); await biliAccount.close(); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([dshRuntime.stop(), feishuChat.stop(), feishuRuntime.stop()]); server.close(async () => { await stopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });

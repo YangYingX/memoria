@@ -198,6 +198,17 @@
               <label>每天最多尝试几次 B站浏览或读取<input id="dsh-reading-limit" type="number" min="0" max="50" step="1" required><small>默认 6 次，所有聊天场合共用，按 UTC 日期计数；发现候选和读取所选视频合计只计一次，失败也计次，重启或换会话不清零。0 表示暂停新读取，已有记忆仍可翻阅。</small></label>
               <p class="caption">在聊天或网页阅读中提供完整的 B站 BV 视频链接，也可加入固定网址阅读安排。通过只读接口获取字幕文字，不读取画面或音频；全部取得文字分段存入书架。平台验证可能阻止读取；暂停后不自动重试。阅读不消耗公开发布额度。</p>
               <div class="connection-test"><button id="dsh-test" class="button secondary" type="button">检测插件运行层</button><p class="caption">此按钮只检测宿主，不调用模型或访问平台。独立宿主配置方法见仓库部署说明。</p><p id="dsh-test-result" class="connection-result" role="status" hidden></p></div>
+            </div></section>
+            <section class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">11</span><h2>飞书文本聊天</h2><p class="muted">在获准的私聊和群聊中延续同一人格与记忆。需先按部署说明安装专用连接环境。</p></div><div class="settings-fields">
+              <label class="check-label"><input id="feishu-enabled" type="checkbox">启用飞书接入</label>
+              <div class="field-row"><label>机器人标识<input id="feishu-bot-id" maxlength="128" spellcheck="false"></label><label>已核对的账号指纹<input id="feishu-fingerprint" maxlength="64" spellcheck="false"></label></div>
+              <div class="field-row"><label>允许私聊的 Open ID<textarea id="feishu-users" rows="3" placeholder="每行一个 ou_ 开头的账号标识"></textarea></label><label>允许接入的群 Chat ID<textarea id="feishu-groups" rows="3" placeholder="每行一个 oc_ 开头的群标识"></textarea></label></div>
+              <label>每日智能对话尝试上限<input id="feishu-chat-limit" type="number" min="0" max="1000" step="1" required><small>默认200次，按UTC日期计数，独立于QQ聊天；所有模型请求仍共用每日200次总额度。</small></label>
+              <p class="caption">群内普通成员 @ 机器人即可参与；群聊只使用该群的记忆。当前接入文本及原消息回复；失败也占聊天尝试，发送结果未确认时不自动重发。</p>
+              <p id="feishu-summary" class="caption" role="status">正在读取飞书状态…</p>
+              <div><button id="feishu-reconnect" class="button secondary" type="button">重新连接</button> <button id="feishu-binding-code" class="text-button" type="button">生成创建人绑定命令</button></div>
+              <div id="feishu-binding-result" class="code-box" hidden><code id="feishu-binding-command"></code><p id="feishu-binding-expiry" class="caption"></p></div>
+              <p class="caption">绑定命令仅在你的飞书私聊中有效，发送后到“身份与备份”刷新确认，再发一句话验证聊天。昵称、群内自称和机器人凭据均不授予创建人身份。</p>
             </div></section><div class="settings-footer"><p id="settings-result" class="muted" role="status"></p><button class="button primary" type="submit">保存设置 <span>✓</span></button></div></form>
         </section>
       </div>

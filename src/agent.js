@@ -82,7 +82,9 @@ function bookNotes(notes) {
   return result;
 }
 
-export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], expressions = [], collectExpression, bookActions, activityActions, memoryAgent }) {
+export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], expressions = [], collectExpression, bookActions, activityActions, memoryAgent, signal, assertActive }) {
+  if (assertActive !== undefined && typeof assertActive !== 'function') throw new Error('对话状态核对方式无效。');
+  signal?.throwIfAborted(); assertActive?.();
   images = validateConversationImages(images);
   if (!Array.isArray(expressions) || expressions.length > 128 || expressions.some(item => !item || typeof item.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(item.id)
     || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 80 || typeof item.description !== 'string' || item.description.length > 500)) throw new Error('可用表情目录无效。');
@@ -133,6 +135,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const dependencyMemoryIds = new Set();
   let memoryAgentSourcesCurrent;
   function checkMemoryAgentSources() {
+    signal?.throwIfAborted(); assertActive?.();
     if (memoryAgentSourcesCurrent && !memoryAgentSourcesCurrent()) throw new Error('记忆子代理引用的资料已变化，本次回答已停止。');
   }
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
@@ -195,13 +198,14 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       let toolCount = 0;
       for (let round = 0; round < 4; round++) {
         checkMemoryAgentSources();
-        const completion = await requestCompletion({ store, messages, ...(round < 3 ? { tools } : {}) });
+        const completion = await requestCompletion({ store, messages, signal, ...(round < 3 ? { tools } : {}) });
         checkMemoryAgentSources();
         const answer = completion.choices[0].message;
         if (!answer.tool_calls?.length) { reply = typeof answer.content === 'string' ? answer.content.trim() : ''; break; }
         if (answer.tool_calls.length > 5 || toolCount + answer.tool_calls.length > 5) throw new Error('本次对话已达到 5 次工具调用上限。');
         messages.push({ role: 'assistant', content: answer.content ?? null, tool_calls: answer.tool_calls });
         for (const call of answer.tool_calls) {
+          checkMemoryAgentSources();
           toolCount++;
           let result;
           try {
@@ -359,6 +363,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
                 ...(reading.memoryParts ? { readingParts: reading.memoryParts } : {}), ...(reading.page.evidence ? { evidence: reading.page.evidence } : {}) };
             } else throw new Error('不支持此工具。');
           } catch (error) { result = { error: error.message }; }
+          checkMemoryAgentSources();
           messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
         }
       }

@@ -83,6 +83,20 @@ function metadataValue(value = {}) {
   return jsonValue(value, '附加信息');
 }
 
+function feishuMessageKey(value) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) invalid('飞书消息标识须为完整 SHA256。');
+  return value;
+}
+
+function feishuReceipt(value) {
+  record(value, '飞书发送回执');
+  if (Object.keys(value).some(key => !['version', 'messageId', 'conversationId'].includes(key)) || value.version !== 1) invalid('飞书发送回执格式无效。');
+  const messageId = text(value.messageId, '飞书回执消息标识', 512, { trim: false });
+  const conversationId = text(value.conversationId, '飞书回执会话标识', 512, { trim: false });
+  if (/[\u0000-\u001f\u007f]/.test(messageId + conversationId)) invalid('飞书发送回执不能包含控制字符。');
+  return { version: 1, messageId, conversationId };
+}
+
 function memoryFields(input) {
   record(input, '记忆');
   return {
@@ -246,6 +260,9 @@ const eventRow = row => ({ id: row.id, type: row.type, scope: row.scope, actor: 
 const messageRow = row => ({ id: row.id, scope: row.scope, role: row.role, content: row.content, actor: row.actor, metadata: JSON.parse(row.metadata), createdAt: row.created_at });
 const accountRow = row => row ? ({ id: row.id, platform: row.platform, userId: row.user_id, personId: row.person_id, label: row.label, createdAt: row.created_at, updatedAt: row.updated_at }) : null;
 const revisionRow = row => ({ id: row.id, memoryId: row.memory_id, snapshot: JSON.parse(row.snapshot), createdAt: row.created_at });
+const feishuMessageRow = row => row ? ({ key: row.key, state: row.state, input: JSON.parse(row.input), scope: row.scope, actor: row.actor,
+  reply: row.reply === null ? null : JSON.parse(row.reply), code: row.code, receipt: row.receipt === null ? null : JSON.parse(row.receipt),
+  createdAt: row.created_at, updatedAt: row.updated_at }) : null;
 const normalize = value => value.normalize('NFKC').toLowerCase();
 
 export function queryTokens(query) {
@@ -295,6 +312,12 @@ export function createStore(dbPath) {
         label TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(platform, user_id)
       );
       CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS feishu_messages (
+        key TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('received', 'processing', 'reply_ready', 'sending', 'sent', 'unknown', 'failed', 'interrupted', 'canceled')),
+        input TEXT NOT NULL, scope TEXT NOT NULL, actor TEXT NOT NULL, reply TEXT, code TEXT NOT NULL DEFAULT '', receipt TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS feishu_messages_state_created ON feishu_messages(state, created_at);
       CREATE TABLE IF NOT EXISTS expressions (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, scope TEXT NOT NULL,
         origin TEXT NOT NULL, mime_type TEXT NOT NULL, data TEXT NOT NULL, hash TEXT NOT NULL,
@@ -827,6 +850,93 @@ export function createStore(dbPath) {
     },
     hasDelivery(key) {
       return Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', text(key, '消息去重标识', 256)));
+    },
+    receiveFeishuMessage({ key, input, scope, actor }) {
+      key = feishuMessageKey(key);
+      input = jsonValue(record(input, '飞书消息资料'), '飞书消息资料', 32768);
+      const encoded = JSON.stringify(input);
+      if (Buffer.byteLength(encoded, 'utf8') > 32768) invalid('飞书消息资料超过 32 KiB。');
+      scope = scopeValue(scope);
+      actor = text(actor, '飞书发言者', 160);
+      if (scope === 'public' || (scope === 'owner' && actor !== 'owner')) invalid('飞书入站需要已验证的私聊或群聊身份。');
+      return transaction(() => {
+        const previous = get('SELECT * FROM feishu_messages WHERE key = ?', key);
+        if (previous) {
+          if (previous.input !== encoded || previous.scope !== scope || previous.actor !== actor) invalid('同一飞书消息的资料发生冲突，未覆盖原记录。');
+          return { inserted: false, message: feishuMessageRow(previous) };
+        }
+        const now = new Date().toISOString();
+        run("INSERT INTO feishu_messages (key, state, input, scope, actor, created_at, updated_at) VALUES (?, 'received', ?, ?, ?, ?, ?)", key, encoded, scope, actor, now, now);
+        return { inserted: true, message: feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key)) };
+      });
+    },
+    getFeishuMessage(key) {
+      return feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', feishuMessageKey(key)));
+    },
+    listReceivedFeishuMessages(limit = 20) {
+      limit = integer(limit, '待处理飞书消息条数', 1, 100);
+      return all("SELECT * FROM feishu_messages WHERE state = 'received' ORDER BY created_at, rowid LIMIT ?", limit).map(feishuMessageRow);
+    },
+    beginFeishuMessage(key, { dailyLimit, now = new Date().toISOString() }) {
+      key = feishuMessageKey(key);
+      dailyLimit = integer(dailyLimit, '飞书每日聊天上限', 0, 1000);
+      now = timestamp(now, '飞书判断时间');
+      return transaction(() => {
+        const message = feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key));
+        if (!message) invalid('飞书消息不存在。');
+        const day = now.slice(0, 10), saved = api.getSetting('feishuChatStatus', {}) || {};
+        const sameDay = saved.day === day;
+        if (sameDay && (!Number.isSafeInteger(saved.attempts) || saved.attempts < 0)) invalid('飞书当日聊天计数无效。');
+        const attempts = sameDay ? saved.attempts : 0;
+        const dayStamp = value => typeof value === 'string' && value.startsWith(`${day}T`) ? timestamp(value, '飞书额度记录时间') : '';
+        const status = { day, timeZone: 'UTC', dailyLimit, attempts, remaining: Math.max(0, dailyLimit - attempts),
+          lastAttemptAt: sameDay ? dayStamp(saved.lastAttemptAt) : '', lastLimitedAt: sameDay ? dayStamp(saved.lastLimitedAt) : '' };
+        if (message.state !== 'received') return { allowed: false, firstLimited: false, status, message };
+        if (!status.remaining) {
+          const firstLimited = !status.lastLimitedAt;
+          if (firstLimited) {
+            status.lastLimitedAt = now;
+            api.setSetting('feishuChatStatus', { day, attempts, lastAttemptAt: status.lastAttemptAt, lastLimitedAt: now });
+          }
+          return { allowed: false, firstLimited, status, message };
+        }
+        if (!run("UPDATE feishu_messages SET state = 'processing', updated_at = ? WHERE key = ? AND state = 'received'", now, key).changes) return { allowed: false, firstLimited: false, status, message };
+        status.attempts++; status.remaining--; status.lastAttemptAt = now;
+        api.setSetting('feishuChatStatus', { day, attempts: status.attempts, lastAttemptAt: now, lastLimitedAt: status.lastLimitedAt });
+        return { allowed: true, firstLimited: false, status, message: feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key)) };
+      });
+    },
+    saveFeishuReply(key, reply) {
+      key = feishuMessageKey(key);
+      reply = text(reply, '飞书回复', 4000);
+      if (!run("UPDATE feishu_messages SET state = 'reply_ready', reply = ?, updated_at = ? WHERE key = ? AND state = 'processing'",
+        JSON.stringify({ text: reply }), new Date().toISOString(), key).changes) return null;
+      return feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key));
+    },
+    markFeishuSending(key) {
+      key = feishuMessageKey(key);
+      if (!run("UPDATE feishu_messages SET state = 'sending', updated_at = ? WHERE key = ? AND state = 'reply_ready'", new Date().toISOString(), key).changes) return null;
+      return feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key));
+    },
+    finishFeishuMessage(key, outcome, code = '', receipt) {
+      key = feishuMessageKey(key);
+      if (!['sent', 'unknown', 'failed', 'interrupted', 'canceled'].includes(outcome)) invalid('飞书结束状态无效。');
+      if (typeof code !== 'string' || (code && !/^[A-Z][A-Z0-9_]{0,63}$/.test(code))) invalid('飞书结果只接受固定错误代码。');
+      if (outcome === 'sent') receipt = feishuReceipt(receipt);
+      else if (receipt !== undefined) invalid('未确认发送的飞书消息不能保存成功回执。');
+      const beforeSend = ['received', 'processing', 'reply_ready'];
+      const permitted = ['sent', 'unknown'].includes(outcome) ? ['sending'] : beforeSend;
+      if (!run(`UPDATE feishu_messages SET state = ?, code = ?, receipt = ?, updated_at = ? WHERE key = ? AND state IN (${permitted.map(() => '?').join(',')})`,
+        outcome, code, receipt === undefined ? null : JSON.stringify(receipt), new Date().toISOString(), key, ...permitted).changes) return null;
+      return feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key));
+    },
+    recoverFeishuMessages() {
+      return transaction(() => {
+        const now = new Date().toISOString();
+        const interrupted = run("UPDATE feishu_messages SET state = 'interrupted', code = 'RECOVERED_INTERRUPTED', updated_at = ? WHERE state IN ('processing', 'reply_ready')", now).changes;
+        const unknown = run("UPDATE feishu_messages SET state = 'unknown', code = 'RECOVERED_UNKNOWN', updated_at = ? WHERE state = 'sending'", now).changes;
+        return { interrupted, unknown, received: get("SELECT count(*) AS count FROM feishu_messages WHERE state = 'received'").count };
+      });
     },
     hasProactiveAttempt(sourceKey) {
       return Boolean(get("SELECT 1 FROM events WHERE type = 'proactive' AND scope = 'owner' AND actor = 'scheduler' AND source_ref = ? AND json_extract(metadata, '$.outcome') = 'attempt' LIMIT 1", text(sourceKey, '阅读来源标识', 256)));

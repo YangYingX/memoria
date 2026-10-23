@@ -1,0 +1,9 @@
+{
+  "name": "memoria-feishu-dsh-host",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
+    "@xmanrui/dsh-im": "file:./dsh-im-5.4.0-e5b4f2bc.tgz"
+  }
+}

@@ -111,6 +111,10 @@ async function loadState({ fill = false } = {}) {
   $('bili-login-confirm').disabled = !biliAccount?.browserOpen;
   const qqChat = state.data.qqChatStatus;
   $('qq-chat-summary').textContent = qqChat ? `今日 QQ 智能对话 ${qqChat.attempts} / ${qqChat.dailyLimit} 次，剩余 ${qqChat.remaining} 次（UTC）。${qqChat.dailyLimit === 0 ? '已暂停新的智能对话。' : ''}` : '正在读取 QQ 智能对话额度…';
+  const feishu = state.data.feishuStatus, connection = state.data.feishuConnection;
+  $('feishu-summary').textContent = !feishu?.enabled ? '飞书接入已关闭。' : connection?.error || `${connection?.connecting ? '正在连接' : feishu.connected ? '连接已就绪' : '尚未连接'} · 今日聊天尝试 ${feishu.chat.attempts} / ${feishu.chat.dailyLimit} 次（UTC）。`;
+  $('feishu-reconnect').disabled = !feishu?.enabled || connection?.connecting;
+  $('feishu-binding-code').disabled = !feishu?.connected;
   if (fill) { fillSettings(); fillBackupSettings(); }
 }
 
@@ -407,7 +411,7 @@ function renderAccounts() {
 }
 
 function fillSettings() {
-  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, mood = {} } = state.data.settings;
+  const { persona, model, qq, feishu = {}, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, mood = {} } = state.data.settings;
   $('dsh-reading-limit').value = dshReading.dailyReadLimit ?? 6;
   $('mood-enabled').checked = Boolean(mood.enabled);
   $('mood-interval').value = mood.intervalMinutes ?? 180;
@@ -429,6 +433,12 @@ function fillSettings() {
   $('qq-webhook-secret').value = qq.webhookSecret || '';
   $('qq-users').value = qq.allowedUsers.join('\n');
   $('qq-groups').value = qq.allowedGroups.join('\n');
+  $('feishu-enabled').checked = Boolean(feishu.enabled);
+  $('feishu-bot-id').value = feishu.botId || '';
+  $('feishu-fingerprint').value = feishu.expectedFingerprint || '';
+  $('feishu-users').value = (feishu.allowedUsers || []).join('\n');
+  $('feishu-groups').value = (feishu.allowedGroups || []).join('\n');
+  $('feishu-chat-limit').value = feishu.dailyChatLimit ?? 200;
   $('reading-enabled').checked = reading.enabled;
   $('reading-urls').value = reading.urls.join('\n');
   $('reading-interval').value = reading.intervalMinutes;
@@ -899,6 +909,16 @@ $('binding-code').addEventListener('click', () => action($('binding-code'), asyn
   $('binding-result').hidden = false;
 }));
 $('copy-binding').addEventListener('click', () => action($('copy-binding'), async () => { await navigator.clipboard.writeText($('binding-command').textContent); toast('验证命令已复制。'); }));
+$('feishu-binding-code').addEventListener('click', () => action($('feishu-binding-code'), async () => {
+  const binding = await api('/api/bindings/feishu/code', { method: 'POST', data: {} });
+  $('feishu-binding-command').textContent = binding.command;
+  $('feishu-binding-expiry').textContent = `请在你的飞书账号与机器人私聊中发送。到期时间：${date(binding.expiresAt)}。发送后刷新账号列表确认。`;
+  $('feishu-binding-result').hidden = false;
+}));
+$('feishu-reconnect').addEventListener('click', () => action($('feishu-reconnect'), async () => {
+  await api('/api/feishu/reconnect', { method: 'POST', data: {} });
+  await loadState(); toast('已重新核对飞书连接状态。');
+}));
 
 $('model-clear-api-key').addEventListener('change', () => { $('model-api-key').disabled = $('model-clear-api-key').checked; });
 $('drawing-clear-api-key').addEventListener('change', () => { $('drawing-api-key').disabled = $('drawing-clear-api-key').checked; });
@@ -985,6 +1005,7 @@ $('settings-form').addEventListener('submit', event => {
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value) },
+        feishu: { enabled: $('feishu-enabled').checked, botId: $('feishu-bot-id').value.trim(), expectedFingerprint: $('feishu-fingerprint').value.trim(), allowedUsers: lines('feishu-users'), allowedGroups: lines('feishu-groups'), dailyChatLimit: Number($('feishu-chat-limit').value) },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
         autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox', 'bilibili'].filter(source => $('autonomy-source-' + source).checked), interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },

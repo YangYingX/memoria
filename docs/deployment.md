@@ -1,5 +1,7 @@
 # Windows 与 Linux 部署
 
+可选飞书文本通道使用独立的原版 DSH 消息宿主，安装、应用身份核对和后台设置见[飞书接入说明](feishu.md)。主服务与聊天渠道分别配置；默认不启动飞书连接。
+
 Memoria 使用 Node.js 22.16 或更新版本、npm 和 Node 内置 SQLite。Linux 启停脚本需要 Bash 4.4+ 和已挂载的 `/proc`，不依赖 Docker。请安装对应系统与 CPU 架构的 Node.js，再执行 `node --version` 确认版本；不要把 Windows 的 Node 或 `node_modules` 目录复制到 Linux。
 
 小黑盒自主浏览另需 Playwright 的 Chromium headless shell。浏览器系统要求比纯聊天更严格，建议选择官方支持的 Windows 11 / Windows Server 2019 或更新版本，以及 Debian 12/13、Ubuntu 22.04/24.04/26.04；Linux 使用 x86-64 或 arm64。具体支持范围以 [Playwright 系统要求](https://playwright.dev/docs/intro#system-requirements)为准。
