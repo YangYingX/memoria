@@ -375,4 +375,29 @@ Linux 使用对应的 Node.js 与宿主绝对路径。删除 `moodPlugin` 字段
 
 原包状态与诊断文件只用于本次任务的临时目录，结束后清理；不保留自由文本原因或第二套心情库。接入范围为原版对话钩子和判定算法，原版伴侣提示词、七维持久状态和网页界面不在接入范围内，也不开放新的 HTTP 端口、仪表盘或更新页。
 
+### 可选表情关键词检索
+
+先完成上述独立 DSH 宿主安装，再在该宿主目录安装 [`dsh-meme`](https://github.com/yyh-001/dsh-meme) 固定版本：
+
+```bash
+npm install --ignore-scripts --save-exact dsh-meme@0.1.60
+```
+
+Windows PowerShell 使用 `npm.cmd`。保留原包、MIT 许可和生成的锁文件。在数据目录现有 `dsh-runtime.json` 中加入 `expressionPlugin`；保留已有的主动搭话、心情等字段，路径使用自己的绝对路径：
+
+```json
+{
+  "enabled": true,
+  "nodePath": "C:/path/to/node24/node.exe",
+  "hostDirectory": "C:/path/to/memoria-dsh-host",
+  "expressionPlugin": "dsh-meme"
+}
+```
+
+Linux 使用对应系统的路径和依赖。后台的 DSH 状态会显示“按需关键词检索”；点击检测只核对固定包，不调用模型或发送图片。删除 `expressionPlugin` 字段即可恢复原有目录选择。
+
+启用后，聊天想配表情时先按简短关键词搜索，每轮最多两次、每次最多六张；模型看到候选后再选一张。只有内置图库、创建人上传图库和本次原私聊或原群的收藏参与检索，新收藏下次聊天才可选用。删除的图片不再作为新候选，发送前仍核对原场合和图片是否存在。
+
+接入使用原包的本地关键词匹配函数，不是向量检索或视觉模型，不额外调用识图模型，不创建另一套图库或发送通道。关键词搜索本身不花模型额度；模型决定搜索、选择和回复仍占正常聊天轮次与每日总额度，单轮上限不增加。缺包、版本或文件校验失败时，本次检索返回失败，聊天仍可只用文字，不自动重试或发送任意图片路径。
+
 参考：[Node.js 下载](https://nodejs.org/en/download)、[systemd 执行环境与 StateDirectory](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)。

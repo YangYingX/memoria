@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { registerMemoriaLlm } from './dsh-model-adapter.js';
 import { runMemoryAgent } from './dsh-memory-agent.js';
 import { runFeiyuMood } from './dsh-feiyu-mood.js';
+import { inspectMeme, searchExpressions } from './dsh-meme.js';
 
 const versions = { dsh: '0.2.1-rc.2', humanism: '1.7.0' };
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
@@ -207,7 +208,8 @@ function requestCompletion(args) {
 const start = new Promise((accept, reject) => {
   let started = false;
   process.on('message', message => {
-    if (!object(message) || JSON.stringify(message).length > 100000) return reject(new Error('INVALID_MESSAGE'));
+    if (!object(message) || (message.type === 'start' && message.operation?.name === 'search_expressions'
+      ? Buffer.byteLength(JSON.stringify(message), 'utf8') > 512 * 1024 : JSON.stringify(message).length > 100000)) return reject(new Error('INVALID_MESSAGE'));
     if (message.type === 'start' && !started) {
       started = true;
       accept(message);
@@ -251,16 +253,19 @@ async function main(input) {
   const composing = operationName === 'compose_proactive';
   const recalling = operationName === 'recall_memory' || composing;
   const modelTask = noting || judging;
+  const searchingExpressions = operationName === 'search_expressions';
   if (Number(process.versions.node.split('.')[0]) !== 24) fail('NODE_VERSION_MISMATCH');
-  if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'proactivePlugin', 'moodPlugin', 'operation'])
+  if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'proactivePlugin', 'moodPlugin', 'expressionPlugin', 'operation'])
     || ![input.hostDirectory, input.workspace].every(value => typeof value === 'string' && isAbsolute(value))
     || !fields(input.operation, ['name', 'args'])
-    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'evaluate_mood_feiyu', 'recall_memory', 'compose_proactive', ...memoryTools].includes(operationName)
+    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'evaluate_mood_feiyu', 'recall_memory', 'compose_proactive', 'search_expressions', ...memoryTools].includes(operationName)
     || !object(input.operation.args)
     || (operationName === 'inspect' && Object.keys(input.operation.args).length)
     || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'credentialPath')))
     || (Object.hasOwn(input, 'proactivePlugin') && (operationName !== 'inspect' || input.proactivePlugin !== 'dsh-speak-up'))
-    || (Object.hasOwn(input, 'moodPlugin') && (operationName !== 'inspect' || input.moodPlugin !== 'dsh-feiyu-mood'))) fail('INVALID_START');
+    || (Object.hasOwn(input, 'moodPlugin') && (operationName !== 'inspect' || input.moodPlugin !== 'dsh-feiyu-mood'))
+    || (Object.hasOwn(input, 'expressionPlugin') && (operationName !== 'inspect' || input.expressionPlugin !== 'dsh-meme'))
+    || (searchingExpressions && !fields(input.operation.args, ['query', 'items']))) fail('INVALID_START');
   if (modelTask && (!fields(input.operation.args, ['messages']) || !Array.isArray(input.operation.args.messages)
     || input.operation.args.messages.length !== 1 || !fields(input.operation.args.messages[0], ['role', 'content'])
     || input.operation.args.messages[0].role !== 'user' || typeof input.operation.args.messages[0].content !== 'string'
@@ -299,6 +304,14 @@ async function main(input) {
   const fetcher = globalThis.fetch;
   globalThis.fetch = async () => { fetchAttempts++; fail('NETWORK_DISABLED'); };
   const require = createRequire(join(host, 'package.json'));
+  if (searchingExpressions) {
+    process.env.NARB_DISABLE_NATIVE_CACHE = '1';
+    const result = await searchExpressions({ hostDirectory: host, ...input.operation.args, signal: lifecycle.signal });
+    if (fetchAttempts) fail('NETWORK_ATTEMPTED');
+    return result;
+  }
+  const expressionPlugin = input.expressionPlugin === 'dsh-meme';
+  if (expressionPlugin) inspectMeme(host);
   for (const [name, version] of [['@deepseek-ai/dsh', versions.dsh], ['dsh-bili-humanism', versions.humanism]]) {
     const manifest = JSON.parse(readFileSync(join(host, 'node_modules', name, 'package.json'), 'utf8'));
     if (manifest.name !== name || manifest.version !== version) fail('PACKAGE_VERSION_MISMATCH');
@@ -491,6 +504,7 @@ async function main(input) {
   return { versions, tools, callableTools: ['inspect', ...memoryTools], guideCharacters: guide.length,
     proactive: { configuredEngine: speakUp ? 'dsh-speak-up' : 'native', packageVerified: speakUp, turnExecuted: false },
     mood: { configuredConversationEngine: moodPlugin ? 'dsh-feiyu-mood' : 'native', packageVerified: moodPlugin, turnExecuted: false },
+    expressions: { configuredEngine: expressionPlugin ? 'dsh-meme' : 'catalog', packageVerified: expressionPlugin, searchExecuted: false },
     modelBridge: { provider: model.provider, mode: 'text-notes', purposes: ['reading-note', 'mood'], maxCallsPerTask: 1, authority: 'memoria' },
     safety: { dailyFetching: false, personalityLearning: false, platformWrites: false,
       telemetry: false, fetchAttempts, networkPolicy: 'local-only-fetch-blocked', osSandbox: false, memoryAuthority: 'memoria' } };

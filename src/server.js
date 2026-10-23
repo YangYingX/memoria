@@ -463,9 +463,17 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
     activeConversations.add(scope);
     try {
       const images = imageUrls.length ? await loadQQImages(imageUrls) : [];
-      const expressions = options.textOnly ? [] : [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])];
+      const currentExpressions = () => options.textOnly ? [] : [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])]
+        .map(({ id, name, description }) => ({ id, name, description }));
+      const expressions = currentExpressions();
+      const expressionRuntime = dshRuntime.status();
+      const searchExpressions = expressionRuntime.enabled && expressionRuntime.expressions?.configuredEngine === 'dsh-meme' ? async query => {
+        const found = await dshRuntime.execute({ scope, actor, name: 'search_expressions', args: { query, items: expressions }, signal: options.signal });
+        const current = new Map(currentExpressions().map(item => [item.id, JSON.stringify(item)]));
+        return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
+      } : undefined;
       const collectExpression = origin ? input => store.saveExpression({ ...input, scope, origin, actor }) : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, collectExpression, signal: options.signal, assertActive: options.assertActive,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions } : {}) });

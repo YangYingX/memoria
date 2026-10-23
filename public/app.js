@@ -103,7 +103,7 @@ async function loadState({ fill = false } = {}) {
   renderProactiveStatus(state.data.proactiveStatus);
   renderBookStatus(state.data.bookStatus);
   const dsh = state.data.dshStatus;
-  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。主动拟聊选择：${dsh.proactive?.configuredEngine === 'dsh-speak-up' ? '原版主动搭话插件' : 'DSH 原生回合'}。${dsh.proactive?.lastCompletedTurn ? `本次服务启动后最近完成拟聊：${date(dsh.proactive.lastCompletedTurn.completedAt)}。` : '本次服务启动后尚未完成拟聊回合。'}长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
+  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。表情选择：${dsh.expressions?.configuredEngine === 'dsh-meme' ? '按需关键词检索' : '当前图库目录'}。主动拟聊选择：${dsh.proactive?.configuredEngine === 'dsh-speak-up' ? '原版主动搭话插件' : 'DSH 原生回合'}。${dsh.proactive?.lastCompletedTurn ? `本次服务启动后最近完成拟聊：${date(dsh.proactive.lastCompletedTurn.completedAt)}。` : '本次服务启动后尚未完成拟聊回合。'}长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
   $('dsh-test').disabled = !dsh?.enabled || dsh.busy;
   const biliAccount = state.data.biliAccountStatus;
   $('bili-account-summary').textContent = biliAccount?.configured ? `已保存专用账号 ${biliAccount.accountId || ''} 的本机登录状态。此状态不表示当前平台认证仍有效。`

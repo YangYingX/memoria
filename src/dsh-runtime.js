@@ -8,6 +8,7 @@ import { createDshModelAccess } from './dsh-model.js';
 import { moodSnapshot, validateMoodDelta } from './mood.js';
 import { createMemoryAgentAccess, memoryAgentErrorMessage } from './dsh-memory-agent-access.js';
 import { proactiveQuery } from './dsh-proactive-context.js';
+import { expressionSearchItems, expressionSearchQuery, expressionSearchResult } from './expression-search.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
@@ -61,9 +62,10 @@ export function createDshRuntime({ store, dataDir }) {
     try { input = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')); }
     catch { throw new Error('DSH 本机配置无法读取。'); }
     if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.enabled !== 'boolean'
-      || Object.keys(input).some(key => !['enabled', 'nodePath', 'hostDirectory', 'proactivePlugin', 'moodPlugin'].includes(key))
+      || Object.keys(input).some(key => !['enabled', 'nodePath', 'hostDirectory', 'proactivePlugin', 'moodPlugin', 'expressionPlugin'].includes(key))
       || (Object.hasOwn(input, 'proactivePlugin') && input.proactivePlugin !== 'dsh-speak-up')
-      || (Object.hasOwn(input, 'moodPlugin') && input.moodPlugin !== 'dsh-feiyu-mood')) throw new Error('DSH 本机配置无效。');
+      || (Object.hasOwn(input, 'moodPlugin') && input.moodPlugin !== 'dsh-feiyu-mood')
+      || (Object.hasOwn(input, 'expressionPlugin') && input.expressionPlugin !== 'dsh-meme')) throw new Error('DSH 本机配置无效。');
     if (!input.enabled) return { enabled: false };
     if (![input.nodePath, input.hostDirectory].every(value => typeof value === 'string' && isAbsolute(value))
       || !statSync(input.nodePath, { throwIfNoEntry: false })?.isFile()
@@ -71,7 +73,7 @@ export function createDshRuntime({ store, dataDir }) {
       throw new Error('请配置独立的 Node.js 24 和已安装 DSH 的宿主目录。');
     }
     return { enabled: true, nodePath: realpathSync(input.nodePath), hostDirectory: realpathSync(input.hostDirectory),
-      proactivePlugin: input.proactivePlugin, moodPlugin: input.moodPlugin };
+      proactivePlugin: input.proactivePlugin, moodPlugin: input.moodPlugin, expressionPlugin: input.expressionPlugin };
   }
   return {
     stop() { stopped = true; cancelCurrent?.(); return drained; },
@@ -80,6 +82,7 @@ export function createDshRuntime({ store, dataDir }) {
         const settings = config();
         return { enabled: settings.enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus(),
           proactive: { configuredEngine: settings.proactivePlugin || 'native', lastCompletedTurn: lastProactiveTurn },
+          expressions: { configuredEngine: settings.expressionPlugin || 'catalog' },
           mood: { configuredConversationEngine: settings.moodPlugin || 'native', lastCompletedEvaluation: lastMoodEvaluation } };
       }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
@@ -91,13 +94,17 @@ export function createDshRuntime({ store, dataDir }) {
       const noting = name === 'note_bili_reading';
       const judging = name === 'evaluate_mood';
       const composing = name === 'compose_proactive';
+      const searchingExpressions = name === 'search_expressions';
       const recalling = name === 'recall_memory' || composing;
       const modelTask = noting || judging;
       const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor, excludeMessageId });
-      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', 'compose_proactive'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', 'compose_proactive', 'search_expressions'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
       let noteMessages, conversationMood = false;
-      if (composing) {
+      if (searchingExpressions) {
+        if (Object.keys(args).some(key => !['query', 'items'].includes(key))) throw new Error('表情检索只接受关键词和当前场合目录。');
+        args = { query: expressionSearchQuery(args.query), items: expressionSearchItems(args.items) };
+      } else if (composing) {
         if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || Object.keys(args).length !== 1 || !Object.hasOwn(args, 'messageId')
           || typeof args.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args.messageId)) throw new Error('主动拟聊只接受已验证创建人的消息标识。');
         args = { messageId: args.messageId };
@@ -139,6 +146,7 @@ export function createDshRuntime({ store, dataDir }) {
         args = { url };
       }
       const settings = config();
+      if (searchingExpressions && settings.expressionPlugin !== 'dsh-meme') throw new Error('尚未配置 DSH 表情检索模块。');
       const feiyu = judging && conversationMood && settings.moodPlugin === 'dsh-feiyu-mood';
       if (!settings.enabled) throw new Error('尚未启用 DSH 插件运行层。');
       if (busy) throw new Error('已有 DSH 任务运行，请稍后再试。');
@@ -202,6 +210,7 @@ export function createDshRuntime({ store, dataDir }) {
             ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}),
             ...(name === 'inspect' && settings.proactivePlugin ? { proactivePlugin: settings.proactivePlugin } : {}),
             ...(name === 'inspect' && settings.moodPlugin ? { moodPlugin: settings.moodPlugin } : {}),
+            ...(name === 'inspect' && settings.expressionPlugin ? { expressionPlugin: settings.expressionPlugin } : {}),
             operation: composing ? { name: settings.proactivePlugin ? 'compose_proactive' : 'recall_memory', args: { query: proactiveQuery } }
               : { name: feiyu ? 'evaluate_mood_feiyu' : name, args } }));
           child.on('message', message => {
@@ -253,7 +262,7 @@ export function createDshRuntime({ store, dataDir }) {
                 if (!failure && child.connected) child.send({ type: 'video-selection', id: message.id, url }, () => {});
               }).catch(() => stop('本次视频选择未完成，未自动重试。'));
             } else if (message.type === 'memory') {
-              if (modelTask || recalling || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
+              if (modelTask || recalling || searchingExpressions || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
               let response;
               try { response = { result: memory.execute(message.name, message.args) }; }
               catch (error) { response = { error: error.message }; }
@@ -295,6 +304,12 @@ export function createDshRuntime({ store, dataDir }) {
                 accept(proposal);
               } catch { reject(new DshTaskError('DSH 未返回有效的情绪变化。')); }
             } else {
+              if (searchingExpressions) {
+                try {
+                  if (JSON.stringify(config()) !== JSON.stringify(settings)) throw new Error();
+                  result = expressionSearchResult(result, args.items);
+                } catch { return reject(new DshTaskError('DSH 表情检索结果或配置已失效。')); }
+              }
               if (composing) lastProactiveTurn = { engine: settings.proactivePlugin || 'native', completedAt: new Date().toISOString() };
               accept(composing ? { ...result, engine: settings.proactivePlugin || 'native' } : result);
             }
