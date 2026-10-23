@@ -56,8 +56,8 @@ export function createDshModelAccess({ store, signal, request = requestCompletio
     try {
       result = await request({ store, messages: [{ role: 'system', content: system }, ...messages],
         maxTokens: purpose === 'mood' ? 300 : input.maxTokens, signal });
-    } catch {
-      fail(signal?.aborted ? 'DSH_MODEL_CANCELLED' : 'DSH_MODEL_FAILED');
+    } catch (error) {
+      fail(signal?.aborted ? 'DSH_MODEL_CANCELLED' : error?.code === 'MODEL_DAILY_LIMIT' ? 'DSH_MODEL_LIMIT' : 'DSH_MODEL_FAILED');
     }
     if (signal?.aborted) fail('DSH_MODEL_CANCELLED');
     const choice = result?.choices?.[0];

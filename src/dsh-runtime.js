@@ -6,12 +6,18 @@ import { createMemoryAccess } from './memory-access.js';
 import { biliVideoUrl } from './bili-reading.js';
 import { createDshModelAccess } from './dsh-model.js';
 import { moodSnapshot, validateMoodDelta } from './mood.js';
-import { createMemoryAgentAccess } from './dsh-memory-agent-access.js';
+import { createMemoryAgentAccess, memoryAgentErrorMessage } from './dsh-memory-agent-access.js';
 import { proactiveQuery } from './dsh-proactive-context.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
 export const defaultDshReadingSettings = { dailyReadLimit: 6 };
+
+class DshTaskError extends Error {}
+
+export function dshTaskErrorMessage(error) {
+  return error instanceof DshTaskError ? error.message : 'DSH 任务未完成，未自动重试。';
+}
 
 export function normalizeDshReadingSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'dailyReadLimit')
@@ -28,6 +34,12 @@ const readingErrors = {
   INVALID_SOURCE: '视频文字来源或分页校验失败，未保存阅读经历。',
   SOURCE_TOO_LARGE: '视频资料超过单次读取上限，本次未截断保存。',
   DSH_READ_FAILED: 'B站文字读取未完成，未自动重试。',
+};
+const modelErrors = {
+  DSH_MODEL_LIMIT: '今日模型请求额度已用完，本次任务已停止。',
+  DSH_MODEL_CANCELLED: 'DSH 模型任务已取消。',
+  DSH_MODEL_INVALID_RESPONSE: 'DSH 模型回复格式无效，本次任务已停止。',
+  DSH_MODEL_FAILED: 'DSH 模型请求未完成，本次任务已停止。',
 };
 
 export function createDshRuntime({ store, dataDir }) {
@@ -157,11 +169,11 @@ export function createDshRuntime({ store, dataDir }) {
           TEMP: join(workspace, 'tmp'), TMP: join(workspace, 'tmp'), DSH_HOME: join(workspace, 'dsh') });
         return await new Promise((accept, reject) => {
           const child = spawn(settings.nodePath, [hostScript], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-          let result, authorizedNote, failure, received = false, selectionRequested = false, modelRequested = false, requests = 0, stderrBytes = 0;
+          let result, authorizedNote, failure, modelFailureMessage, received = false, selectionRequested = false, modelRequested = false, requests = 0, stderrBytes = 0;
           const agentRequestIds = new Set();
           let killTimer;
           const stop = message => {
-            failure ||= new Error(message); taskController.abort(); child.kill();
+            failure ||= new DshTaskError(message); taskController.abort(); child.kill();
             killTimer ||= setTimeout(() => child.kill('SIGKILL'), 2000);
             killTimer.unref();
           };
@@ -192,7 +204,7 @@ export function createDshRuntime({ store, dataDir }) {
               agentRequestIds.add(message.id);
               Promise.resolve().then(() => message.type === 'agent-model' ? memoryAgent.complete() : memoryAgent.execute(message.call)).then(result => {
                 if (!failure && child.connected) child.send({ type: `${message.type}-result`, id: message.id, result }, () => {});
-              }).catch(() => stop('DSH 记忆子代理未完成，未自动重试。'));
+              }).catch(error => stop(memoryAgentErrorMessage(error)));
             } else if (message.type === 'model') {
               if (!modelTask || received || modelRequested || !Number.isSafeInteger(message.id) || message.id < 1
                 || Object.keys(message).some(key => !['type', 'id', 'args'].includes(key))
@@ -203,6 +215,7 @@ export function createDshRuntime({ store, dataDir }) {
                 authorizedNote = result.text;
                 if (!failure && child.connected) child.send({ type: 'model-result', id: message.id, result }, () => {});
               }).catch(error => {
+                modelFailureMessage = Object.hasOwn(modelErrors, error?.code) ? modelErrors[error.code] : modelErrors.DSH_MODEL_FAILED;
                 if (!failure && child.connected) child.send({ type: 'model-result', id: message.id,
                   error: ['DSH_MODEL_LIMIT', 'DSH_MODEL_CANCELLED', 'DSH_MODEL_INVALID_RESPONSE'].includes(error.code) ? error.code : 'DSH_MODEL_FAILED' }, () => {});
               });
@@ -240,8 +253,8 @@ export function createDshRuntime({ store, dataDir }) {
                 } catch { return stop('DSH 未完成有效的原生记忆回合。'); }
               } else result = message.result;
               received = true;
-            } else if (message.type === 'failure') stop(reading && typeof message.code === 'string' && Object.hasOwn(readingErrors, message.code)
-              ? readingErrors[message.code] : 'DSH 核对未完成，请检查固定版本依赖与本机配置。');
+            } else if (message.type === 'failure') stop(modelFailureMessage || (reading && typeof message.code === 'string' && Object.hasOwn(readingErrors, message.code)
+              ? readingErrors[message.code] : 'DSH 核对未完成，请检查固定版本依赖与本机配置。'));
             else stop('DSH 返回了不支持的消息。');
           });
           child.on('close', code => {

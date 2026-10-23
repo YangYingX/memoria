@@ -16,6 +16,13 @@ const tools = definitions.map(({ name, description, key, schema }) => ({ type: '
 const isRecord = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 
+class MemoryAgentError extends Error {}
+
+// Only this parent's fixed validation messages may reach the caller; child and provider errors stay generic.
+export function memoryAgentErrorMessage(error) {
+  return error instanceof MemoryAgentError ? error.message : 'DSH 记忆子代理未完成，未自动重试。';
+}
+
 function checkedArgs(name, args) {
   const definition = definitions.find(item => item.name === name);
   if (!definition || !isRecord(args) || Object.keys(args).some(key => ![definition.key, 'offset'].includes(key))) throw new Error('参数无效。');
@@ -50,11 +57,11 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
   let state = 'ready', modelRequests = 0, toolCalls = 0, approvedCalls = 0, text = '';
   function fail(message) {
     state = 'failed'; pending.clear();
-    throw new Error(message);
+    throw new MemoryAgentError(message);
   }
   function available() {
     if (signal?.aborted) fail('记忆子代理任务已取消。');
-    if (state === 'failed') throw new Error('记忆子代理任务已终止。');
+    if (state === 'failed') throw new MemoryAgentError('记忆子代理任务已终止。');
     if (proactive && !proactive.sourcesCurrent()) fail('主动拟聊的资料已变化。');
   }
   return Object.freeze({
@@ -71,8 +78,9 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
       try {
         completion = await request({ store, messages: inputMessages, maxTokens: 1000, signal,
           ...(modelRequests < 4 && approvedCalls < 5 ? { tools: structuredClone(tools) } : {}) });
-      } catch {
+      } catch (error) {
         if (signal?.aborted) fail('记忆子代理任务已取消。');
+        if (error?.code === 'MODEL_DAILY_LIMIT') fail('今日模型请求额度已用完，本次任务已停止。');
         fail('记忆子代理模型请求未完成，任务已停止，请检查模型配置或调用额度。');
       }
       available();

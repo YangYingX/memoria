@@ -15,7 +15,11 @@ export async function requestCompletion({ store, messages, tools, maxTokens = 15
   const day = new Date().toISOString().slice(0, 10);
   let usage = store.getSetting('modelUsage', { day, calls: 0 });
   if (usage.day !== day) usage = { day, calls: 0 };
-  if (usage.calls >= 200) throw new Error('已达到每日 200 次模型请求的开发保护上限。');
+  if (usage.calls >= 200) {
+    const error = new Error('已达到每日 200 次模型请求上限。');
+    error.code = 'MODEL_DAILY_LIMIT';
+    throw error;
+  }
   store.setSetting('modelUsage', { ...usage, calls: usage.calls + 1 });
   const baseUrl = new URL(model.baseUrl);
   const response = await fetch(`${model.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
