@@ -175,7 +175,7 @@ ssh -N -L 3210:127.0.0.1:3210 your-user@your-server
 
 ## DSH 只读插件接入
 
-此功能可选。核心服务仍使用 Node.js 22.16 或以上；独立插件宿主需要 Node.js 24。目前固定支持 DSH `0.2.1-rc.2` 与 `dsh-bili-humanism` `1.7.0`，另可按下文配置 `dsh-speak-up` `0.2.2` 用于主动搭话；不扫描或自动启用其他插件。可以在 Windows 或 Linux 配置对应系统的 Node.js 路径。
+此功能可选。核心服务仍使用 Node.js 22.16 或以上；独立插件宿主需要 Node.js 24。目前固定支持 DSH `0.2.1-rc.2` 与 `dsh-bili-humanism` `1.7.0`，另可按下文分别配置 `dsh-speak-up` `0.2.2` 用于主动搭话、`dsh-feiyu-mood` `0.4.3` 用于对话心情评估；不扫描或自动启用其他插件。可以在 Windows 或 Linux 配置对应系统的 Node.js 路径。
 
 在项目和个人 DSH 配置之外建立专用宿主目录。下载作者 [1.7.0 发布页](https://github.com/InariNGT-Ofiicial/dsh-bili-humanism/releases/tag/v1.7.0) 的 `dsh-bili-humanism-1.7.0.tgz`，在专用目录使用 Node.js 24 附带的 npm 安装：
 
@@ -314,6 +314,61 @@ Linux 使用对应的 Node.js 与宿主绝对路径。删除 `proactivePlugin` �
 
 未评估时初始值为 70、情绪为平静；数值偏离按 3 小时半衰向 70 回稳，六小时后标签回到平静。回稳在本机计算，不调用模型。状态及评估事件随加密备份迁移；恢复后新评估暂停，运行配额和模型凭据不从备份导入。
 
-设计灵感参考[鱼的心情](https://github.com/Yuuyuko-uu/dsh-feiyu-mood)。当前功能为栖忆的独立实现，通过 DSH 原生模型接口运行，不直接加载该插件或导入其会话、配置和状态文件。
+默认使用栖忆原生心情评估，设计灵感参考[鱼的心情](https://github.com/Yuuyuko-uu/dsh-feiyu-mood)。也可按下文安装原包，使用其真实对话钩子和判定算法；统一心情仍由栖忆保存，不导入个人 DSH 会话、配置或状态文件。
+
+### 可选原版心情插件
+
+先完成上述独立 DSH 宿主安装，再把 `dsh-feiyu-mood` `0.4.3` 安装到同一宿主目录，使用该目录的 Node.js 24 和 npm。以下来源固定为提交 `3ff201694dd4f8f4702862e656c51decb623da50`，不要替换为 `main` 分支地址。
+
+Windows PowerShell 在独立宿主目录下载并检查：
+
+```powershell
+Invoke-WebRequest -Uri "https://codeload.github.com/Yuuyuko-uu/dsh-feiyu-mood/tar.gz/3ff201694dd4f8f4702862e656c51decb623da50" -OutFile ".\dsh-feiyu-mood-0.4.3.tgz"
+(Get-FileHash -LiteralPath ".\dsh-feiyu-mood-0.4.3.tgz" -Algorithm SHA256).Hash
+```
+
+Linux 在独立宿主目录下载并检查：
+
+```bash
+curl --fail --location "https://codeload.github.com/Yuuyuko-uu/dsh-feiyu-mood/tar.gz/3ff201694dd4f8f4702862e656c51decb623da50" --output dsh-feiyu-mood-0.4.3.tgz
+sha256sum dsh-feiyu-mood-0.4.3.tgz
+```
+
+确认 SHA256 与下列值完全一致后再安装；大小写不影响比较，校验不符时停止安装。
+
+```text
+FBE1AE5FA29DB72AE1F35E0212A531D4CCAC9D5BBE80E09553F814A68900CA42
+```
+
+Windows 在同一目录执行：
+
+```powershell
+npm.cmd install --ignore-scripts --save-exact .\dsh-feiyu-mood-0.4.3.tgz
+```
+
+Linux 在同一目录执行：
+
+```bash
+npm install --ignore-scripts --save-exact ./dsh-feiyu-mood-0.4.3.tgz
+```
+
+保留完整原包、其中的 MIT `LICENSE` 和生成的锁文件。Linux 须单独安装依赖，不复用 Windows 的 `node_modules`。在数据目录的 `dsh-runtime.json` 增加 `moodPlugin` 字段；路径须替换为实际绝对路径，已配置的其他字段继续保留：
+
+```json
+{
+  "enabled": true,
+  "nodePath": "C:/path/to/node24/node.exe",
+  "hostDirectory": "C:/path/to/memoria-dsh-host",
+  "moodPlugin": "dsh-feiyu-mood"
+}
+```
+
+Linux 使用对应的 Node.js 与宿主绝对路径。删除 `moodPlugin` 字段即可恢复默认原生评估。显式选择原包后，缺包、版本错误或文件校验失败会使对话心情评估明确失败，不静默降级；公开阅读资料仍用原生评估，其他聊天、阅读、检索和主动搭话能力不依赖这个可选包。
+
+在后台“DSH 插件运行层”点击检测，只核对固定包与宿主，不执行心情模型回合。后台区分已选择的引擎和最近完成的评估；检测通过不等于已经评估，完成评估也不等于结果已经应用。
+
+心情评估仍默认关闭，沿用每 180 分钟、每天最多 4 次的默认设置及原有可调范围。每次对话评估最多一次模型请求、300 输出 tokens，与其他功能共用每日 200 次模型请求；使用已保存的当次对话，不为回放原回复再调用模型。原插件给出的变化按 `round(delta / 3)` 转为栖忆心境变化，每次最多 ±3；结果只保留统一的数值、固定情绪标签和置信度。置信度低于 60、格式无效、取消、原资料或配置变化，以及当前心情已被其他活动改变时，都不应用结果。
+
+原包状态与诊断文件只用于本次任务的临时目录，结束后清理；不保留自由文本原因或第二套心情库。接入范围为原版对话钩子和判定算法，原版伴侣提示词、七维持久状态和网页界面不在接入范围内，也不开放新的 HTTP 端口、仪表盘或更新页。
 
 参考：[Node.js 下载](https://nodejs.org/en/download)、[systemd 执行环境与 StateDirectory](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)。

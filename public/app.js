@@ -511,8 +511,10 @@ function renderMoodStatus() {
   $('mood-updated').textContent = mood.updatedAt ? date(mood.updatedAt) : '尚未评估';
   const today = status.day === new Date().toISOString().slice(0, 10);
   $('mood-count').textContent = `${today ? status.attempts || 0 : 0} / ${config.dailyLimit ?? 4} 次`;
+  const runtimeMood = state.data?.dshStatus?.mood;
+  const engine = runtimeMood?.configuredConversationEngine === 'dsh-feiyu-mood' ? '原版鱼的心情插件' : 'DSH 原生评估';
   $('mood-summary').textContent = config.enabled
-    ? `每 ${config.intervalMinutes ?? 180} 分钟最多评估一次；无新资料便保持安静，心境会随时间回稳。`
+    ? `对话使用${engine}，公开阅读使用 DSH 原生评估。每 ${config.intervalMinutes ?? 180} 分钟最多评估一次；无新资料便保持安静，心境会随时间回稳。${runtimeMood?.lastCompletedEvaluation ? `本次服务启动后最近完成评估：${date(runtimeMood.lastCompletedEvaluation.completedAt)}；是否应用以评估结果为准。` : ''}`
     : '间歇评估尚未开启，已有状态仍会自然回稳。可在「人格与设置」调整。';
   $('mood-outcome').textContent = status.busy ? '正在评估…' : outcomes[status.lastOutcome] || '尚无评估记录；初始状态为平静。';
   $('mood-error').hidden = !status.lastError;
@@ -930,7 +932,7 @@ $('dsh-test').addEventListener('click', () => action($('dsh-test'), async () => 
   output.textContent = '正在启动独立插件宿主并核对只读工具…';
   try {
     const result = await api('/api/dsh/check', { method: 'POST', data: {} });
-    output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。${result.proactive?.packageVerified ? '\n主动搭话原包已通过固定版本与文件校验；本次检测未执行拟聊回合。' : ''}`;
+    output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。${result.proactive?.packageVerified ? '\n主动搭话原包已通过固定版本与文件校验；本次检测未执行拟聊回合。' : ''}${result.mood?.packageVerified ? '\n心情原包已通过固定版本与文件校验；本次检测未执行心情评估。' : ''}`;
   } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
 $('bili-login').addEventListener('click', () => action($('bili-login'), async () => {

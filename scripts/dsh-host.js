@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerMemoriaLlm } from './dsh-model-adapter.js';
 import { runMemoryAgent } from './dsh-memory-agent.js';
+import { runFeiyuMood } from './dsh-feiyu-mood.js';
 
 const versions = { dsh: '0.2.1-rc.2', humanism: '1.7.0' };
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
@@ -245,19 +246,21 @@ async function main(input) {
   const browsing = operationName === 'browse_bili';
   const reading = operationName === 'read_bili_video' || browsing;
   const noting = operationName === 'note_bili_reading';
-  const judging = operationName === 'evaluate_mood';
+  const feiyu = operationName === 'evaluate_mood_feiyu';
+  const judging = operationName === 'evaluate_mood' || feiyu;
   const composing = operationName === 'compose_proactive';
   const recalling = operationName === 'recall_memory' || composing;
   const modelTask = noting || judging;
   if (Number(process.versions.node.split('.')[0]) !== 24) fail('NODE_VERSION_MISMATCH');
-  if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'proactivePlugin', 'operation'])
+  if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'proactivePlugin', 'moodPlugin', 'operation'])
     || ![input.hostDirectory, input.workspace].every(value => typeof value === 'string' && isAbsolute(value))
     || !fields(input.operation, ['name', 'args'])
-    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', 'compose_proactive', ...memoryTools].includes(operationName)
+    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'evaluate_mood_feiyu', 'recall_memory', 'compose_proactive', ...memoryTools].includes(operationName)
     || !object(input.operation.args)
     || (operationName === 'inspect' && Object.keys(input.operation.args).length)
     || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'credentialPath')))
-    || (Object.hasOwn(input, 'proactivePlugin') && (operationName !== 'inspect' || input.proactivePlugin !== 'dsh-speak-up'))) fail('INVALID_START');
+    || (Object.hasOwn(input, 'proactivePlugin') && (operationName !== 'inspect' || input.proactivePlugin !== 'dsh-speak-up'))
+    || (Object.hasOwn(input, 'moodPlugin') && (operationName !== 'inspect' || input.moodPlugin !== 'dsh-feiyu-mood'))) fail('INVALID_START');
   if (modelTask && (!fields(input.operation.args, ['messages']) || !Array.isArray(input.operation.args.messages)
     || input.operation.args.messages.length !== 1 || !fields(input.operation.args.messages[0], ['role', 'content'])
     || input.operation.args.messages[0].role !== 'user' || typeof input.operation.args.messages[0].content !== 'string'
@@ -306,6 +309,14 @@ async function main(input) {
     const entry = require.resolve('dsh-speak-up');
     if (manifest.name !== 'dsh-speak-up' || manifest.version !== '0.2.2'
       || createHash('sha256').update(readFileSync(entry)).digest('hex') !== '72120e1d14c2e3aebceae853f2e07046a6aa0abca45fa681f9c99d63efb298a8'
+      || createHash('sha256').update(readFileSync(join(dirname(entry), 'selfupdate.mjs'))).digest('hex') !== 'f6a74095c0633c5a0ba2f3d226a196e42d16ba9844af4a133d32343154592a35') fail('PACKAGE_VERSION_MISMATCH');
+  }
+  const moodPlugin = feiyu || input.moodPlugin === 'dsh-feiyu-mood';
+  if (moodPlugin) {
+    const manifest = JSON.parse(readFileSync(join(host, 'node_modules/dsh-feiyu-mood/package.json'), 'utf8'));
+    const entry = require.resolve('dsh-feiyu-mood');
+    if (manifest.name !== 'dsh-feiyu-mood' || manifest.version !== '0.4.3'
+      || createHash('sha256').update(readFileSync(entry)).digest('hex') !== '964a4844a80063bcbeead1cc52855a3b735cd8f0d636087f719a05633e5bc41e'
       || createHash('sha256').update(readFileSync(join(dirname(entry), 'selfupdate.mjs'))).digest('hex') !== 'f6a74095c0633c5a0ba2f3d226a196e42d16ba9844af4a133d32343154592a35') fail('PACKAGE_VERSION_MISMATCH');
   }
   const load = name => import(pathToFileURL(require.resolve(name)).href);
@@ -430,6 +441,11 @@ async function main(input) {
     || ['history', 'favorite', 'like', 'coin'].some(name => tools.includes(`bili_humanism_${name}`))
     || fetchAttempts) fail('READ_ONLY_CHECK_FAILED');
 
+  if (feiyu) {
+    const result = await runFeiyuMood({ ctx, load, messages: input.operation.args.messages, requestCompletion, signal: lifecycle.signal });
+    if (fetchAttempts) fail('NETWORK_ATTEMPTED');
+    return result;
+  }
   if (recalling) {
     const result = await runMemoryAgent({ ctx, load, query: input.operation.args.query, signal: lifecycle.signal,
       ...(composing ? { trigger: 'speak-up' } : {}),
@@ -474,6 +490,7 @@ async function main(input) {
   if (fetchAttempts) fail('NETWORK_ATTEMPTED');
   return { versions, tools, callableTools: ['inspect', ...memoryTools], guideCharacters: guide.length,
     proactive: { configuredEngine: speakUp ? 'dsh-speak-up' : 'native', packageVerified: speakUp, turnExecuted: false },
+    mood: { configuredConversationEngine: moodPlugin ? 'dsh-feiyu-mood' : 'native', packageVerified: moodPlugin, turnExecuted: false },
     modelBridge: { provider: model.provider, mode: 'text-notes', purposes: ['reading-note', 'mood'], maxCallsPerTask: 1, authority: 'memoria' },
     safety: { dailyFetching: false, personalityLearning: false, platformWrites: false,
       telemetry: false, fetchAttempts, networkPolicy: 'local-only-fetch-blocked', osSandbox: false, memoryAuthority: 'memoria' } };

@@ -46,6 +46,7 @@ export function createDshRuntime({ store, dataDir }) {
   let busy = false, stopped = false, cancelCurrent;
   let drained = Promise.resolve();
   let lastProactiveTurn = null;
+  let lastMoodEvaluation = null;
   function readingStatus() {
     const day = new Date().toISOString().slice(0, 10);
     const saved = store.getSetting('dshReadingStatus', {});
@@ -60,15 +61,17 @@ export function createDshRuntime({ store, dataDir }) {
     try { input = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')); }
     catch { throw new Error('DSH 本机配置无法读取。'); }
     if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.enabled !== 'boolean'
-      || Object.keys(input).some(key => !['enabled', 'nodePath', 'hostDirectory', 'proactivePlugin'].includes(key))
-      || (Object.hasOwn(input, 'proactivePlugin') && input.proactivePlugin !== 'dsh-speak-up')) throw new Error('DSH 本机配置无效。');
+      || Object.keys(input).some(key => !['enabled', 'nodePath', 'hostDirectory', 'proactivePlugin', 'moodPlugin'].includes(key))
+      || (Object.hasOwn(input, 'proactivePlugin') && input.proactivePlugin !== 'dsh-speak-up')
+      || (Object.hasOwn(input, 'moodPlugin') && input.moodPlugin !== 'dsh-feiyu-mood')) throw new Error('DSH 本机配置无效。');
     if (!input.enabled) return { enabled: false };
     if (![input.nodePath, input.hostDirectory].every(value => typeof value === 'string' && isAbsolute(value))
       || !statSync(input.nodePath, { throwIfNoEntry: false })?.isFile()
       || !statSync(join(input.hostDirectory, 'package.json'), { throwIfNoEntry: false })?.isFile()) {
       throw new Error('请配置独立的 Node.js 24 和已安装 DSH 的宿主目录。');
     }
-    return { enabled: true, nodePath: realpathSync(input.nodePath), hostDirectory: realpathSync(input.hostDirectory), proactivePlugin: input.proactivePlugin };
+    return { enabled: true, nodePath: realpathSync(input.nodePath), hostDirectory: realpathSync(input.hostDirectory),
+      proactivePlugin: input.proactivePlugin, moodPlugin: input.moodPlugin };
   }
   return {
     stop() { stopped = true; cancelCurrent?.(); return drained; },
@@ -76,7 +79,8 @@ export function createDshRuntime({ store, dataDir }) {
       try {
         const settings = config();
         return { enabled: settings.enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus(),
-          proactive: { configuredEngine: settings.proactivePlugin || 'native', lastCompletedTurn: lastProactiveTurn } };
+          proactive: { configuredEngine: settings.proactivePlugin || 'native', lastCompletedTurn: lastProactiveTurn },
+          mood: { configuredConversationEngine: settings.moodPlugin || 'native', lastCompletedEvaluation: lastMoodEvaluation } };
       }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
     },
@@ -92,7 +96,7 @@ export function createDshRuntime({ store, dataDir }) {
       const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor, excludeMessageId });
       if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', 'compose_proactive'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
-      let noteMessages;
+      let noteMessages, conversationMood = false;
       if (composing) {
         if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || Object.keys(args).length !== 1 || !Object.hasOwn(args, 'messageId')
           || typeof args.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args.messageId)) throw new Error('主动拟聊只接受已验证创建人的消息标识。');
@@ -109,6 +113,7 @@ export function createDshRuntime({ store, dataDir }) {
           || typeof item.text !== 'string' || !item.text.trim() || item.text.length > 3000
           || (item.kind === 'reading' && (scope !== 'owner' || Object.hasOwn(item, 'reply')))
           || (item.kind === 'conversation' && (typeof item.reply !== 'string' || !item.reply.trim() || item.reply.length > 1500))) throw new Error('情绪评估只接受一个已核对场合的当次资料。');
+        conversationMood = item.kind === 'conversation';
         noteMessages = [{ role: 'user', content: JSON.stringify({ input: item, mood: moodSnapshot(store) }) }];
         args = { messages: noteMessages };
       } else if (noting) {
@@ -134,6 +139,7 @@ export function createDshRuntime({ store, dataDir }) {
         args = { url };
       }
       const settings = config();
+      const feiyu = judging && conversationMood && settings.moodPlugin === 'dsh-feiyu-mood';
       if (!settings.enabled) throw new Error('尚未启用 DSH 插件运行层。');
       if (busy) throw new Error('已有 DSH 任务运行，请稍后再试。');
       signal?.throwIfAborted();
@@ -169,7 +175,7 @@ export function createDshRuntime({ store, dataDir }) {
           TEMP: join(workspace, 'tmp'), TMP: join(workspace, 'tmp'), DSH_HOME: join(workspace, 'dsh') });
         return await new Promise((accept, reject) => {
           const child = spawn(settings.nodePath, [hostScript], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-          let result, authorizedNote, failure, modelFailureMessage, received = false, selectionRequested = false, modelRequested = false, requests = 0, stderrBytes = 0;
+          let result, authorizedNote, authorizedMood, failure, modelFailureMessage, received = false, selectionRequested = false, modelRequested = false, requests = 0, stderrBytes = 0;
           const agentRequestIds = new Set();
           let killTimer;
           const stop = message => {
@@ -195,7 +201,9 @@ export function createDshRuntime({ store, dataDir }) {
           child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace,
             ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}),
             ...(name === 'inspect' && settings.proactivePlugin ? { proactivePlugin: settings.proactivePlugin } : {}),
-            operation: composing ? { name: settings.proactivePlugin ? 'compose_proactive' : 'recall_memory', args: { query: proactiveQuery } } : { name, args } }));
+            ...(name === 'inspect' && settings.moodPlugin ? { moodPlugin: settings.moodPlugin } : {}),
+            operation: composing ? { name: settings.proactivePlugin ? 'compose_proactive' : 'recall_memory', args: { query: proactiveQuery } }
+              : { name: feiyu ? 'evaluate_mood_feiyu' : name, args } }));
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
             if (['agent-model', 'agent-memory'].includes(message.type)) {
@@ -212,6 +220,14 @@ export function createDshRuntime({ store, dataDir }) {
                 || message.args.maxTokens !== (judging ? 300 : 650) || JSON.stringify(message.args.messages) !== JSON.stringify(noteMessages)) return stop('DSH 模型请求不属于本次获准的任务。');
               modelRequested = true;
               modelAccess(message.args).then(result => {
+                if (feiyu) {
+                  try {
+                    const proposal = validateMoodDelta(JSON.parse(result.text));
+                    authorizedMood = { ...proposal, delta: Math.round(proposal.delta / 3) };
+                  } catch {
+                    const error = new Error('DSH_MODEL_INVALID_RESPONSE'); error.code = 'DSH_MODEL_INVALID_RESPONSE'; throw error;
+                  }
+                }
                 authorizedNote = result.text;
                 if (!failure && child.connected) child.send({ type: 'model-result', id: message.id, result }, () => {});
               }).catch(error => {
@@ -251,6 +267,11 @@ export function createDshRuntime({ store, dataDir }) {
                     || value.text !== expected.text || value.modelRequests !== expected.modelRequests || value.toolCalls !== expected.toolCalls) throw new Error();
                   result = { ...expected, completed: true };
                 } catch { return stop('DSH 未完成有效的原生记忆回合。'); }
+              } else if (feiyu) {
+                const value = message.result;
+                if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1
+                  || typeof value.text !== 'string' || value.text.length > 2000) return stop('DSH 未返回有效的原版心情评估。');
+                result = { text: value.text };
               } else result = message.result;
               received = true;
             } else if (message.type === 'failure') stop(modelFailureMessage || (reading && typeof message.code === 'string' && Object.hasOwn(readingErrors, message.code)
@@ -262,10 +283,17 @@ export function createDshRuntime({ store, dataDir }) {
             clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
             else if (composing && !result.sourcesCurrent()) reject(new Error('主动拟聊的资料已变化。'));
-            else if (modelTask && (!modelRequested || typeof authorizedNote !== 'string' || result?.text !== authorizedNote)) reject(new Error('DSH 未返回有效的模型结果。'));
+            else if (modelTask && (!modelRequested || typeof authorizedNote !== 'string'
+              || (feiyu ? !authorizedMood : result?.text !== authorizedNote))) reject(new DshTaskError('DSH 未返回有效的模型结果。'));
             else if (judging) {
-              try { accept(validateMoodDelta(JSON.parse(result.text))); }
-              catch { reject(new Error('DSH 未返回有效的情绪变化。')); }
+              try {
+                const proposal = validateMoodDelta(JSON.parse(result.text));
+                if (feiyu && JSON.stringify(proposal) !== JSON.stringify(authorizedMood)) throw new Error();
+                if (feiyu && JSON.stringify(config()) !== JSON.stringify(settings)) return reject(new DshTaskError('DSH 心情配置已变化，本次评估未应用。'));
+                lastMoodEvaluation = { engine: feiyu ? 'dsh-feiyu-mood' : 'native',
+                  kind: conversationMood ? 'conversation' : 'reading', completedAt: new Date().toISOString() };
+                accept(proposal);
+              } catch { reject(new DshTaskError('DSH 未返回有效的情绪变化。')); }
             } else {
               if (composing) lastProactiveTurn = { engine: settings.proactivePlugin || 'native', completedAt: new Date().toISOString() };
               accept(composing ? { ...result, engine: settings.proactivePlugin || 'native' } : result);
