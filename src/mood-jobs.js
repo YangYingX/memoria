@@ -54,7 +54,7 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
   function conversation(scope, replyId, time) {
     if (typeof scope !== 'string' || !scopePattern.test(scope)) return null;
     const items = store.listConversationHistory(scope, 40);
-    const reply = replyId ? items.find(item => item.id === replyId) : items.findLast(item => item.role === 'assistant');
+    const reply = replyId !== undefined ? items.find(item => item.id === replyId) : items.findLast(item => item.role === 'assistant');
     if (!reply || reply.role !== 'assistant' || reply.actor !== 'agent' || reply.scope !== scope || reply.metadata?.mode !== 'live'
       || typeof reply.id !== 'string' || typeof reply.metadata.replyTo !== 'string' || !fresh(reply.createdAt, time)
       || typeof reply.content !== 'string' || !reply.content.trim()) return null;
@@ -67,9 +67,9 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
       text: user.content.slice(0, 3000), reply: reply.content.slice(0, 1500),
       fingerprint: JSON.stringify([user, reply]), reference: { scope, replyId: reply.id, createdAt: reply.createdAt } };
   }
-  function observeConversation(scope) {
+  function observeConversation(scope, replyId) {
     if (stopped) return;
-    const selected = conversation(scope, undefined, now());
+    const selected = conversation(scope, replyId, now());
     if (!selected) return;
     const pending = store.getSetting('moodPending', null);
     if (!pending || Date.parse(pending.createdAt) <= Date.parse(selected.at) || !date(pending.createdAt)) {

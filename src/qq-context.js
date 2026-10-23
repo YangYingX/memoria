@@ -1,6 +1,7 @@
 import { normalizeQQMergeWindow } from './qq-chat-batch.js';
 import { normalizeQQChatLimit } from './qq-chat-budget.js';
 import { normalizeQQGroupAttentionSettings } from './qq-group-attention.js';
+import { normalizeQQReplySettings } from './qq-reply-rhythm.js';
 
 class QQContextCanceled extends Error {
   constructor() { super('QQ 对话身份或配置已变化，本次处理已取消。'); }
@@ -13,7 +14,7 @@ export function qqConfigSignature(config) {
     accessToken: config.accessToken, webhookSecret: config.webhookSecret,
     allowedUsers: config.allowedUsers, allowedGroups: config.allowedGroups,
     dailyChatLimit: normalizeQQChatLimit(config.dailyChatLimit), mergeWindowMs: normalizeQQMergeWindow(config.mergeWindowMs),
-    ...normalizeQQGroupAttentionSettings(config) });
+    ...normalizeQQGroupAttentionSettings(config), ...normalizeQQReplySettings(config) });
 }
 
 function route(store, config, userId, groupId) {

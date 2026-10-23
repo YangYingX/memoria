@@ -710,6 +710,7 @@ export function createStore(dbPath) {
   try { transaction(backfillConversationBlocks); }
   catch { db.close(); throw new Error('无法整理本地对话索引，请检查数据库文件。'); }
 
+  let assistantReplyGeneration = 0;
   const api = {
     getSetting(key, fallback = null) {
       const row = get('SELECT value FROM settings WHERE key = ?', identifier(key, '设置名'));
@@ -1053,6 +1054,45 @@ export function createStore(dbPath) {
       const message = { id: randomUUID(), ...messageFields(input), createdAt: new Date().toISOString() };
       insertMessage(message);
       return message;
+    },
+    prepareAssistantReply(input) {
+      const fields = messageFields({ ...record(input, '助手回复'), role: 'assistant', actor: 'agent' });
+      const plannedExpressions = Object.hasOwn(fields.metadata, 'expressionIds') ? fields.metadata.expressionIds : [];
+      if (!Array.isArray(plannedExpressions) || plannedExpressions.length > 1 || plannedExpressions.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(id))) invalid('待发送表情标识无效。');
+      delete fields.metadata.expressionIds;
+      const id = randomUUID(), generation = assistantReplyGeneration;
+      let confirmedEnd = 0, confirmedExpressions = [], previous;
+      return (endOffset, expressionIds = []) => {
+        try {
+          endOffset = integer(endOffset, '已确认回复位置', 1, fields.content.length);
+          if (endOffset < confirmedEnd) invalid('已确认回复位置不能后退。');
+          if (!Array.isArray(expressionIds) || expressionIds.length > 1 || expressionIds.some(id => !plannedExpressions.includes(id))
+            || (confirmedExpressions.length && expressionIds[0] !== confirmedExpressions[0])) invalid('已确认表情须来自本轮计划，且不能撤回或替换。');
+          const metadata = JSON.stringify({ ...fields.metadata, ...(expressionIds.length ? { expressionIds: [...expressionIds] } : {}) });
+          const saved = transaction(() => {
+            if (generation !== assistantReplyGeneration) invalid('数据已恢复，本次回复不能继续保存。');
+            const current = get('SELECT * FROM messages WHERE id = ?', id);
+            if (previous ? !current || ['id', 'scope', 'role', 'content', 'actor', 'metadata', 'created_at'].some(key => current[key] !== previous[key]) : current) {
+              invalid('已确认回复记录已变化，本次没有覆盖。');
+            }
+            if (!previous) {
+              insertMessage({ id, ...fields, metadata: JSON.parse(metadata), content: fields.content.slice(0, endOffset), createdAt: new Date().toISOString() });
+            } else if (endOffset !== confirmedEnd || metadata !== previous.metadata) {
+              if (!run(`UPDATE messages SET content = ?, metadata = ? WHERE id = ? AND scope = ? AND role = 'assistant'
+                AND actor = 'agent' AND content = ? AND metadata = ? AND created_at = ?`, fields.content.slice(0, endOffset), metadata,
+              id, fields.scope, previous.content, previous.metadata, previous.created_at).changes) invalid('已确认回复记录已变化，本次没有覆盖。');
+            }
+            return get('SELECT * FROM messages WHERE id = ?', id);
+          });
+          confirmedEnd = endOffset;
+          confirmedExpressions = [...expressionIds];
+          previous = saved;
+          return messageRow(saved);
+        } catch (error) {
+          if (error.validation) throw error;
+          throw new Error('无法保存已确认的助手回复。');
+        }
+      };
     },
     listMessages(scope, limit = 40) {
       scope = scopeValue(scope);
@@ -1751,7 +1791,7 @@ export function createStore(dbPath) {
             && !(item.status === 'paused' && !accountById.has(item.recipientAccountId)))) invalid('备份中的有效聊天跟进缺少完整的创建人来源或账号关联。');
       }
 
-      return transaction(() => {
+      const imported = transaction(() => {
         const restoredAt = new Date().toISOString();
         const previousCompanion = api.getSetting('companionState', null);
         // Restored social inbox entries are history, never a renewed permission to publish.
@@ -1826,6 +1866,8 @@ export function createStore(dbPath) {
         if (proactive) api.setSetting('proactive', { ...proactive, enabled: false });
         return api.stats();
       });
+      assistantReplyGeneration++;
+      return imported;
     },
     close() { db.close(); },
   };

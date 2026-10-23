@@ -33,6 +33,7 @@ import { createMoodJobs } from './mood-jobs.js';
 import { createQQChatBudget, defaultQQChatLimit, normalizeQQChatLimit } from './qq-chat-budget.js';
 import { createQQChatBatch, defaultQQMergeWindow, normalizeQQMergeWindow } from './qq-chat-batch.js';
 import { createQQGroupAttention, normalizeQQGroupAttentionSettings } from './qq-group-attention.js';
+import { deliverQQReply, normalizeQQReplySettings } from './qq-reply-rhythm.js';
 import { captureQQContext, isQQContextCanceled, qqConfigSignature } from './qq-context.js';
 import { createFollowupActions, followupView } from './followups.js';
 import { readBiliCredentials } from './bili-credentials.js';
@@ -57,7 +58,7 @@ const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocia
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
-  qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit, mergeWindowMs: defaultQQMergeWindow, ...normalizeQQGroupAttentionSettings() },
+  qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit, mergeWindowMs: defaultQQMergeWindow, ...normalizeQQGroupAttentionSettings(), ...normalizeQQReplySettings() },
   feishu: defaultFeishuSettings,
   reading: { enabled: false, urls: [], intervalMinutes: 60, dailyLimit: 5 },
   autonomy: defaultAutonomySettings,
@@ -443,6 +444,7 @@ function publicSettings() {
   qqView.dailyChatLimit = normalizeQQChatLimit(qq.dailyChatLimit);
   qqView.mergeWindowMs = normalizeQQMergeWindow(qq.mergeWindowMs);
   Object.assign(qqView, normalizeQQGroupAttentionSettings(qq));
+  Object.assign(qqView, normalizeQQReplySettings(qq));
   return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, feishu: normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)), reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
@@ -463,7 +465,7 @@ function saveSettings(input) {
     if (typeof q.enabled !== 'boolean') throw new Error('QQ 开关无效。');
     if (q.botId && !/^\d{1,20}$/.test(String(q.botId))) throw new Error('机器人 QQ 号格式无效。');
     if (q.enabled && !q.botId) throw new Error('启用 QQ 前须填写机器人 QQ 号。');
-    next.qq = { enabled: q.enabled, apiBaseUrl: endpoint(q.apiBaseUrl), botId: String(q.botId || ''), accessToken: q.accessToken ? text(q.accessToken, 'OneBot Token', 1000) : previous.accessToken, webhookSecret: q.webhookSecret ? text(q.webhookSecret, 'Webhook Secret', 200, 24) : previous.webhookSecret, allowedUsers: ids(q.allowedUsers || []), allowedGroups: ids(q.allowedGroups || []), dailyChatLimit: normalizeQQChatLimit(q.dailyChatLimit === undefined ? previous.dailyChatLimit : q.dailyChatLimit), mergeWindowMs: normalizeQQMergeWindow(q.mergeWindowMs === undefined ? previous.mergeWindowMs : q.mergeWindowMs), ...normalizeQQGroupAttentionSettings(q, previous) };
+    next.qq = { enabled: q.enabled, apiBaseUrl: endpoint(q.apiBaseUrl), botId: String(q.botId || ''), accessToken: q.accessToken ? text(q.accessToken, 'OneBot Token', 1000) : previous.accessToken, webhookSecret: q.webhookSecret ? text(q.webhookSecret, 'Webhook Secret', 200, 24) : previous.webhookSecret, allowedUsers: ids(q.allowedUsers || []), allowedGroups: ids(q.allowedGroups || []), dailyChatLimit: normalizeQQChatLimit(q.dailyChatLimit === undefined ? previous.dailyChatLimit : q.dailyChatLimit), mergeWindowMs: normalizeQQMergeWindow(q.mergeWindowMs === undefined ? previous.mergeWindowMs : q.mergeWindowMs), ...normalizeQQGroupAttentionSettings(q, previous), ...normalizeQQReplySettings(q, previous) };
   }
   if (input.reading) {
     const r = input.reading;
@@ -514,7 +516,10 @@ async function readAndRemember(url, scope, actor = 'owner', options = {}) {
 async function chat(scope, message, actor = 'owner', imageUrls = [], origin = '', options = {}) {
   options.signal?.throwIfAborted(); options.assertActive?.();
   moodJobs.cancel();
-  if (scope === 'owner' && actor === 'owner') proactiveJobs.cancel();
+  if (scope === 'owner' && actor === 'owner') {
+    proactiveJobs.cancel();
+    if (!options.deferAssistant) cancelQQ();
+  }
   const queue = conversationQueues.get(scope) || { tail: Promise.resolve(), pending: 0 };
   if (queue.pending >= 10) throw new Error('当前对话已有 10 条消息等待处理，请稍后再发。');
   queue.pending++; activeMutation++;
@@ -536,12 +541,12 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
       } : undefined;
       const collectExpression = origin ? input => { options.signal?.throwIfAborted(); options.assertActive?.(); return store.saveExpression({ ...input, scope, origin, actor }); } : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, qqBatchSources: options.qqBatchSources, signal: options.signal, assertActive: options.assertActive,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions,
           followupActions: createFollowupActions({ store, getRecipient: getProactiveRecipient, cancel: () => proactiveJobs.cancel(), signal: options.signal, assertActive: options.assertActive }) } : {}) });
-      try { if (!result.silent) moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
+      try { if (!result.silent && !options.deferAssistant) moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
     }
     finally { activeConversations.delete(scope); }
@@ -577,8 +582,10 @@ async function sendQQ(config, target, reply, expressionIds = [], origin = '', op
   });
   if (!response.ok) throw new Error(`QQ 发送接口 HTTP ${response.status}`);
   const result = await response.json();
-  if (result.status !== 'ok' || Number(result.retcode) !== 0) throw new Error('QQ 协议端未确认消息发送成功。');
-  return { messageId: result.data?.message_id };
+  if (result.status !== 'ok' || ![0, '0'].includes(result.retcode)) throw new Error('QQ 协议端未确认消息发送成功。');
+  const id = result.data?.message_id;
+  if ((typeof id !== 'string' && !Number.isSafeInteger(id)) || !/^(?:0|-?[1-9]\d{0,19})$/.test(String(id))) throw new Error('QQ 协议端未返回有效消息编号，发送结果未确认。');
+  return { messageId: String(id), expressionIds: imageSegments.length ? expressionIds : [] };
 }
 
 async function testQQ(signal) {
@@ -614,7 +621,7 @@ async function runQQBatch(items, { signal }) {
   const assertActive = () => { signal.throwIfAborted(); for (const item of items) item.context.assertActive(); };
   const send = (reply, expressionIds = []) => sendQQ(context.config, context.target, reply, expressionIds, context.origin,
     { signal, beforeSend: assertActive });
-  let sending = false;
+  let sending = false, confirmedReplyId;
   try {
     assertActive();
     if (items.some(item => (item.ambient === true) !== ambient)) throw new Error('群聊参与方式已变化。');
@@ -632,11 +639,13 @@ async function runQQBatch(items, { signal }) {
       return source;
     }) : undefined;
     const result = await chat(context.scope, items.map(item => item.text).join('\n'), context.actor, first.imageUrls, context.origin,
-      { signal, assertActive, qqBatchSources, allowSilence: ambient });
+      { signal, assertActive, qqBatchSources, allowSilence: ambient, deferAssistant: true });
     assertActive();
     if (ambient && result.silent === true) return;
+    if (typeof result.commitDeliveredReply !== 'function') throw new Error('QQ 回复尚未准备好记录确认结果。');
     sending = true;
-    await send(result.reply, result.expressionIds || []);
+    await deliverQQReply({ reply: result.reply, expressionIds: result.expressionIds || [], config: context.config, send, signal, assertActive,
+      onConfirmed(endOffset, receipt) { confirmedReplyId = result.commitDeliveredReply(endOffset, receipt.expressionIds).id; } });
   } catch (error) {
     if (signal.aborted || isQQContextCanceled(error)) return;
     try { assertActive(); } catch { return; }
@@ -644,6 +653,8 @@ async function runQQBatch(items, { signal }) {
       ? '这次图片没有处理成功，请稍后重发。创建人可在后台查看原因，并确认所用模型支持图片。'
       : '本次消息未能处理完成，请稍后重发。创建人可在本机后台查看原因。');
     throw error;
+  } finally {
+    if (confirmedReplyId) try { moodJobs.observeConversation(context.scope, confirmedReplyId); } catch { /* A confirmed reply remains valid if sampling is unavailable. */ }
   }
 }
 
@@ -913,7 +924,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, await chat(input.scope || 'owner', input.message));
       }
       if (path === '/api/memories' && req.method === 'GET') return json(res, 200, { memories: store.listMemories({ q: url.searchParams.get('q') || '', scope: url.searchParams.get('scope') || '' }) });
-      if (path === '/api/memories' && req.method === 'POST') return json(res, 201, { memory: store.saveMemory(input) });
+      if (path === '/api/memories' && req.method === 'POST') { cancelQQ(); return json(res, 201, { memory: store.saveMemory(input) }); }
       const memoryRoute = path.match(/^\/api\/memories\/([^/]+)(\/revisions)?$/);
       if (memoryRoute) {
         const id = decodeURIComponent(memoryRoute[1]);
@@ -921,9 +932,10 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'PATCH') {
           const old = store.getMemory(id); if (!old) return json(res, 404, { error: '记忆不存在。' });
           proactiveJobs.cancel();
+          cancelQQ();
           return json(res, 200, { memory: store.saveMemory({ ...old, ...input, id }) });
         }
-        if (req.method === 'DELETE') { proactiveJobs.cancel(); store.deleteMemory(id); return json(res, 200, { ok: true }); }
+        if (req.method === 'DELETE') { proactiveJobs.cancel(); cancelQQ(); store.deleteMemory(id); return json(res, 200, { ok: true }); }
       }
       if (path === '/api/read' && req.method === 'POST') {
         if (!['owner', 'public', 'group:demo'].includes(input.scope || 'owner')) throw new Error('阅读可见范围无效。');

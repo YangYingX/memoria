@@ -90,7 +90,8 @@ function bookNotes(notes) {
   return result;
 }
 
-export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], qqBatchSources, expressions = [], searchExpressions, collectExpression, bookActions, activityActions, followupActions, memoryAgent, signal, assertActive, allowSilence = false }) {
+export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], qqBatchSources, expressions = [], searchExpressions, collectExpression, bookActions, activityActions, followupActions, memoryAgent, signal, assertActive, allowSilence = false, deferAssistant = false }) {
+  if (typeof deferAssistant !== 'boolean') throw new Error('回复保存方式无效。');
   if (typeof allowSilence !== 'boolean' || (allowSilence && (typeof scope !== 'string' || !/^group:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope)))) throw new Error('静默工具仅供获准自主关注的群聊使用。');
   if (assertActive !== undefined && typeof assertActive !== 'function') throw new Error('对话状态核对方式无效。');
   signal?.throwIfAborted(); assertActive?.();
@@ -443,7 +444,9 @@ export async function runConversation({ store, readAndRemember, scope, message, 
     }
     reply = omitImagePayload(reply, images);
     checkMemoryAgentSources();
-    store.addMessage({ scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])], conversationIds: [...conversationIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } });
+    const assistant = { scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])], conversationIds: [...conversationIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } };
+    if (deferAssistant) return { reply, mode, memories, expressionIds, commitDeliveredReply: store.prepareAssistantReply(assistant) };
+    store.addMessage(assistant);
     return { reply, mode, memories, expressionIds };
   } catch (error) {
     store.addEvent({ type: 'error', scope, content: `对话未完成：${omitImagePayload(error.message, images)}${images.length ? ' 本次附有图片，请确认所用模型支持视觉输入；未取得完整识图回复。' : ''}`, actor: 'system' });
