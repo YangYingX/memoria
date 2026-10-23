@@ -4,6 +4,20 @@ export function allowedScopes(scope) {
   return [scope, 'public'];
 }
 
+export function companionShelfMemories(store, scope, actor, excludedIds = []) {
+  const privateScope = (scope === 'owner' && actor === 'owner')
+    || (typeof scope === 'string' && /^person:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope));
+  if (!privateScope || typeof actor !== 'string' || !actor.trim() || actor.length > 160) return [];
+  const excluded = new Set(excludedIds), counts = { person: 0, interest: 0 }, result = [];
+  for (const memory of store.listMemories({ scope })) {
+    if (excluded.has(memory.id) || !Object.hasOwn(counts, memory.category) || counts[memory.category] >= 2) continue;
+    result.push(memory);
+    counts[memory.category]++;
+    if (result.length === 4) break;
+  }
+  return result;
+}
+
 export function conversationClock(store, now = Date.now()) {
   const timeZone = store.getSetting('proactive', {})?.timeZone || 'Asia/Shanghai';
   if (!Number.isSafeInteger(now) || typeof timeZone !== 'string' || timeZone.length > 80) throw new Error('对话日期或时区无效。');
