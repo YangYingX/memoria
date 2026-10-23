@@ -34,27 +34,42 @@ export function memoryExcerpt(memory, query) {
 }
 
 // The caller supplies verified Memoria identity. A DSH session or tool argument cannot widen it.
-export function createMemoryAccess({ store, scope, actor }) {
+export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' }) {
   if (typeof scope !== 'string' || !/^(owner|public|(?:group|person):[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127})$/.test(scope)
     || typeof actor !== 'string' || !actor.trim() || actor.length > 160 || (scope === 'owner' && actor !== 'owner')) {
     throw new Error('记忆访问需要已验证的场合与发言者。');
   }
   const scopes = allowedScopes(scope);
+  if (typeof excludeMessageId !== 'string' || (excludeMessageId && !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(excludeMessageId))) throw new Error('当前消息标识无效。');
   return Object.freeze({
     execute(name, args) {
-      const definitions = { search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'] };
+      const definitions = { search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
+        search_conversations: ['query', 'offset'], read_conversation: ['id', 'offset'] };
       const fields = typeof name === 'string' && Object.hasOwn(definitions, name) ? definitions[name] : null;
       if (!fields || !args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !fields.includes(key))) {
         throw new Error('记忆工具或参数无效，不能更改身份、范围或会话。');
       }
-      if (name === 'search_memory') {
+      if (name === 'search_memory' || name === 'search_conversations') {
         if (typeof args.query !== 'string' || args.query.length > 500) throw new Error('查询无效。');
+        if (name === 'search_conversations') return store.searchConversationPage(args.query, scopes, 6, args.offset === undefined ? 0 : args.offset, excludeMessageId);
         const page = store.searchMemoryPage(args.query, scopes, 6, args.offset === undefined ? 0 : args.offset);
         return { ...page, items: page.items.map(memory => withConversationSource(store, memoryExcerpt(memory, args.query), scope)) };
       }
       if (typeof args.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args.id)) throw new Error('记忆 ID 无效。');
       const offset = args.offset === undefined ? 0 : args.offset;
       if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('记忆正文位置无效。');
+      if (name === 'read_conversation') {
+        const turn = store.getConversation(args.id, scopes, excludeMessageId);
+        if (!turn) throw new Error('对话不存在、未完成或当前场合不可检索。');
+        const userHeader = `用户原话（${turn.createdAt}，发言者 ${turn.actor}）：\n`;
+        const assistantHeader = turn.assistantHidden ? '\n\n助手历史回复因引用了已更正或忘记的来源而不提供。\n'
+          : `\n\n助手历史回复（${turn.replyAt}，可能有误，不代表用户事实）：\n`;
+        const content = userHeader + turn.user + assistantHeader + turn.assistant;
+        if (offset >= content.length) throw new Error('对话正文位置超出范围。');
+        return memoryPage({ id: turn.id, scope: turn.scope, actor: turn.actor, createdAt: turn.createdAt, replyAt: turn.replyAt, assistantHidden: turn.assistantHidden, content,
+          sections: [{ role: 'user', startOffset: userHeader.length, endOffset: userHeader.length + turn.user.length },
+            { role: 'assistant', startOffset: userHeader.length + turn.user.length + assistantHeader.length, endOffset: content.length }] }, offset, 4000);
+      }
       if (name === 'read_memory') {
         const memory = store.getMemory(args.id);
         if (!memory || memory.deletedAt || !scopes.includes(memory.scope)) throw new Error('记忆不存在或当前场合不可用。');

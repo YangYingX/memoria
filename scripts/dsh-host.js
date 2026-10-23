@@ -6,7 +6,7 @@ import { registerMemoriaLlm } from './dsh-model-adapter.js';
 import { runMemoryAgent } from './dsh-memory-agent.js';
 
 const versions = { dsh: '0.2.1-rc.2', humanism: '1.7.0' };
-const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
+const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
 const readErrors = new Set(['PLATFORM_PAUSED', 'PERSISTENT_PAUSE', 'NO_READABLE_TEXT', 'NETWORK_FAILED',
   'READ_TOKEN_BUDGET', 'INVALID_SOURCE', 'SOURCE_TOO_LARGE', 'DSH_READ_FAILED']);
 const maxResultBytes = 2 * 1024 * 1024;
@@ -373,13 +373,15 @@ async function main(input) {
 
   // No model prompt or DSH session owns these memories: the parent binds verified identity and scope.
   for (const name of memoryTools) {
-    const keys = name === 'search_memory' ? ['query', 'offset'] : ['id', 'offset'];
+    const keys = name.startsWith('search_') ? ['query', 'offset'] : ['id', 'offset'];
     ctx.tools.register(defineTool({
       name: `memoria_${name}`,
-      description: name === 'search_memory' ? 'Search six persistent Memoria memories per page in the verified scope. Keep query unchanged and pass the page-level nextOffset as offset to continue. Page offsets count items; item offsets count text characters. Results reflect the current bookshelf.'
+      description: name === 'search_conversations' ? 'Search completed conversation transcripts in the verified scope. Keep user evidence separate from historical assistant replies.'
+        : name === 'read_conversation' ? 'Read a page from an authorized conversation transcript; sections label user and assistant text.'
+        : name === 'search_memory' ? 'Search six persistent Memoria memories per page in the verified scope. Keep query unchanged and pass the page-level nextOffset as offset to continue. Page offsets count items; item offsets count text characters. Results reflect the current bookshelf.'
         : name === 'read_memory' ? 'Read a page from a persistent Memoria memory in the current verified scope.'
           : 'Read a page of source evidence for a Memoria memory in the current verified scope.',
-      parameters: name === 'search_memory' ? { query: { type: 'string', required: true }, offset: { type: 'integer' } }
+      parameters: name.startsWith('search_') ? { query: { type: 'string', required: true }, offset: { type: 'integer' } }
         : { id: { type: 'string', required: true }, offset: { type: 'integer' } },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
       async execute(args, exec) {

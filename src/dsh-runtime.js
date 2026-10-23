@@ -9,7 +9,7 @@ import { moodSnapshot, validateMoodDelta } from './mood.js';
 import { createMemoryAgentAccess } from './dsh-memory-agent-access.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
-const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
+const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
 export const defaultDshReadingSettings = { dailyReadLimit: 6 };
 
 export function normalizeDshReadingSettings(input) {
@@ -61,7 +61,7 @@ export function createDshRuntime({ store, dataDir }) {
       try { return { enabled: config().enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus() }; }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
     },
-    async execute({ scope, actor, name, args = {}, signal, selectVideo }) {
+    async execute({ scope, actor, name, args = {}, signal, selectVideo, excludeMessageId = '' }) {
       if (stopped) throw new Error('DSH 运行层已停止。');
       const browsing = name === 'browse_bili';
       const reading = name === 'read_bili_video' || browsing;
@@ -69,7 +69,7 @@ export function createDshRuntime({ store, dataDir }) {
       const judging = name === 'evaluate_mood';
       const recalling = name === 'recall_memory';
       const modelTask = noting || judging;
-      const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor });
+      const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor, excludeMessageId });
       if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
       let noteMessages;
@@ -125,7 +125,7 @@ export function createDshRuntime({ store, dataDir }) {
       const modelAccess = createDshModelAccess({ store, signal: taskController.signal, purpose: judging ? 'mood' : 'reading-note' });
       let workspace;
       try {
-        const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal }) : null;
+        const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal, excludeMessageId }) : null;
         let cacheDirectory;
         if (reading) {
           cacheDirectory = join(resolve(dataDir), 'dsh-cache', 'humanism');

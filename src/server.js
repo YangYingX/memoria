@@ -438,8 +438,8 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
       const expressions = [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])];
       const collectExpression = origin ? input => store.saveExpression({ ...input, scope, origin, actor }) : undefined;
       const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, collectExpression,
-        ...(dshRuntime.status().enabled ? { memoryAgent: async query => ({ ok: true,
-          ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query } }) }) } : {}),
+        ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
+          ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions } : {}) });
       try { moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
@@ -782,7 +782,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (['/api/backups/preview', '/api/backups/restore'].includes(path) && req.method === 'POST') {
         const payload = decryptBackup(input.archive, input.passphrase);
-        if (![1, 2, 3].includes(payload.schemaVersion) || !['memories', 'messages', 'events', 'accounts', 'revisions', 'tombstones'].every(key => Array.isArray(payload[key])) || (payload.schemaVersion >= 2 && !['expressions', 'expressionTombstones'].every(key => Array.isArray(payload[key]))) || (payload.schemaVersion === 3 && !Array.isArray(payload.books))) throw new Error('备份数据格式不兼容。');
+        if (![1, 2, 3, 4].includes(payload.schemaVersion) || !['memories', 'messages', 'events', 'accounts', 'revisions', 'tombstones'].every(key => Array.isArray(payload[key])) || (payload.schemaVersion >= 2 && !['expressions', 'expressionTombstones'].every(key => Array.isArray(payload[key]))) || (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) || (payload.schemaVersion === 4 && !Array.isArray(payload.conversationBlocks))) throw new Error('备份数据格式不兼容。');
         if (path.endsWith('/preview')) return json(res, 200, { exportedAt: payload.exportedAt, counts: Object.fromEntries(['memories', 'events', 'messages', 'accounts', 'expressions', 'books'].map(key => [key, payload[key]?.length || 0])) });
         if (input.confirm !== true) throw new Error('请先预览并确认恢复。');
         if (activeMutation || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再恢复。' });

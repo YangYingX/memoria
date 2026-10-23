@@ -277,6 +277,9 @@ export function createStore(dbPath) {
       CREATE TABLE IF NOT EXISTS revisions (id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, snapshot TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS revisions_memory ON revisions(memory_id, created_at);
       CREATE TABLE IF NOT EXISTS tombstones (memory_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS conversation_blocks (
+        scope TEXT NOT NULL, event_id TEXT NOT NULL, blocked_at TEXT NOT NULL, PRIMARY KEY(scope, event_id)
+      );
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, type TEXT NOT NULL, scope TEXT NOT NULL, actor TEXT NOT NULL,
         content TEXT NOT NULL, source_ref TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL
@@ -354,6 +357,122 @@ export function createStore(dbPath) {
     insertRevision({ id: randomUUID(), memoryId: memory.id, snapshot: memory, createdAt: now });
   }
 
+  function insertConversationBlock(scope, eventId, blockedAt) {
+    run(`INSERT INTO conversation_blocks VALUES (?, ?, ?) ON CONFLICT(scope, event_id)
+      DO UPDATE SET blocked_at = MAX(conversation_blocks.blocked_at, excluded.blocked_at)`, scope, eventId, blockedAt);
+  }
+  function blockConversationSource(memory, now) {
+    if (memory.sourceType === 'conversation'
+      && get("SELECT 1 FROM events WHERE id = ? AND scope = ? AND type = 'message'", memory.sourceRef, memory.scope)) {
+      insertConversationBlock(memory.scope, memory.sourceRef, now);
+    }
+  }
+  function backfillConversationBlocks() {
+    // Revisions retain previous sources, including moves to another source or scope.
+    for (const row of all(`SELECT m.* FROM memories m WHERE m.source_type = 'conversation'
+      AND (m.deleted_at IS NOT NULL OR EXISTS (SELECT 1 FROM revisions r WHERE r.memory_id = m.id))`)) {
+      blockConversationSource(memoryRow(row), row.deleted_at ?? row.updated_at);
+    }
+    for (const row of all("SELECT snapshot, created_at FROM revisions WHERE json_extract(snapshot, '$.sourceType') = 'conversation'")) {
+      blockConversationSource(JSON.parse(row.snapshot), row.created_at);
+    }
+  }
+  function conversationScopes(scopes) {
+    if (!Array.isArray(scopes) || scopes.length > 100) invalid('对话查询须提供最多 100 个明确的可见范围。');
+    return [...new Set(scopes.map(scopeValue))];
+  }
+  function conversationScore(content, tokens, before = '', after = '') {
+    const normalized = normalize(content);
+    before = normalize(before); after = normalize(after);
+    const words = new Set([...(before + normalized + after).matchAll(/[a-z0-9_]+/g)]
+      .filter(match => match.index >= before.length && match.index + match[0].length <= before.length + normalized.length)
+      .map(match => match[0]));
+    return tokens.reduce((sum, token) => sum + Number(/^[a-z0-9_]+$/.test(token) ? words.has(token) : normalized.includes(token)), 0);
+  }
+  function conversationExcerpt(content, tokens) {
+    let bestOffset = 0, bestScore = -1;
+    for (let offset = 0; offset < content.length; offset += 600) {
+      const score = conversationScore(content.slice(offset, offset + 1200), tokens,
+        content.slice(Math.max(0, offset - 1), offset), content.slice(offset + 1200, offset + 1201));
+      if (score > bestScore) { bestOffset = offset; bestScore = score; }
+    }
+    return content.slice(bestOffset, bestOffset + 1200);
+  }
+  function conversationState(permitted) {
+    if (!permitted.length) return { messages: [], turns: [], blockedUsers: new Set(), hiddenAssistants: new Set() };
+    const placeholders = permitted.map(() => '?').join(',');
+    // Scope filtering precedes content matching on every read.
+    const messages = all(`SELECT * FROM messages WHERE scope IN (${placeholders}) ORDER BY created_at DESC, rowid DESC`, ...permitted).map(messageRow);
+    const users = new Map(messages.filter(message => message.role === 'user').map(message => [message.id, message]));
+    const sources = new Set();
+    const events = all(`SELECT * FROM events WHERE type = 'message' AND scope IN (${placeholders})`, ...permitted);
+    for (const row of events) {
+      const event = eventRow(row);
+      const messageId = event.metadata.messageId;
+      const user = typeof messageId === 'string' ? users.get(messageId) : null;
+      if (user && user.scope === event.scope && user.actor === event.actor && user.content === event.content) sources.add(user.id);
+    }
+    // Dependency IDs can cross scopes (for example a public source used in a private reply).
+    // Only IDs and references cross this boundary; no outside-scope message text enters the result.
+    const blockedUsers = new Set(all(`SELECT u.id FROM conversation_blocks b
+      JOIN events e ON e.id = b.event_id AND e.scope = b.scope AND e.type = 'message'
+      JOIN messages u ON u.role = 'user' AND u.scope = e.scope AND (
+        (json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id)
+        OR (json_type(e.metadata, '$.messageId') IS NOT 'text' AND e.actor = u.actor AND e.content = u.content))`).map(row => row.id));
+    const blockedMemoryIds = new Set(all('SELECT memory_id FROM tombstones').map(row => row.memory_id));
+    for (const row of all(`SELECT m.id FROM memories m JOIN conversation_blocks b ON b.scope = m.scope AND b.event_id = m.source_ref
+      WHERE m.source_type = 'conversation'`)) blockedMemoryIds.add(row.id);
+    for (const row of all(`SELECT r.memory_id FROM revisions r JOIN conversation_blocks b
+      ON b.scope = json_extract(r.snapshot, '$.scope') AND b.event_id = json_extract(r.snapshot, '$.sourceRef')
+      WHERE json_extract(r.snapshot, '$.sourceType') = 'conversation'`)) blockedMemoryIds.add(row.memory_id);
+    const hiddenAssistants = new Set(), replies = new Map(), dependents = new Map(), replyUsers = new Map();
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      const user = typeof message.metadata.replyTo === 'string' ? users.get(message.metadata.replyTo) : null;
+      if (user && user.scope === message.scope && ['live', 'demo'].includes(message.metadata.mode)
+        && message.createdAt >= user.createdAt && !replies.has(user.id)) replies.set(user.id, message);
+    }
+    const dependencies = all(`SELECT a.id, u.id AS user_id,
+      CASE WHEN json_type(a.metadata, '$.memoryIds') = 'array' THEN json_extract(a.metadata, '$.memoryIds') ELSE '[]' END AS memory_ids,
+      CASE WHEN json_type(a.metadata, '$.conversationIds') = 'array' THEN json_extract(a.metadata, '$.conversationIds') ELSE '[]' END AS conversation_ids
+      FROM messages a LEFT JOIN messages u ON u.role = 'user' AND u.scope = a.scope
+        AND json_type(a.metadata, '$.replyTo') = 'text' AND u.id = json_extract(a.metadata, '$.replyTo')
+      WHERE a.role = 'assistant'`);
+    for (const row of dependencies) {
+      if (row.user_id) replyUsers.set(row.id, row.user_id);
+      if (blockedUsers.has(row.user_id) || JSON.parse(row.memory_ids).some(id => typeof id === 'string' && blockedMemoryIds.has(id))) hiddenAssistants.add(row.id);
+      for (const id of JSON.parse(row.conversation_ids)) {
+        if (typeof id !== 'string') continue;
+        if (!dependents.has(id)) dependents.set(id, new Set());
+        dependents.get(id).add(row.id);
+      }
+    }
+    // A changed source can propagate through older replies. Keep unrelated user quotes visible.
+    const blockedReplies = new Set(blockedUsers);
+    for (const id of hiddenAssistants) if (replyUsers.has(id)) blockedReplies.add(replyUsers.get(id));
+    const queue = [...blockedReplies];
+    for (let index = 0; index < queue.length; index++) {
+      for (const id of dependents.get(queue[index]) ?? []) {
+        hiddenAssistants.add(id);
+        const userId = replyUsers.get(id);
+        if (userId && !blockedReplies.has(userId)) { blockedReplies.add(userId); queue.push(userId); }
+      }
+    }
+    for (const [id, userId] of replyUsers) if (blockedReplies.has(userId)) hiddenAssistants.add(id);
+    const turns = [];
+    for (const user of users.values()) {
+      const reply = replies.get(user.id);
+      if (!sources.has(user.id) || blockedUsers.has(user.id) || !reply) continue;
+      const assistantHidden = hiddenAssistants.has(reply.id);
+      turns.push({ id: user.id, scope: user.scope, actor: user.actor, createdAt: user.createdAt, user: user.content,
+        assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden });
+    }
+    return { messages, turns, blockedUsers, hiddenAssistants };
+  }
+
+  try { transaction(backfillConversationBlocks); }
+  catch { db.close(); throw new Error('无法整理本地对话索引，请检查数据库文件。'); }
+
   const api = {
     getSetting(key, fallback = null) {
       const row = get('SELECT value FROM settings WHERE key = ?', identifier(key, '设置名'));
@@ -404,6 +523,8 @@ export function createStore(dbPath) {
         const memory = { id, ...fields, createdAt: previous?.createdAt ?? now, updatedAt: now, deletedAt: null };
         if (previous) {
           addRevision(previous, now);
+          blockConversationSource(previous, now);
+          blockConversationSource(memory, now);
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
         } else insertMemory(memory);
         if (audit) insertEvent(audit);
@@ -540,6 +661,7 @@ export function createStore(dbPath) {
         if (!previous || previous.deletedAt) return false;
         const now = new Date().toISOString();
         addRevision(previous, now);
+        blockConversationSource(previous, now);
         run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id);
         run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now);
         if (audit) insertEvent(audit);
@@ -630,6 +752,37 @@ export function createStore(dbPath) {
       scope = scopeValue(scope);
       limit = integer(limit, '消息条数', 1, 1000);
       return all('SELECT * FROM messages WHERE scope = ? ORDER BY created_at DESC, rowid DESC LIMIT ?', scope, limit).reverse().map(messageRow);
+    },
+    searchConversationPage(query, scopes, limit = 6, offset = 0, excludeMessageId = '') {
+      query = text(query, '对话查询', 8000, { empty: true });
+      const permitted = conversationScopes(scopes);
+      limit = integer(limit, '检索条数', 1, 100);
+      offset = integer(offset, '检索位置', 0, Number.MAX_SAFE_INTEGER);
+      if (excludeMessageId !== '') excludeMessageId = identifier(excludeMessageId, '当前消息 ID');
+      const tokens = queryTokens(query);
+      let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId);
+      if (query) matches = tokens.length ? matches.map(turn => ({ turn,
+        score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens) }))
+        .filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.turn) : [];
+      const total = matches.length;
+      const items = offset < total ? matches.slice(offset, offset + limit).map(turn => ({ ...turn,
+        user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
+        userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 })) : [];
+      return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null };
+    },
+    getConversation(id, scopes, excludeMessageId = '') {
+      id = identifier(id, '对话 ID');
+      const permitted = conversationScopes(scopes);
+      if (excludeMessageId !== '') excludeMessageId = identifier(excludeMessageId, '当前消息 ID');
+      if (id === excludeMessageId) return null;
+      return conversationState(permitted).turns.find(turn => turn.id === id) ?? null;
+    },
+    listConversationHistory(scope, limit = 16) {
+      scope = scopeValue(scope);
+      limit = integer(limit, '消息条数', 1, 1000);
+      const state = conversationState([scope]);
+      return state.messages.filter(message => message.scope === scope && (message.role === 'user'
+        ? !state.blockedUsers.has(message.id) : !state.hiddenAssistants.has(message.id))).slice(0, limit).reverse();
     },
     listAccounts() {
       return all('SELECT * FROM accounts ORDER BY updated_at DESC, rowid DESC').map(accountRow);
@@ -785,7 +938,7 @@ export function createStore(dbPath) {
     },
     exportData() {
       return {
-        schemaVersion: 3, exportedAt: new Date().toISOString(),
+        schemaVersion: 4, exportedAt: new Date().toISOString(),
         persona: personaValue(api.getSetting('persona', null)),
         moodState: normalizeMoodState(api.getSetting('moodState', null)),
         memories: all('SELECT * FROM memories ORDER BY rowid').map(memoryRow),
@@ -794,6 +947,7 @@ export function createStore(dbPath) {
         messages: all('SELECT * FROM messages ORDER BY rowid').map(messageRow),
         accounts: all('SELECT * FROM accounts ORDER BY rowid').map(accountRow),
         tombstones: all('SELECT * FROM tombstones ORDER BY rowid').map(row => ({ memoryId: row.memory_id, deletedAt: row.deleted_at })),
+        conversationBlocks: all('SELECT * FROM conversation_blocks ORDER BY rowid').map(row => ({ scope: row.scope, eventId: row.event_id, blockedAt: row.blocked_at })),
         expressions: all('SELECT * FROM expressions ORDER BY rowid').map(row => ({ ...expressionRow(row), data: row.data,
           hash: row.hash, byteLength: row.byte_length, actor: row.actor })),
         expressionTombstones: all('SELECT * FROM expression_tombstones ORDER BY rowid').map(row => ({ origin: row.origin, hash: row.hash, deletedAt: row.deleted_at })),
@@ -803,11 +957,12 @@ export function createStore(dbPath) {
     },
     importData(payload) {
       record(payload, '备份');
-      if (![1, 2, 3].includes(payload.schemaVersion)) invalid('不支持此备份版本。');
+      if (![1, 2, 3, 4].includes(payload.schemaVersion)) invalid('不支持此备份版本。');
       if (payload.schemaVersion >= 2 && (!Array.isArray(payload.expressions) || !Array.isArray(payload.expressionTombstones))) {
-        invalid('版本 2 或 3 备份必须包含表情及表情删除记录数组。');
+        invalid('版本 2–4 备份必须包含表情及表情删除记录数组。');
       }
-      if (payload.schemaVersion === 3 && !Array.isArray(payload.books)) invalid('版本 3 备份必须包含书籍数组。');
+      if (payload.schemaVersion >= 3 && !Array.isArray(payload.books)) invalid('版本 3–4 备份必须包含书籍数组。');
+      if (payload.schemaVersion === 4 && !Array.isArray(payload.conversationBlocks)) invalid('版本 4 备份必须包含对话屏蔽记录数组。');
       timestamp(payload.exportedAt, '备份时间');
       const persona = personaValue(payload.persona);
       const moodState = normalizeMoodState(Object.hasOwn(payload, 'moodState') ? payload.moodState : null);
@@ -873,6 +1028,12 @@ export function createStore(dbPath) {
         accountKeys.add(key);
       }
       const tombstones = rows('tombstones', item => ({ memoryId: identifier(item.memoryId, '已删除记忆 ID'), deletedAt: timestamp(item.deletedAt, '删除时间') }));
+      const conversationBlocks = payload.conversationBlocks === undefined ? [] : rows('conversationBlocks', item => {
+        const fields = ['scope', 'eventId', 'blockedAt'];
+        requireFields(item, fields);
+        if (Object.keys(item).some(key => !fields.includes(key))) invalid('对话屏蔽记录包含未知字段。');
+        return { scope: scopeValue(item.scope), eventId: identifier(item.eventId, '对话来源 ID'), blockedAt: timestamp(item.blockedAt, '对话屏蔽时间') };
+      }, item => JSON.stringify([item.scope, item.eventId]));
       const expressions = payload.expressions === undefined ? [] : rows('expressions', item => {
         requireFields(item, ['name', 'description', 'scope', 'origin', 'mimeType', 'data', 'hash', 'byteLength', 'actor']);
         if (typeof item.data !== 'string' || item.data.length > Math.ceil(EXPRESSION_LIMITS.image / 3) * 4) invalid('备份表情图片超过单张 2 MiB 限制。');
@@ -938,6 +1099,9 @@ export function createStore(dbPath) {
         for (const revision of revisions) insertRevision(revision);
         for (const event of events) insertEvent(event);
         for (const message of messages) insertMessage(message);
+        // This table is never cleared: even backups made before a memory existed cannot undo its block.
+        for (const item of conversationBlocks) insertConversationBlock(item.scope, item.eventId, item.blockedAt);
+        backfillConversationBlocks();
         // Account mappings remain in the export for review, but must be verified again after restore.
         // In particular, an old backup must not reactivate a revoked owner account.
         for (const [id, deletedAt] of deleted) run('INSERT INTO tombstones VALUES (?, ?)', id, deletedAt);
