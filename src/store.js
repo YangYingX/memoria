@@ -363,7 +363,10 @@ export function createStore(dbPath) {
   }
   function blockConversationSource(memory, now) {
     if (memory.sourceType === 'conversation'
-      && get("SELECT 1 FROM events WHERE id = ? AND scope = ? AND type = 'message'", memory.sourceRef, memory.scope)) {
+      && (get("SELECT 1 FROM events WHERE id = ? AND scope = ? AND type = 'message'", memory.sourceRef, memory.scope)
+        || /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(memory.sourceRef))) {
+      // Keep verified legacy IDs; only application UUIDs establish evidence when a backup omitted the matching event.
+      // Arbitrary URLs and unverified custom labels must not block a scope's legacy history.
       insertConversationBlock(memory.scope, memory.sourceRef, now);
     }
   }
@@ -404,14 +407,10 @@ export function createStore(dbPath) {
     // Scope filtering precedes content matching on every read.
     const messages = all(`SELECT * FROM messages WHERE scope IN (${placeholders}) ORDER BY created_at DESC, rowid DESC`, ...permitted).map(messageRow);
     const users = new Map(messages.filter(message => message.role === 'user').map(message => [message.id, message]));
-    const sources = new Set();
-    const events = all(`SELECT * FROM events WHERE type = 'message' AND scope IN (${placeholders})`, ...permitted);
-    for (const row of events) {
-      const event = eventRow(row);
-      const messageId = event.metadata.messageId;
-      const user = typeof messageId === 'string' ? users.get(messageId) : null;
-      if (user && user.scope === event.scope && user.actor === event.actor && user.content === event.content) sources.add(user.id);
-    }
+    const linkedUsers = new Set(all(`SELECT u.id FROM events e JOIN messages u
+      ON u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
+        AND json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id
+      WHERE e.type = 'message' AND e.scope IN (${placeholders})`, ...permitted).map(row => row.id));
     // Dependency IDs can cross scopes (for example a public source used in a private reply).
     // Only IDs and references cross this boundary; no outside-scope message text enters the result.
     const blockedUsers = new Set(all(`SELECT u.id FROM conversation_blocks b
@@ -419,6 +418,21 @@ export function createStore(dbPath) {
       JOIN messages u ON u.role = 'user' AND u.scope = e.scope AND (
         (json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id)
         OR (json_type(e.metadata, '$.messageId') IS NOT 'text' AND e.actor = u.actor AND e.content = u.content))`).map(row => row.id));
+    // A partial restore can retain a block but omit the event identifying its old quote.
+    // Keep unlinked legacy quotes in that scope unavailable instead of guessing the missing source.
+    const unresolvedScopes = new Set(all(`SELECT b.scope FROM conversation_blocks b WHERE NOT EXISTS (
+      SELECT 1 FROM events e JOIN messages u ON u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
+        AND ((json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id)
+          OR json_type(e.metadata, '$.messageId') IS NOT 'text')
+      WHERE e.id = b.event_id AND e.scope = b.scope AND e.type = 'message')`).map(row => row.scope));
+    for (const user of users.values()) if (unresolvedScopes.has(user.scope) && !linkedUsers.has(user.id)) blockedUsers.add(user.id);
+    // Outside-scope quotes can have informed a visible reply; carry only their unresolved IDs into the dependency graph.
+    for (const row of all(`SELECT u.id, u.scope FROM messages u WHERE u.role = 'user' AND u.scope NOT IN (${placeholders})
+      AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'message' AND e.scope = u.scope
+        AND e.actor = u.actor AND e.content = u.content AND json_type(e.metadata, '$.messageId') = 'text'
+        AND json_extract(e.metadata, '$.messageId') = u.id)`, ...permitted)) {
+      if (unresolvedScopes.has(row.scope)) blockedUsers.add(row.id);
+    }
     const blockedMemoryIds = new Set(all('SELECT memory_id FROM tombstones').map(row => row.memory_id));
     for (const row of all(`SELECT m.id FROM memories m JOIN conversation_blocks b ON b.scope = m.scope AND b.event_id = m.source_ref
       WHERE m.source_type = 'conversation'`)) blockedMemoryIds.add(row.id);
@@ -464,7 +478,7 @@ export function createStore(dbPath) {
     const turns = [];
     for (const user of users.values()) {
       const reply = replies.get(user.id);
-      if (!sources.has(user.id) || blockedUsers.has(user.id) || !reply) continue;
+      if (blockedUsers.has(user.id) || !reply) continue;
       const assistantHidden = hiddenAssistants.has(reply.id);
       turns.push({ id: user.id, scope: user.scope, actor: user.actor, createdAt: user.createdAt, user: user.content,
         assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden });
