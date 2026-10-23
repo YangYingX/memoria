@@ -62,6 +62,38 @@ function timestamp(value, label) {
   return value;
 }
 
+function calendarDate(value, label) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) invalid(`${label}须为 YYYY-MM-DD 日期。`);
+  const time = Date.parse(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== value) invalid(`${label}不是有效日历日期。`);
+  return value;
+}
+
+function conversationDateRange(input) {
+  if (input === undefined) return null;
+  record(input, '对话日期范围');
+  if (Object.keys(input).some(key => !['startDate', 'endDate', 'timeZone'].includes(key))) invalid('对话日期范围包含未知字段。');
+  const hasStart = Object.hasOwn(input, 'startDate'), hasEnd = Object.hasOwn(input, 'endDate');
+  const startDate = hasStart ? calendarDate(input.startDate, '开始日期') : undefined;
+  const endDate = hasEnd ? calendarDate(input.endDate, '结束日期') : undefined;
+  if (hasStart && hasEnd && startDate > endDate) invalid('开始日期不能晚于结束日期。');
+  const timeZone = Object.hasOwn(input, 'timeZone') ? input.timeZone : 'Asia/Shanghai';
+  if (typeof timeZone !== 'string' || !timeZone || timeZone.length > 80) invalid('对话检索时区无效。');
+  let format;
+  try { format = new Intl.DateTimeFormat('en-US', { calendar: 'gregory', numberingSystem: 'latn', timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit', era: 'short' }); }
+  catch { invalid('对话检索时区无效。'); }
+  if (!hasStart && !hasEnd) return null;
+  const key = value => Number(value.replaceAll('-', ''));
+  return { range: { ...(hasStart ? { startDate } : {}), ...(hasEnd ? { endDate } : {}), timeZone },
+    includes(createdAt) {
+      const parts = Object.fromEntries(format.formatToParts(new Date(createdAt)).map(part => [part.type, part.value]));
+      const year = parts.era === 'BC' ? 1 - Number(parts.year) : Number(parts.year);
+      const day = year * 10000 + Number(parts.month) * 100 + Number(parts.day);
+      return (!hasStart || day >= key(startDate)) && (!hasEnd || day <= key(endDate));
+    } };
+}
+
 function jsonValue(value, label, max = LIMITS.metadata) {
   function check(item, depth) {
     if (depth > 10) invalid(`${label}嵌套过深。`);
@@ -1411,14 +1443,15 @@ export function createStore(dbPath) {
       limit = integer(limit, '消息条数', 1, 1000);
       return all('SELECT * FROM messages WHERE scope = ? ORDER BY created_at DESC, rowid DESC LIMIT ?', scope, limit).reverse().map(messageRow);
     },
-    searchConversationPage(query, scopes, limit = 6, offset = 0, excludeMessageId = '') {
+    searchConversationPage(query, scopes, limit = 6, offset = 0, excludeMessageId = '', dates) {
       query = text(query, '对话查询', 8000, { empty: true });
       const permitted = conversationScopes(scopes);
       limit = integer(limit, '检索条数', 1, 100);
       offset = integer(offset, '检索位置', 0, Number.MAX_SAFE_INTEGER);
       if (excludeMessageId !== '') excludeMessageId = identifier(excludeMessageId, '当前消息 ID');
+      const dateFilter = conversationDateRange(dates);
       const tokens = queryTokens(query);
-      let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId);
+      let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId && (!dateFilter || dateFilter.includes(turn.createdAt)));
       if (query) matches = tokens.length ? matches.map(turn => ({ turn,
         score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens)
           + (turn.qqReplyContext || []).reduce((sum, part) => sum + (part.reply?.status === 'verified' ? conversationScore(part.reply.text, tokens) : 0), 0) }))
@@ -1430,7 +1463,8 @@ export function createStore(dbPath) {
           user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
           userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 };
       }) : [];
-      return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null };
+      return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null,
+        ...(dateFilter ? { dateRange: dateFilter.range } : {}) };
     },
     getConversation(id, scopes, excludeMessageId = '') {
       id = identifier(id, '对话 ID');
