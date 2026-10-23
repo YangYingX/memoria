@@ -27,6 +27,7 @@ import { createDshRuntime, defaultDshReadingSettings, normalizeDshReadingSetting
 import { createMateRuntime, mateFailure } from './mate-runtime.js';
 import { biliVideoUrl, biliReadingPage } from './bili-reading.js';
 import { createBiliAccount } from './bili-account.js';
+import { createHeyboxAccount } from './heybox-account.js';
 import { browseBiliVideos } from './bili-browse.js';
 import { defaultMoodSettings, normalizeMoodSettings, moodSnapshot } from './mood.js';
 import { createMoodJobs } from './mood-jobs.js';
@@ -53,6 +54,12 @@ const store = createStore(join(dataDir, 'persona.sqlite'));
 const dshRuntime = createDshRuntime({ store, dataDir });
 const mateRuntime = createMateRuntime({ dataDir });
 const biliAccount = createBiliAccount({ dataDir });
+const heyboxAccount = createHeyboxAccount({ dataDir, getExpectedAccountId: () => {
+  const path = join(dataDir, 'android-runtime.json');
+  if (!existsSync(path)) return undefined;
+  try { return JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')).expectedAccountId; }
+  catch { throw new Error('小黑盒专用环境配置无法读取，请核对本机配置后重新确认登录。'); }
+} });
 const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const defaults = {
@@ -837,7 +844,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
       if (path === '/api/mate/reset' && req.method === 'POST') {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) return json(res, 400, { error: '重置陪伴节奏不接受额外参数。' });
         if (proactiveJobs.status().busy || mateRuntime.status().busy) return json(res, 409, { error: '请等待当前主动私聊判断完成后重置节奏。' });
@@ -845,6 +852,9 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: true, status: mateRuntime.status(), message: '已重置陪伴节奏。记忆、未回应记录和发送额度保持不变。' });
       }
       if (path === '/api/feishu/reconnect' && req.method === 'POST') { feishuChat.disconnect(); await feishuRuntime.restart(); return json(res, 200, { status: feishuChat.status(), connection: feishuRuntime.status() }); }
+      if (path === '/api/heybox/account' && req.method === 'GET') return json(res, 200, heyboxAccount.status());
+      if (path === '/api/heybox/login' && req.method === 'POST') return json(res, 200, await heyboxAccount.openLogin());
+      if (path === '/api/heybox/login/confirm' && req.method === 'POST') return json(res, 200, await heyboxAccount.confirmLogin());
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
       if (path === '/api/bili/login/import' && req.method === 'POST') return json(res, 200, await biliAccount.importLogin(input));
@@ -1031,5 +1041,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await biliAccount.close(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });

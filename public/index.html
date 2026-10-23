@@ -160,6 +160,9 @@
                 <p class="caption">签名每天最多尝试更新 1 次；头像遵循上方间隔。未确认结果的操作不会自动重试。</p>
               </div>
               <div class="self-expression-platform-settings"><h3>小黑盒</h3><p class="caption">使用本机配置的栖忆专用账号，需要 Windows 上的专用 MuMu 设备在线并已登录。创建人账号不用于发帖。</p>
+                <p id="heybox-account-summary" class="caption" role="status">正在读取小黑盒专用浏览器状态…</p>
+                <div class="field-row"><button id="heybox-login" class="button secondary" type="button">登录栖忆专用小黑盒账号</button><button id="heybox-login-confirm" class="button secondary" type="button" disabled>完成登录与验证，保存状态</button></div>
+                <p class="caption">使用本机独立浏览器窗口，由你正常登录并完成验证码等验证后确认保存。Windows 使用已安装的 Google Chrome，Linux 需要完整 Chromium 和图形桌面。此登录供项目核对专用执行账号，与“身份与备份”中的创建人账号绑定独立；Cookie 只保存在本机，不发送给模型。保存状态不代表当前认证仍有效，也不会开启下列业务开关；现有客户端动作仍需要专用 MuMu。</p>
                 <label class="check-label"><input id="self-expression-heybox-enabled" type="checkbox">允许在小黑盒自主表达</label>
                 <div class="self-expression-options"><label class="check-label"><input id="self-expression-heybox-post" type="checkbox">发帖</label><label class="check-label"><input id="self-expression-heybox-comment" type="checkbox">评论已读帖子</label><label class="check-label"><input id="self-expression-heybox-reply" type="checkbox">回复已读评论</label></div>
                 <div class="field-row"><label>小黑盒每天公开表达上限<input id="self-expression-heybox-daily-limit" type="number" min="0" max="100" required></label><label>发帖分区<input id="self-expression-heybox-topic" maxlength="40" required placeholder="分区的准确名称"></label></div>

@@ -112,6 +112,12 @@ async function loadState({ fill = false } = {}) {
   $('bili-account-summary').textContent = (biliAccount?.readReady ?? biliAccount?.configured) ? `专用账号 ${biliAccount.accountId || ''}：视频读取凭据已保存；社交凭据${biliAccount.socialReady ? '已保存' : '尚未齐备，可重新导入登录'}。此状态不表示当前平台认证仍有效。`
     : biliAccount?.browserOpen ? '专用登录窗口已打开。登录完成后点击“完成登录，保存状态”。' : '尚未保存 B站专用账号；读取时使用匿名公开接口。';
   $('bili-login-confirm').disabled = !biliAccount?.browserOpen;
+  const heyboxAccount = state.data.heyboxAccountStatus;
+  $('heybox-account-summary').textContent = heyboxAccount?.browserOpen
+    ? '栖忆专用登录窗口已打开。请完成正常登录和验证，再点击“完成登录与验证，保存状态”。'
+    : heyboxAccount?.configured ? `栖忆专用账号 ${heyboxAccount.accountId || ''} 的登录状态已保存在本机；不表示当前平台认证仍有效。`
+      : '尚未保存小黑盒专用浏览器登录状态；与创建人身份绑定分开管理。';
+  $('heybox-login-confirm').disabled = !heyboxAccount?.browserOpen;
   const qqChat = state.data.qqChatStatus;
   $('qq-chat-summary').textContent = qqChat ? `今日 QQ 智能对话 ${qqChat.attempts} / ${qqChat.dailyLimit} 次，剩余 ${qqChat.remaining} 次（UTC）。${qqChat.dailyLimit === 0 ? '已暂停新的智能对话。' : ''}` : '正在读取 QQ 智能对话额度…';
   const feishu = state.data.feishuStatus, connection = state.data.feishuConnection;
@@ -1022,6 +1028,18 @@ $('bili-login').addEventListener('click', () => action($('bili-login'), async ()
   await api('/api/bili/login', { method: 'POST', data: {} });
   await loadState(); toast('专用浏览器已打开，请手动登录后保存状态。');
 }));
+$('heybox-login').addEventListener('click', () => action($('heybox-login'), async () => {
+  try {
+    await api('/api/heybox/login', { method: 'POST', data: {} });
+    toast('专用浏览器已打开，请手动完成小黑盒登录和验证。');
+  } finally { await loadState(); }
+}));
+$('heybox-login-confirm').addEventListener('click', () => action($('heybox-login-confirm'), async () => {
+  try {
+    const result = await api('/api/heybox/login/confirm', { method: 'POST', data: {} });
+    toast(result.configured ? '小黑盒专用账号登录状态已保存在本机；有效性仍需后续核对。' : '确认已结束，请核对专用账号配置后重试。', !result.configured);
+  } finally { await loadState(); }
+}).finally(() => { $('heybox-login-confirm').disabled = !state.data?.heyboxAccountStatus?.browserOpen; }));
 $('bili-login-confirm').addEventListener('click', () => action($('bili-login-confirm'), async () => {
   await api('/api/bili/login/confirm', { method: 'POST', data: {} });
   await loadState(); toast('B站专用账号登录状态已保存到本机。');

@@ -293,6 +293,17 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
       view = await readHeyboxView();
     }
     if (view.activity !== `${androidDevice.package}/.MainActivity`) throw new Error('请先在小黑盒打开“我”页面，再读取个人主页。');
+    if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_title` && node.text === '签到成功!')) {
+      const titles = view.nodes.filter(node => node.id === `${androidDevice.package}:id/tv_title`);
+      const confirms = view.nodes.filter(node => node.id === `${androidDevice.package}:id/tv_confirm`);
+      const reward = id => view.nodes.filter(node => node.id === `${androidDevice.package}:id/${id}`);
+      if (titles.length !== 1 || confirms.length !== 1 || confirms[0].text !== '确定' || !confirms[0].enabled
+        || ['tv_hcoin', 'tv_exp'].some(id => reward(id).length !== 1 || !/^\+\d{1,6}$/.test(reward(id)[0].text))
+        || reward('tv_streak').length !== 1 || !/^已签到 \d{1,6} 天$/.test(reward('tv_streak')[0].text)
+        || view.nodes.some(node => node.className === 'android.widget.EditText')) throw new Error('签到提示无法唯一核对，本次未关闭。');
+      await tapHeyboxNode(view, `${androidDevice.package}:id/tv_confirm`);
+      view = await readHeyboxView();
+    }
     if (view.nodes.some(node => node.id === `${androidDevice.package}:id/tv_title` && node.text === '绑定Steam领取5元优惠券')) {
       await tapHeyboxNode(view, `${androidDevice.package}:id/iv_close`);
       view = await readHeyboxView();
