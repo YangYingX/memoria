@@ -16,14 +16,18 @@ function checkCount(images) {
   if (!Array.isArray(images) || images.length > MAX_IMAGES) throw new Error('每条消息最多支持 4 张图片。');
 }
 
-export async function loadQQImages(urls, options = {}) {
-  options.signal?.throwIfAborted();
+export function validateQQImageUrls(urls) {
   checkCount(urls);
-  if (!urls.length) return [];
-  const addresses = urls.map(value => {
+  return urls.map(value => {
     if (typeof value !== 'string' || !value) throw new Error('QQ 图片缺少公开下载地址，请重新发送原图。');
     return assertPublicUrl(value).href;
   });
+}
+
+export async function loadQQImages(urls, options = {}) {
+  options.signal?.throwIfAborted();
+  const addresses = validateQQImageUrls(urls);
+  if (!addresses.length) return [];
   const timeout = AbortSignal.timeout(20000);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   const images = [];
