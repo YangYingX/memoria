@@ -1,5 +1,5 @@
 import { requestCompletion } from './model.js';
-import { createMemoryAccess } from './memory-access.js';
+import { createMemoryAccess, allowedScopes } from './memory-access.js';
 import { createDshProactiveContext } from './dsh-proactive-context.js';
 
 const definitions = [
@@ -54,6 +54,33 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
     messages[1].content = JSON.stringify({ task: query, context: proactive.input });
   }
   const pending = new Map(), approvedIds = new Set(), memoryIds = new Set(), conversationIds = new Set(proactive?.conversationIds || []);
+  const memoryEvidence = new Map(), conversationEvidence = new Map(), scopes = allowedScopes(scope);
+  let changedEvidence = false;
+  function memoryEvidenceNow(id) {
+    const memory = store.getMemory(id);
+    if (!memory || memory.deletedAt || !scopes.includes(memory.scope)) return null;
+    return { memory, source: store.getMemorySource(id, scopes), parts: store.getReadingParts(id, scopes) };
+  }
+  function sourcesCurrent() {
+    if (proactive) return proactive.sourcesCurrent();
+    try {
+      return !changedEvidence
+        && [...memoryEvidence].every(([id, value]) => JSON.stringify(memoryEvidenceNow(id)) === value)
+        && [...conversationEvidence].every(([id, value]) => JSON.stringify(store.getConversation(id, scopes, excludeMessageId)) === value);
+    } catch { return false; }
+  }
+  function trackEvidence(name, args, result) {
+    if (proactive) return proactive.track(name, args, result);
+    function track(map, id, value) {
+      const encoded = JSON.stringify(value);
+      if (map.has(id) && map.get(id) !== encoded) changedEvidence = true;
+      else map.set(id, encoded);
+    }
+    if (name === 'search_memory') for (const item of result.items) track(memoryEvidence, item.id, memoryEvidenceNow(item.id));
+    else if (name === 'search_conversations') for (const item of result.items) track(conversationEvidence, item.id, store.getConversation(item.id, scopes, excludeMessageId));
+    else if (name === 'read_conversation') track(conversationEvidence, args.id, store.getConversation(args.id, scopes, excludeMessageId));
+    else track(memoryEvidence, args.id, memoryEvidenceNow(args.id));
+  }
   let state = 'ready', modelRequests = 0, toolCalls = 0, approvedCalls = 0, text = '';
   function fail(message) {
     state = 'failed'; pending.clear();
@@ -62,7 +89,7 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
   function available() {
     if (signal?.aborted) fail('记忆子代理任务已取消。');
     if (state === 'failed') throw new MemoryAgentError('记忆子代理任务已终止。');
-    if (proactive && !proactive.sourcesCurrent()) fail('主动拟聊的资料已变化。');
+    if (!sourcesCurrent()) fail(proactive ? '主动拟聊的资料已变化。' : '记忆子代理使用的资料已变化，本次结果已取消。');
   }
   return Object.freeze({
     async complete(...input) {
@@ -140,7 +167,7 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
       try { result = memoryAccess.execute(input.name, args); }
       catch { result = { error: '当前场合无法完成此记忆读取；资料可能不存在、已变更或不可见。' }; }
       if (!result.error) {
-        proactive?.track(input.name, args, result);
+        trackEvidence(input.name, args, result);
         if (input.name === 'search_memory') for (const item of result.items) memoryIds.add(item.id);
         else if (input.name === 'search_conversations') for (const item of result.items) conversationIds.add(item.id);
         else if (input.name === 'read_conversation') conversationIds.add(args.id);
@@ -153,7 +180,7 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
     finalResult() {
       available();
       return state === 'final' ? { text, modelRequests, toolCalls, memoryIds: [...memoryIds], conversationIds: [...conversationIds],
-        ...(proactive ? { historyMessageIds: proactive.historyMessageIds, sourcesCurrent: proactive.sourcesCurrent } : {}) } : null;
+        sourcesCurrent, ...(proactive ? { historyMessageIds: proactive.historyMessageIds } : {}) } : null;
     },
   });
 }

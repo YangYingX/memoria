@@ -282,7 +282,7 @@ export function createDshRuntime({ store, dataDir }) {
             taskController.abort();
             clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
-            else if (composing && !result.sourcesCurrent()) reject(new Error('主动拟聊的资料已变化。'));
+            else if (recalling && !result.sourcesCurrent()) reject(new DshTaskError(composing ? '主动拟聊的资料已变化。' : '记忆子代理使用的资料已变化，本次结果已取消。'));
             else if (modelTask && (!modelRequested || typeof authorizedNote !== 'string'
               || (feiyu ? !authorizedMood : result?.text !== authorizedNote))) reject(new DshTaskError('DSH 未返回有效的模型结果。'));
             else if (judging) {

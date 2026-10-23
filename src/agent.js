@@ -131,6 +131,10 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const conversationIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
   const historyMessageIds = history.filter(item => item.role === 'assistant').map(item => item.id);
   const dependencyMemoryIds = new Set();
+  let memoryAgentSourcesCurrent;
+  function checkMemoryAgentSources() {
+    if (memoryAgentSourcesCurrent && !memoryAgentSourcesCurrent()) throw new Error('记忆子代理引用的资料已变化，本次回答已停止。');
+  }
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
   for (const item of history.filter(item => item.role === 'assistant')) {
     // A history boundary can retain an assistant reply without its original user message.
@@ -190,7 +194,9 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       ];
       let toolCount = 0;
       for (let round = 0; round < 4; round++) {
+        checkMemoryAgentSources();
         const completion = await requestCompletion({ store, messages, ...(round < 3 ? { tools } : {}) });
+        checkMemoryAgentSources();
         const answer = completion.choices[0].message;
         if (!answer.tool_calls?.length) { reply = typeof answer.content === 'string' ? answer.content.trim() : ''; break; }
         if (answer.tool_calls.length > 5 || toolCount + answer.tool_calls.length > 5) throw new Error('本次对话已达到 5 次工具调用上限。');
@@ -225,6 +231,8 @@ export async function runConversation({ store, readAndRemember, scope, message, 
                 || typeof args.query !== 'string' || !args.query.trim() || args.query.length > 500) throw new Error('记忆子代理查询须为1–500字，不接受身份或范围参数。');
               try {
                 result = await memoryAgent(args.query.trim(), incoming.id);
+                if (typeof result.sourcesCurrent === 'function') memoryAgentSourcesCurrent = result.sourcesCurrent;
+                checkMemoryAgentSources();
                 if (Array.isArray(result.memoryIds)) for (const id of result.memoryIds) {
                   if (!validReference(id)) continue;
                   dependencyMemoryIds.add(id);
@@ -357,6 +365,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       if (!reply) throw new Error('模型没有返回有效回复，请重试或检查工具调用兼容性。');
     }
     reply = omitImagePayload(reply, images);
+    checkMemoryAgentSources();
     store.addMessage({ scope, role: 'assistant', content: reply.slice(0, 16000), actor: 'agent', metadata: { mode, memoryIds: [...new Set([...dependencyMemoryIds, ...memories.map(m => m.id)])], conversationIds: [...conversationIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } });
     return { reply, mode, memories, expressionIds };
   } catch (error) {
