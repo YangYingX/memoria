@@ -79,17 +79,22 @@ function bookNotes(notes) {
   return result;
 }
 
-export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], expressions = [], collectExpression, bookActions, activityActions }) {
+export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], expressions = [], collectExpression, bookActions, activityActions, memoryAgent }) {
   images = validateConversationImages(images);
   if (!Array.isArray(expressions) || expressions.length > 128 || expressions.some(item => !item || typeof item.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(item.id)
     || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 80 || typeof item.description !== 'string' || item.description.length > 500)) throw new Error('可用表情目录无效。');
   const expressionCatalog = new Map(expressions.map(item => [item.id, { id: item.id, name: item.name, description: item.description }]));
   const expressionIds = [];
   let collectionAttempted = false;
+  let memoryAgentAttempted = false;
   const tools = expressionCatalog.size ? [...toolDefinitions, { type: 'function', function: {
     name: 'select_expression', description: '按本轮语气自选一张合适的表情作为文字补充，也可以不选。不要每条消息都发表情，每次对话最多选一张。',
     parameters: { type: 'object', properties: { id: { type: 'string', enum: [...expressionCatalog.keys()] } }, required: ['id'], additionalProperties: false },
   } }] : [...toolDefinitions];
+  if (typeof memoryAgent === 'function') tools.push({ type: 'function', function: {
+    name: 'recall_with_dsh', description: '需要多步查找旧记忆、核对人物原话时，可交给DSH原生记忆子代理。仅检索当前场合可见书架，不访问平台或改记忆。每轮最多一次；最多额外4次模型请求、5次只读工具，不保证查完整个书架。简单问题可直接用现有记忆工具。',
+    parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 } }, required: ['query'], additionalProperties: false },
+  } });
   const canUseBooks = scope === 'owner' && actor === 'owner' && ['list', 'read', 'importUrl', 'notes'].every(action => typeof bookActions?.[action] === 'function');
   const listedBookIds = new Set();
   let bookActionAttempted = false;
@@ -200,7 +205,14 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               }
             }
             const args = JSON.parse(call.function.arguments);
-            if (activityTool) {
+            if (call.function.name === 'recall_with_dsh') {
+              if (typeof memoryAgent !== 'function' || memoryAgentAttempted) throw new Error('本轮记忆子代理已尝试或尚未接入。');
+              memoryAgentAttempted = true;
+              if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => key !== 'query')
+                || typeof args.query !== 'string' || !args.query.trim() || args.query.length > 500) throw new Error('记忆子代理查询须为1–500字，不接受身份或范围参数。');
+              try { result = await memoryAgent(args.query.trim()); }
+              catch { result = { ok: false, message: '本次记忆子代理未完成，未自动重试；不能据此认定书架没有相关记录。' }; }
+            } else if (activityTool) {
               if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw new Error('活动工具不接受网址、账号或其他参数。');
               const action = { get_activity_status: 'status', browse_community: 'browse', browse_bilibili: 'browseBilibili', check_recent_post: 'checkPost' }[call.function.name];
               try { result = await activityActions[action](); }

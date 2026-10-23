@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } fro
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerMemoriaLlm } from './dsh-model-adapter.js';
+import { runMemoryAgent } from './dsh-memory-agent.js';
 
 const versions = { dsh: '0.2.1-rc.2', humanism: '1.7.0' };
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
@@ -166,6 +167,23 @@ function requestMemory(name, args, signal) {
   });
 }
 
+function requestAgent(type, call, signal) {
+  return new Promise((accept, reject) => {
+    if (signal?.aborted || lifecycle.signal.aborted || !process.connected) return reject(new Error('AGENT_CANCELLED'));
+    const id = ++sequence;
+    const finish = (error, result) => {
+      if (!pending.delete(id)) return;
+      clearTimeout(timer); signal?.removeEventListener('abort', abort); lifecycle.signal.removeEventListener('abort', abort);
+      error ? reject(new Error('AGENT_FAILED')) : accept(result);
+    };
+    const abort = () => finish('AGENT_CANCELLED');
+    const timer = setTimeout(() => finish('AGENT_TIMEOUT'), type === 'agent-model' ? 65000 : 10000);
+    pending.set(id, { kind: `${type}-result`, finish });
+    signal?.addEventListener('abort', abort, { once: true }); lifecycle.signal.addEventListener('abort', abort, { once: true });
+    send({ type, id, ...(type === 'agent-memory' ? { call } : {}) }).catch(() => finish('IPC_DISCONNECTED'));
+  });
+}
+
 function requestCompletion(args) {
   return new Promise((accept, reject) => {
     if (lifecycle.signal.aborted || !process.connected) return reject(new Error('DSH_MODEL_CANCELLED'));
@@ -191,7 +209,7 @@ const start = new Promise((accept, reject) => {
     if (message.type === 'start' && !started) {
       started = true;
       accept(message);
-    } else if (['memory-result', 'video-selection', 'model-result'].includes(message.type) && started) {
+    } else if (['memory-result', 'video-selection', 'model-result', 'agent-model-result', 'agent-memory-result'].includes(message.type) && started) {
       const request = pending.get(message.id);
       if (!request || request.kind !== message.type) return;
       if (message.type === 'video-selection') {
@@ -227,12 +245,13 @@ async function main(input) {
   const reading = operationName === 'read_bili_video' || browsing;
   const noting = operationName === 'note_bili_reading';
   const judging = operationName === 'evaluate_mood';
+  const recalling = operationName === 'recall_memory';
   const modelTask = noting || judging;
   if (Number(process.versions.node.split('.')[0]) !== 24) fail('NODE_VERSION_MISMATCH');
   if (!fields(input, ['type', 'hostDirectory', 'workspace', 'cacheDirectory', 'credentialPath', 'operation'])
     || ![input.hostDirectory, input.workspace].every(value => typeof value === 'string' && isAbsolute(value))
     || !fields(input.operation, ['name', 'args'])
-    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', ...memoryTools].includes(operationName)
+    || !['inspect', 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', ...memoryTools].includes(operationName)
     || !object(input.operation.args)
     || (operationName === 'inspect' && Object.keys(input.operation.args).length)
     || (!reading && (Object.hasOwn(input, 'cacheDirectory') || Object.hasOwn(input, 'credentialPath')))) fail('INVALID_START');
@@ -240,6 +259,8 @@ async function main(input) {
     || input.operation.args.messages.length !== 1 || !fields(input.operation.args.messages[0], ['role', 'content'])
     || input.operation.args.messages[0].role !== 'user' || typeof input.operation.args.messages[0].content !== 'string'
     || input.operation.args.messages[0].content.length > 16000)) fail('INVALID_START');
+  if (recalling && (!fields(input.operation.args, ['query']) || typeof input.operation.args.query !== 'string'
+    || !input.operation.args.query.trim() || input.operation.args.query.length > 500)) fail('INVALID_START');
   let video, cacheDirectory, credentialPath = '';
   if (reading) {
     if (!fields(input.operation.args, browsing ? [] : ['url']) || typeof input.cacheDirectory !== 'string'
@@ -367,9 +388,9 @@ async function main(input) {
       },
     }));
   }
-  const allowedTools = new Set(['bili_humanism_status', 'bili_humanism_guide', ...(modelTask ? [] : memoryTools.map(name => `memoria_${name}`)),
+  const allowedTools = new Set(['bili_humanism_status', 'bili_humanism_guide', ...(modelTask || recalling ? [] : memoryTools.map(name => `memoria_${name}`)),
     ...(reading ? ['bili_humanism_read', 'bili_humanism_source'] : []), ...(browsing ? ['bili_humanism_candidates'] : [])]);
-  ctx.tools.guard(exec => allowedTools.has(exec.name) ? undefined : 'MEMORIA_READ_ONLY');
+  ctx.tools.guard(exec => allowedTools.has(exec.name) || (recalling && memoryTools.some(name => exec.name === `memoria_${name}`)) ? undefined : 'MEMORIA_READ_ONLY');
   let call = 0;
   async function execute(name, args = {}, timeout = 12000) {
     lifecycle.signal.throwIfAborted();
@@ -396,6 +417,13 @@ async function main(input) {
     || ['history', 'favorite', 'like', 'coin'].some(name => tools.includes(`bili_humanism_${name}`))
     || fetchAttempts) fail('READ_ONLY_CHECK_FAILED');
 
+  if (recalling) {
+    const result = await runMemoryAgent({ ctx, load, query: input.operation.args.query, signal: lifecycle.signal,
+      requestModel: signal => requestAgent('agent-model', undefined, signal),
+      requestMemory: (call, signal) => requestAgent('agent-memory', call, signal) });
+    if (fetchAttempts) fail('NETWORK_ATTEMPTED');
+    return result;
+  }
   if (modelTask) {
     let text = '', finished = false;
     for await (const chunk of ctx.llm.stream({ provider: model.provider, model: model.id, maxTokens: judging ? 300 : 650,

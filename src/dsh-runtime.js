@@ -6,6 +6,7 @@ import { createMemoryAccess } from './memory-access.js';
 import { biliVideoUrl } from './bili-reading.js';
 import { createDshModelAccess } from './dsh-model.js';
 import { moodSnapshot, validateMoodDelta } from './mood.js';
+import { createMemoryAgentAccess } from './dsh-memory-agent-access.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
@@ -29,7 +30,8 @@ const readingErrors = {
 };
 
 export function createDshRuntime({ store, dataDir }) {
-  let busy = false;
+  let busy = false, stopped = false, cancelCurrent;
+  let drained = Promise.resolve();
   function readingStatus() {
     const day = new Date().toISOString().slice(0, 10);
     const saved = store.getSetting('dshReadingStatus', {});
@@ -54,21 +56,27 @@ export function createDshRuntime({ store, dataDir }) {
     return { enabled: true, nodePath: realpathSync(input.nodePath), hostDirectory: realpathSync(input.hostDirectory) };
   }
   return {
+    stop() { stopped = true; cancelCurrent?.(); return drained; },
     status() {
       try { return { enabled: config().enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus() }; }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
     },
     async execute({ scope, actor, name, args = {}, signal, selectVideo }) {
+      if (stopped) throw new Error('DSH 运行层已停止。');
       const browsing = name === 'browse_bili';
       const reading = name === 'read_bili_video' || browsing;
       const noting = name === 'note_bili_reading';
       const judging = name === 'evaluate_mood';
+      const recalling = name === 'recall_memory';
       const modelTask = noting || judging;
       const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor });
-      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+      if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
       let noteMessages;
-      if (judging) {
+      if (recalling) {
+        if (Object.keys(args).some(key => key !== 'query') || typeof args.query !== 'string' || !args.query.trim() || args.query.length > 500) throw new Error('记忆子代理只接受 1–500 字的查询。');
+        args = { query: args.query.trim() };
+      } else if (judging) {
         const item = args.input;
         if (typeof scope !== 'string' || !/^(owner|(?:group|person):[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127})$/.test(scope)
           || (scope === 'owner' && !['owner', 'scheduler'].includes(actor))
@@ -111,10 +119,13 @@ export function createDshRuntime({ store, dataDir }) {
         store.setSetting('dshReadingStatus', { day: usage.day, attempts: usage.attempts + 1, lastAttemptAt: new Date().toISOString() });
       }
       busy = true;
+      let finish;
+      drained = new Promise(accept => { finish = accept; });
       const taskController = new AbortController();
       const modelAccess = createDshModelAccess({ store, signal: taskController.signal, purpose: judging ? 'mood' : 'reading-note' });
       let workspace;
       try {
+        const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal }) : null;
         let cacheDirectory;
         if (reading) {
           cacheDirectory = join(resolve(dataDir), 'dsh-cache', 'humanism');
@@ -134,13 +145,15 @@ export function createDshRuntime({ store, dataDir }) {
         return await new Promise((accept, reject) => {
           const child = spawn(settings.nodePath, [hostScript], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
           let result, authorizedNote, failure, received = false, selectionRequested = false, modelRequested = false, requests = 0, stderrBytes = 0;
+          const agentRequestIds = new Set();
           let killTimer;
           const stop = message => {
             failure ||= new Error(message); taskController.abort(); child.kill();
             killTimer ||= setTimeout(() => child.kill('SIGKILL'), 2000);
             killTimer.unref();
           };
-          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : modelTask ? 90000 : 30000);
+          cancelCurrent = () => stop('DSH 任务已取消。');
+          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), recalling ? 270000 : reading ? 110000 : modelTask ? 90000 : 30000);
           const abort = () => stop('DSH 任务已取消。');
           signal?.addEventListener('abort', abort, { once: true });
           if (signal?.aborted) abort();
@@ -158,7 +171,14 @@ export function createDshRuntime({ store, dataDir }) {
             ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}), operation: { name, args } }));
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
-            if (message.type === 'model') {
+            if (['agent-model', 'agent-memory'].includes(message.type)) {
+              if (!recalling || received || !Number.isSafeInteger(message.id) || message.id < 1 || agentRequestIds.has(message.id)
+                || Object.keys(message).some(key => !(message.type === 'agent-model' ? ['type', 'id'] : ['type', 'id', 'call']).includes(key))) return stop('DSH 子代理请求不属于本次任务。');
+              agentRequestIds.add(message.id);
+              Promise.resolve().then(() => message.type === 'agent-model' ? memoryAgent.complete() : memoryAgent.execute(message.call)).then(result => {
+                if (!failure && child.connected) child.send({ type: `${message.type}-result`, id: message.id, result }, () => {});
+              }).catch(() => stop('DSH 记忆子代理未完成，未自动重试。'));
+            } else if (message.type === 'model') {
               if (!modelTask || received || modelRequested || !Number.isSafeInteger(message.id) || message.id < 1
                 || Object.keys(message).some(key => !['type', 'id', 'args'].includes(key))
                 || !message.args || Object.keys(message.args).some(key => !['messages', 'maxTokens'].includes(key))
@@ -189,13 +209,22 @@ export function createDshRuntime({ store, dataDir }) {
                 if (!failure && child.connected) child.send({ type: 'video-selection', id: message.id, url }, () => {});
               }).catch(() => stop('本次视频选择未完成，未自动重试。'));
             } else if (message.type === 'memory') {
-              if (modelTask || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
+              if (modelTask || recalling || ++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
               let response;
               try { response = { result: memory.execute(message.name, message.args) }; }
               catch (error) { response = { error: error.message }; }
               if (child.connected) child.send({ type: 'memory-result', id: message.id, ...response }, () => {});
             } else if (message.type === 'result' && !received) {
-              received = true; result = message.result;
+              if (recalling) {
+                try {
+                  const expected = memoryAgent.finalResult();
+                  const value = message.result;
+                  if (!value || Object.keys(value).some(key => !['text', 'completed', 'modelRequests', 'toolCalls'].includes(key)) || value.completed !== true
+                    || value.text !== expected.text || value.modelRequests !== expected.modelRequests || value.toolCalls !== expected.toolCalls) throw new Error();
+                  result = { ...expected, completed: true };
+                } catch { return stop('DSH 未完成有效的原生记忆回合。'); }
+              } else result = message.result;
+              received = true;
             } else if (message.type === 'failure') stop(reading && typeof message.code === 'string' && Object.hasOwn(readingErrors, message.code)
               ? readingErrors[message.code] : 'DSH 核对未完成，请检查固定版本依赖与本机配置。');
             else stop('DSH 返回了不支持的消息。');
@@ -215,7 +244,7 @@ export function createDshRuntime({ store, dataDir }) {
         taskController.abort();
         try {
           if (workspace && dirname(resolve(workspace)) === settings.hostDirectory && realpathSync(workspace) === resolve(workspace)) rmSync(workspace, { recursive: true, force: true });
-        } finally { busy = false; }
+        } finally { busy = false; cancelCurrent = undefined; finish(); }
       }
     },
   };

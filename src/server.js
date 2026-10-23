@@ -438,6 +438,8 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
       const expressions = [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])];
       const collectExpression = origin ? input => store.saveExpression({ ...input, scope, origin, actor }) : undefined;
       const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, collectExpression,
+        ...(dshRuntime.status().enabled ? { memoryAgent: async query => ({ ok: true,
+          ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query } }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions } : {}) });
       try { moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
@@ -849,4 +851,4 @@ server.listen(port, '127.0.0.1', () => {
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
 server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); void biliAccount.close(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); server.close(async () => { await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 3000).unref(); });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const dshStopped = dshRuntime.stop(); server.close(async () => { await dshStopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
