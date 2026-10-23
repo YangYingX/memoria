@@ -13,6 +13,25 @@ const date = value => typeof value === 'string' && Number.isFinite(Date.parse(va
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 const key = value => createHash('sha256').update(value).digest('hex');
 
+function conversationText(user) {
+  const notes = [`[当前发言者：${JSON.stringify(user.actor)}]`];
+  for (const part of user.metadata.qqReplyContext || []) {
+    const context = { mentions: part.mentions.slice(0, 3), mentionsTruncated: part.mentions.length > 3,
+      ...(part.reply ? { reply: part.reply.status === 'verified'
+        ? { ...part.reply, text: part.reply.text.slice(0, 350), truncated: part.reply.truncated || part.reply.text.length > 350 }
+        : { status: 'unavailable' } } : {}) };
+    let encoded = JSON.stringify(context);
+    while (encoded.length > 600) {
+      context.reply.text = context.reply.text.slice(0, -40);
+      context.reply.truncated = true;
+      encoded = JSON.stringify(context);
+    }
+    notes.push(`[QQ引用与点名节选：${encoded}]`);
+  }
+  const prefix = notes.join('\n') + `\n[用户原话节选，完整正文${user.content.length}字符；引用原发言者的情绪或偏好不等于当前发言者，点名不代表发言或授权，旧图片标记不是视觉输入]\n`;
+  return prefix.slice(0, 3000) + user.content.slice(0, Math.max(0, 3000 - prefix.length));
+}
+
 function publicReadingUrl(value) {
   if (typeof value !== 'string' || value.length > 2048) return false;
   try {
@@ -64,7 +83,7 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
       || Date.parse(user.createdAt) > Date.parse(reply.createdAt) || items.indexOf(user) >= items.indexOf(reply)
       || typeof user.content !== 'string' || !user.content.trim()) return null;
     return { kind: 'conversation', scope, at: reply.createdAt, key: key(`conversation:${scope}:${reply.id}`),
-      text: user.content.slice(0, 3000), reply: reply.content.slice(0, 1500),
+      text: conversationText(user), reply: reply.content.slice(0, 1500),
       fingerprint: JSON.stringify([user, reply]), reference: { scope, replyId: reply.id, createdAt: reply.createdAt } };
   }
   function observeConversation(scope, replyId) {

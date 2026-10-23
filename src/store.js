@@ -763,7 +763,7 @@ export function createStore(dbPath) {
           AND u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
           WHERE e.id = ? AND e.type = 'message' AND e.scope = 'owner' AND e.actor = 'owner'`, memory.sourceRef);
         if (!row || api.isConversationSourceBlocked('owner', memory.sourceRef)) return null;
-        return { memory, source: quote(eventRow(row)), parts: [] };
+        return { memory, source: api.getMemorySource(memory.id, ['owner']), parts: [] };
       }
       if (memory.scope !== 'public') return null;
       try { assertPublicUrl(memory.sourceRef); } catch { return null; }
