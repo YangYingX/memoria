@@ -104,16 +104,23 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
     if (!book) return { ...status(), skipped: 'no_unread_books' };
     const startOffset = book.currentOffset, endOffset = chunkEnd(book.text, startOffset, config.chunkChars);
     const excerpt = book.text.slice(startOffset, endOffset);
+    const previousNotes = store.listBookReadingNotes(book.id, startOffset);
+    const notesSignature = JSON.stringify(previousNotes);
     state.daySlots.shift(); state.attempts += 1; state.nextRunAt = state.daySlots[0] || '';
     state.lastAttempt = new Date(time).toISOString(); state.lastOutcome = 'reading'; state.lastError = '';
     state.lastBookId = book.id; state.lastTitle = book.title; state.lastStartOffset = startOffset; state.lastEndOffset = endOffset;
     save(state); busy = true;
     const activeController = controller = new AbortController();
     const sameDay = () => !stopped && store.getSetting('bookStatus', {}).dayId === state.dayId;
-    const current = () => sameDay() && !activeController.signal.aborted && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt)
-      && JSON.stringify(settings()) === state.configSignature;
+    const current = () => {
+      if (!sameDay() || activeController.signal.aborted || now() < Date.parse(state.dayStartAt) || now() >= Date.parse(state.dayEndAt)
+        || JSON.stringify(settings()) !== state.configSignature) return false;
+      const latest = store.getBook(book.id);
+      return latest && latest.currentOffset === startOffset && latest.text === book.text && latest.title === book.title && latest.sourceRef === book.sourceRef
+        && JSON.stringify(store.listBookReadingNotes(book.id, startOffset)) === notesSignature;
+    };
     try {
-      const note = await summarize({ title: book.title, excerpt, startOffset, endOffset, sourceRef: book.sourceRef, signal: activeController.signal });
+      const note = await summarize({ title: book.title, excerpt, startOffset, endOffset, sourceRef: book.sourceRef, previousNotes, signal: activeController.signal });
       if (!current()) throw new Error('读书已取消。');
       if (isBusy()) {
         save({ ...state, lastOutcome: 'busy', lastError: '' });

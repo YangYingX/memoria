@@ -714,6 +714,34 @@ export function createStore(dbPath) {
     getBook(id) {
       return bookRow(get('SELECT * FROM books WHERE id = ? AND deleted_at IS NULL', bookId(id)));
     },
+    listBookReadingNotes(id, beforeOffset) {
+      id = bookId(id);
+      beforeOffset = integer(beforeOffset, '既往读书位置', 0, BOOK_LIMITS.chars);
+      const book = get('SELECT current_offset FROM books WHERE id = ? AND deleted_at IS NULL', id);
+      if (!book) invalid('书籍不存在或已经删除。');
+      if (beforeOffset > book.current_offset) invalid('既往读书位置不能超过当前阅读进度。');
+      const rows = all(`SELECT m.id AS memoryId, m.source_ref AS sourceRef, m.content AS note,
+          m.created_at AS createdAt, e.metadata
+        FROM events e JOIN memories m ON m.id = json_extract(e.metadata, '$.memoryId')
+        WHERE e.type = 'book_reading' AND e.scope = 'owner' AND e.actor = 'scheduler'
+          AND json_type(e.metadata, '$.memoryId') = 'text' AND json_type(e.metadata, '$.bookId') = 'text'
+          AND json_extract(e.metadata, '$.bookId') = ? AND m.scope = 'owner' AND m.deleted_at IS NULL
+          AND m.source_type = 'book' AND m.category = 'book-note' AND m.source_ref = e.source_ref
+          AND m.created_at = e.created_at AND m.updated_at = m.created_at
+          AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.memory_id = m.id)
+        ORDER BY e.created_at DESC, e.rowid DESC`, id);
+      const notes = new Map();
+      for (const row of rows) {
+        const { startOffset, endOffset } = JSON.parse(row.metadata);
+        if (!Number.isSafeInteger(startOffset) || !Number.isSafeInteger(endOffset)
+          || startOffset < 0 || startOffset >= endOffset || endOffset > beforeOffset
+          || row.sourceRef !== `book:${id}:${startOffset}-${endOffset}`
+          || !row.note.trim() || row.note.length > 4000) continue;
+        notes.set(row.memoryId, { memoryId: row.memoryId, sourceRef: row.sourceRef, startOffset, endOffset,
+          createdAt: row.createdAt, note: row.note.slice(0, 1000), truncated: row.note.length > 1000 });
+      }
+      return [...notes.values()].sort((a, b) => b.endOffset - a.endOffset).slice(0, 3);
+    },
     deleteBook(id) {
       id = bookId(id);
       return transaction(() => {
