@@ -658,6 +658,7 @@ const server = http.createServer(async (req, res) => {
       if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mood: moodSnapshot(store), moodStatus: moodJobs.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
+      if (path === '/api/bili/login/import' && req.method === 'POST') return json(res, 200, await biliAccount.importLogin(input));
       if (path === '/api/dsh/check' && req.method === 'POST') {
         activeMutation++;
         try { return json(res, 200, await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'inspect' })); }

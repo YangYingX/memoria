@@ -190,6 +190,9 @@
               <p id="dsh-summary" class="muted">正在读取状态…</p>
               <p id="bili-account-summary" class="muted">正在读取专用账号状态…</p>
               <div class="field-row"><button id="bili-login" class="button secondary" type="button">登录 B站专用账号</button><button id="bili-login-confirm" class="button secondary" type="button">完成登录，保存状态</button></div>
+              <button id="bili-login-import" class="button secondary" type="button">从当前 Chrome 导入 B站登录</button>
+              <p id="bili-import-result" class="connection-result" role="status" hidden></p>
+              <p class="caption">已有 Chrome 登录可直接导入：先在当前 Chrome 的扩展管理页加载项目中的 <code>extensions/bili-login-bridge</code> 目录，再用同一个 Chrome 打开 http://127.0.0.1:3210 并登录后台，点击上方导入按钮。扩展只读取 B站两项必要凭据，导入后可移除；不读取其他网站或把登录状态发给模型。</p>
               <p class="caption">项目打开独立浏览器，由你手动登录；确认后只把读取所需的登录凭据保存在本机。专用执行账号不用于认定创建人身份。Windows 使用独立 Chrome 窗口，Linux 需图形会话；凭据不进入备份或 GitHub。登录不会自动解除已有的平台风险暂停。</p>
               <label>每天最多尝试几次 B站浏览或读取<input id="dsh-reading-limit" type="number" min="0" max="50" step="1" required><small>默认 6 次，所有聊天场合共用，按 UTC 日期计数；发现候选和读取所选视频合计只计一次，失败也计次，重启或换会话不清零。0 表示暂停新读取，已有记忆仍可翻阅。</small></label>
               <p class="caption">在聊天或网页阅读中提供完整的 B站 BV 视频链接，也可加入固定网址阅读安排。通过只读接口获取字幕文字，不读取画面或音频；全部取得文字分段存入书架。平台验证可能阻止读取；暂停后不自动重试。阅读不消耗公开发布额度。</p>

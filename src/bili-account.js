@@ -9,7 +9,7 @@ function validCredentials(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).every(key => ['sessdata', 'accountId'].includes(key))
     && typeof value.sessdata === 'string' && value.sessdata.length > 0 && value.sessdata.length < 4096
-    && !/[\0\r\n;]/.test(value.sessdata)
+    && !/[\s\u0000-\u001f\u007f;]/u.test(value.sessdata)
     && typeof value.accountId === 'string' && /^[1-9]\d{0,19}$/.test(value.accountId);
 }
 
@@ -31,6 +31,23 @@ export function createBiliAccount({ dataDir }) {
       }
     } catch { /* Configuration is local evidence only; it does not prove an online login. */ }
     return { configured: Boolean(credentials), browserOpen: Boolean(context), ...(credentials ? { accountId: credentials.accountId } : {}) };
+  }
+
+  function saveCredentials(credentials) {
+    if (!validCredentials(credentials)) throw new Error('INVALID_CREDENTIALS');
+    let temporary, file, owned = false;
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      temporary = join(directory, `.bili-credentials-${randomUUID()}.tmp`);
+      file = openSync(temporary, 'wx', 0o600);
+      owned = true;
+      writeFileSync(file, JSON.stringify(credentials), 'utf8');
+      closeSync(file); file = undefined;
+      renameSync(temporary, credentialsPath);
+    } finally {
+      if (file !== undefined) { try { closeSync(file); } catch {} }
+      if (owned) { try { rmSync(temporary, { force: true }); } catch {} }
+    }
   }
 
   function close() {
@@ -93,7 +110,6 @@ export function createBiliAccount({ dataDir }) {
     const pendingStart = startPromise;
     const pendingClose = closePromise;
     confirmPromise = (async () => {
-      let temporary, file, owned = false;
       try {
         await pendingClose;
         await pendingStart;
@@ -101,19 +117,10 @@ export function createBiliAccount({ dataDir }) {
         const cookies = await context.cookies(HOME);
         const credentials = { sessdata: cookies.find(cookie => cookie.name === 'SESSDATA')?.value,
           accountId: cookies.find(cookie => cookie.name === 'DedeUserID')?.value };
-        if (!validCredentials(credentials)) throw new Error('LOGIN_NOT_CONFIGURED');
-        mkdirSync(directory, { recursive: true, mode: 0o700 });
-        temporary = join(directory, `.bili-credentials-${randomUUID()}.tmp`);
-        file = openSync(temporary, 'wx', 0o600);
-        owned = true;
-        writeFileSync(file, JSON.stringify(credentials), 'utf8');
-        closeSync(file); file = undefined;
-        renameSync(temporary, credentialsPath);
+        saveCredentials(credentials);
       } catch {
         throw new Error('未保存B站专用账号；请重新打开登录窗口，手动完成登录后再点击确认。');
       } finally {
-        if (file !== undefined) { try { closeSync(file); } catch {} }
-        if (owned) { try { rmSync(temporary, { force: true }); } catch {} }
         await close();
       }
       return status();
@@ -121,5 +128,22 @@ export function createBiliAccount({ dataDir }) {
     return confirmPromise;
   }
 
-  return { status, openLogin, confirmLogin, close };
+  function importLogin(input) {
+    if (!validCredentials(input)) return Promise.reject(new Error('未导入B站登录状态；请在已登录的 Chrome 中使用栖忆登录桥。'));
+    if (confirmPromise) return Promise.reject(new Error('正在保存B站登录状态，请稍候。'));
+    const credentials = { sessdata: input.sessdata, accountId: input.accountId };
+    const pendingStart = startPromise;
+    confirmPromise = (async () => {
+      try {
+        await pendingStart?.catch(() => {});
+        await close();
+        if (context) throw new Error('LOGIN_WINDOW_STILL_OPEN');
+        saveCredentials(credentials);
+        return status();
+      } catch { throw new Error('未导入B站登录状态；请检查本机目录权限后重试。'); }
+    })().finally(() => { confirmPromise = undefined; });
+    return confirmPromise;
+  }
+
+  return { status, openLogin, confirmLogin, importLogin, close };
 }

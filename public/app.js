@@ -938,6 +938,32 @@ $('bili-login-confirm').addEventListener('click', () => action($('bili-login-con
   await api('/api/bili/login/confirm', { method: 'POST', data: {} });
   await loadState(); toast('B站专用账号登录状态已保存到本机。');
 }));
+$('bili-login-import').addEventListener('click', () => action($('bili-login-import'), async () => {
+  const output = $('bili-import-result');
+  output.hidden = false; output.classList.remove('error'); output.textContent = '正在从当前 Chrome 导入 B站登录…';
+  try {
+    if (location.origin !== 'http://127.0.0.1:3210') throw new Error('请用已登录 B站的 Chrome 打开 http://127.0.0.1:3210 后导入。');
+    const status = await api('/api/status');
+    if (!status.authenticated) { state.status = status; showAuth(); throw new Error('请先登录创建人后台，再导入 B站登录。'); }
+    if (!globalThis.chrome?.runtime?.sendMessage) throw new Error('请先在当前 Chrome 加载项目的 extensions/bili-login-bridge 扩展，再刷新后台。');
+    const credentials = await new Promise((accept, reject) => {
+      const timer = setTimeout(() => reject(new Error('Chrome 登录桥未响应，请检查扩展已启用后重试。')), 10000);
+      try {
+        chrome.runtime.sendMessage('hkgopnkgggippabieimebcfgeicgohed', { action: 'memoria-import-bili' }, response => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) return reject(new Error('请先在当前 Chrome 加载项目的 extensions/bili-login-bridge 扩展，再刷新后台。'));
+          if (response?.ok !== true || !response.credentials) return reject(new Error(response?.error === 'BILI_BRIDGE_NOT_LOGGED_IN'
+            ? '当前 Chrome 未找到 B站登录，请在同一个 Chrome 资料中登录 B站后重试。' : 'Chrome 未返回有效的 B站登录状态，请检查扩展或重新登录后重试。'));
+          accept(response.credentials);
+        });
+      } catch { clearTimeout(timer); reject(new Error('Chrome 登录桥未能连接，请检查扩展后重试。')); }
+    });
+    await api('/api/bili/login/import', { method: 'POST', data: credentials });
+    await loadState();
+    output.textContent = '已从当前 Chrome 保存 B站专用登录状态。';
+    toast(output.textContent);
+  } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
+}));
 $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   action($('settings-form'), async () => {

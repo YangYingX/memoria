@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Memoria Bilibili 登录桥",
+  "version": "1.0.0",
+  "description": "由本机 Memoria 页面手动导入当前 Chrome 的 Bilibili 登录。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsRfSA6wlJFyvNgoV6KQt/wkRkaUKEp5xk0+8gb5hDy8sQLcNqr5Wa+5TrWJmH8e/HjaVCU/Zgyv9HkI6/cTflNydR1VIs5vgtUN9LANi5IEZYxGky4JH9fLI5Q74bxWH+Ys7Ah4NKrD8P9+x6OQFgNq9r8o9SMbkKC8tmlp5tsDhrE/KO8kzR/vrCOgCDLguLTk7Je3iBTUb4xAunTl7NnnzxF9tnq7h8qvzySSvE86uoF9/K0GaJU8FL/g7SWm7lq0SKpr6iy7Z5NIiWqXdGsz4ZeJD+wBbWgmmoHf80MpjWIsd5hMoZVe+N8iXqjesM36wMk7ge2vFAJ8lzOANyQIDAQAB",
+  "permissions": ["cookies"],
+  "host_permissions": ["https://www.bilibili.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": ["http://127.0.0.1/*"]
+  }
+}
