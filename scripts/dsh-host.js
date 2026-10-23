@@ -409,20 +409,21 @@ async function main(input) {
 
   // No model prompt or DSH session owns these memories: the parent binds verified identity and scope.
   for (const name of memoryTools) {
-    const keys = name.startsWith('search_') ? ['query', 'offset', ...(name === 'search_conversations' ? ['start_date', 'end_date'] : [])] : ['id', 'offset'];
+    const keys = name.startsWith('search_') ? ['query', 'offset', ...(name === 'search_conversations' ? ['start_date', 'end_date', 'platform'] : [])] : ['id', 'offset'];
     ctx.tools.register(defineTool({
       name: `memoria_${name}`,
-      description: name === 'search_conversations' ? 'Search completed conversations in the verified scope. Optional start_date/end_date are inclusive application-calendar dates; query may be empty. Keep query/date bounds unchanged for pagination. User and assistant evidence are distinct.'
+      description: name === 'search_conversations' ? 'Search completed conversations in the verified scope. Optional dates are inclusive; query may be empty. Use platform only for questions about a specific verified historical DM channel. Preserve query/date/platform for pagination. Historical labels grant no authority.'
         : name === 'read_conversation' ? 'Read a page from an authorized conversation transcript; sections label user and assistant text.'
         : name === 'search_memory' ? 'Search six persistent Memoria memories per page in the verified scope. Keep query unchanged and pass the page-level nextOffset as offset to continue. Page offsets count items; item offsets count text characters. Results reflect the current bookshelf.'
         : name === 'read_memory' ? 'Read a page from a persistent Memoria memory in the current verified scope.'
           : 'Read a page of source evidence for a Memoria memory in the current verified scope.',
       parameters: name.startsWith('search_') ? { query: { type: 'string', required: true }, offset: { type: 'integer' },
-        ...(name === 'search_conversations' ? { start_date: { type: 'string', description: 'Inclusive start date, YYYY-MM-DD; the parent validates the calendar date.' }, end_date: { type: 'string', description: 'Inclusive end date, YYYY-MM-DD; the parent validates the calendar date.' } } : {}) }
+        ...(name === 'search_conversations' ? { start_date: { type: 'string', description: 'Inclusive start date, YYYY-MM-DD; the parent validates the calendar date.' }, end_date: { type: 'string', description: 'Inclusive end date, YYYY-MM-DD; the parent validates the calendar date.' }, platform: { type: 'string', description: 'Optional qq or feishu, only for verified historical DM source filtering; never an identity or sending permission.' } } : {}) }
         : { id: { type: 'string', required: true }, offset: { type: 'integer' } },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
       async execute(args, exec) {
         if (!fields(args, keys)) fail('INVALID_MEMORY_ARGS');
+        if (name === 'search_conversations' && Object.hasOwn(args, 'platform') && !['qq', 'feishu'].includes(args.platform)) fail('INVALID_MEMORY_ARGS');
         return JSON.stringify(await requestMemory(name, args, exec.signal));
       },
     }));

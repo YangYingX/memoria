@@ -64,7 +64,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
   return Object.freeze({
     execute(name, args) {
       const definitions = { search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
-        search_conversations: ['query', 'offset', 'start_date', 'end_date'], read_conversation: ['id', 'offset'] };
+        search_conversations: ['query', 'offset', 'start_date', 'end_date', 'platform'], read_conversation: ['id', 'offset'] };
       const fields = typeof name === 'string' && Object.hasOwn(definitions, name) ? definitions[name] : null;
       if (!fields || !args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !fields.includes(key))) {
         throw new Error('记忆工具或参数无效，不能更改身份、范围或会话。');
@@ -73,8 +73,10 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
         if (typeof args.query !== 'string' || args.query.length > 500) throw new Error('查询无效。');
         if (name === 'search_conversations') {
           const dated = Object.hasOwn(args, 'start_date') || Object.hasOwn(args, 'end_date');
-          const dates = dated ? { ...(Object.hasOwn(args, 'start_date') ? { startDate: args.start_date } : {}),
-            ...(Object.hasOwn(args, 'end_date') ? { endDate: args.end_date } : {}), timeZone: conversationClock(store).timeZone } : undefined;
+          const filtered = dated || Object.hasOwn(args, 'platform');
+          const dates = filtered ? { ...(Object.hasOwn(args, 'start_date') ? { startDate: args.start_date } : {}),
+            ...(Object.hasOwn(args, 'end_date') ? { endDate: args.end_date } : {}), ...(dated ? { timeZone: conversationClock(store).timeZone } : {}),
+            ...(Object.hasOwn(args, 'platform') ? { platform: args.platform } : {}) } : undefined;
           return store.searchConversationPage(args.query, scopes, 6, args.offset === undefined ? 0 : args.offset, excludeMessageId, dates);
         }
         const page = store.searchMemoryPage(args.query, scopes, 6, args.offset === undefined ? 0 : args.offset);
@@ -86,12 +88,14 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
       if (name === 'read_conversation') {
         const turn = store.getConversation(args.id, scopes, excludeMessageId);
         if (!turn) throw new Error('对话不存在、未完成或当前场合不可检索。');
-        const userHeader = `用户原话（${turn.createdAt}，发言者 ${turn.actor}${turn.qqBatchCount ? `，${turn.qqBatchCount}条QQ消息合并` : ''}）：\n`;
+        const channel = turn.platform === 'qq' ? 'QQ 私聊' : turn.platform === 'feishu' ? '飞书私聊' : '';
+        const userHeader = `用户原话（${turn.createdAt}，发言者 ${turn.actor}${channel ? `，来源 ${channel}` : ''}${turn.qqBatchCount ? `，${turn.qqBatchCount}条QQ消息合并` : ''}）：\n`;
         const assistantHeader = turn.assistantHidden ? '\n\n助手历史回复因引用了已更正或忘记的来源而不提供。\n'
           : `\n\n助手历史回复（${turn.replyAt}，可能有误，不代表用户事实）：\n`;
         const content = userHeader + turn.user + assistantHeader + turn.assistant;
         if (offset >= content.length) throw new Error('对话正文位置超出范围。');
         return memoryPage({ id: turn.id, scope: turn.scope, actor: turn.actor, createdAt: turn.createdAt, replyAt: turn.replyAt, assistantHidden: turn.assistantHidden, content,
+          ...(channel ? { platform: turn.platform, conversationKind: turn.conversationKind } : {}),
           ...(turn.qqBatchCount ? { qqBatchCount: turn.qqBatchCount, qqBatchNotice: turn.qqBatchNotice } : {}),
           ...qqReplySource(turn),
           sections: [{ role: 'user', startOffset: userHeader.length, endOffset: userHeader.length + turn.user.length },

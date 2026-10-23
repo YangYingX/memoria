@@ -72,7 +72,8 @@ function calendarDate(value, label) {
 function conversationDateRange(input) {
   if (input === undefined) return null;
   record(input, '对话日期范围');
-  if (Object.keys(input).some(key => !['startDate', 'endDate', 'timeZone'].includes(key))) invalid('对话日期范围包含未知字段。');
+  if (Object.keys(input).some(key => !['startDate', 'endDate', 'timeZone', 'platform'].includes(key))) invalid('对话筛选包含未知字段。');
+  if (Object.hasOwn(input, 'platform') && !['qq', 'feishu'].includes(input.platform)) invalid('对话平台须为 qq 或 feishu。');
   const hasStart = Object.hasOwn(input, 'startDate'), hasEnd = Object.hasOwn(input, 'endDate');
   const startDate = hasStart ? calendarDate(input.startDate, '开始日期') : undefined;
   const endDate = hasEnd ? calendarDate(input.endDate, '结束日期') : undefined;
@@ -885,6 +886,17 @@ export function createStore(dbPath) {
       const user = users.get(source.id), info = qqReplySourceInfo(user.metadata, JSON.parse(source.sourceMetadata), user.content);
       replySources.set(source.id, replySources.has(source.id) && JSON.stringify(replySources.get(source.id)) !== JSON.stringify(info) ? {} : info);
     }
+    const historicalOrigins = new Map();
+    // Historical origin proves a label, never a current account binding or delivery permission.
+    // Include explicit but mismatching sources so an ambiguous pair cannot win by picking only its valid event.
+    for (const row of all(`SELECT * FROM events WHERE type = 'message' AND scope IN (${placeholders})
+      AND json_type(metadata, '$.messageId') = 'text'`, ...permitted)) {
+      const source = eventRow(row), user = users.get(source.metadata.messageId);
+      if (!user) continue;
+      const origin = pairedConversationOrigin(source, user);
+      historicalOrigins.set(user.id, historicalOrigins.has(user.id)
+        && JSON.stringify(historicalOrigins.get(user.id)) !== JSON.stringify(origin) ? null : origin);
+    }
     // Dependency IDs can cross scopes (for example a public source used in a private reply).
     // Only IDs and references cross this boundary; no outside-scope message text enters the result.
     const blockedUsers = new Set(all(`SELECT u.id FROM conversation_blocks b
@@ -993,8 +1005,10 @@ export function createStore(dbPath) {
       const reply = replies.get(user.id);
       if (blockedUsers.has(user.id) || !reply) continue;
       const assistantHidden = hiddenAssistants.has(reply.id);
+      const origin = historicalOrigins.get(user.id);
       turns.push({ id: user.id, scope: user.scope, actor: user.actor, createdAt: user.createdAt, user: user.content,
         assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden,
+        ...(origin ? { platform: origin.platform, conversationKind: 'dm' } : {}),
         ...qqBatchSourceInfo(user.metadata.qqBatchSources, user.content), ...replySources.get(user.id) });
     }
     return { messages, turns, blockedUsers, hiddenAssistants, replySources };
@@ -1451,7 +1465,8 @@ export function createStore(dbPath) {
       if (excludeMessageId !== '') excludeMessageId = identifier(excludeMessageId, '当前消息 ID');
       const dateFilter = conversationDateRange(dates);
       const tokens = queryTokens(query);
-      let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId && (!dateFilter || dateFilter.includes(turn.createdAt)));
+      let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId
+        && (!dates?.platform || turn.platform === dates.platform) && (!dateFilter || dateFilter.includes(turn.createdAt)));
       if (query) matches = tokens.length ? matches.map(turn => ({ turn,
         score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens)
           + (turn.qqReplyContext || []).reduce((sum, part) => sum + (part.reply?.status === 'verified' ? conversationScore(part.reply.text, tokens) : 0), 0) }))
