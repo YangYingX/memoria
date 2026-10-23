@@ -8,6 +8,7 @@ import { normalizeMoodState } from './mood.js';
 import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
 import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
+import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -521,6 +522,57 @@ export function createStore(dbPath) {
     return item && !biliClaimed('history', item.key) && Date.parse(item.notice.at) >= now - 7 * 86400000
       && Date.parse(item.notice.at) <= now + 5 * 60000 && item.notice.mid !== item.accountId;
   }
+  function companionContacts() {
+    const rows = all(`WITH sources AS (SELECT u.id, MIN(e.rowid) AS event_order FROM events e JOIN messages u
+      ON json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id
+        AND u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
+      WHERE e.type = 'message' AND e.scope = 'owner' AND e.actor = 'owner' GROUP BY u.id)
+      SELECT u.id, u.created_at AS at, u.rowid AS message_order, sources.event_order FROM messages u
+      LEFT JOIN sources ON sources.id = u.id WHERE u.scope = 'owner' AND u.role = 'user' AND u.actor = 'owner'`).map(row => ({ ...row, at: Date.parse(row.at) }));
+    const sourced = rows.filter(row => row.event_order !== null).sort((a, b) => a.event_order - b.event_order);
+    const legacy = rows.filter(row => row.event_order === null).sort((a, b) => a.at - b.at || a.message_order - b.message_order);
+    // Event order is authoritative. Legacy rows only have a timestamp; ties stay conservative.
+    const ordered = []; let index = 0;
+    for (const row of sourced) { while (index < legacy.length && legacy[index].at < row.at) ordered.push(legacy[index++]); ordered.push(row); }
+    ordered.push(...legacy.slice(index));
+    return ordered;
+  }
+  function companionStats(contacts, now) {
+    const lastOwner = contacts.at(-1), attempts = new Map();
+    for (const row of all(`SELECT source_ref AS key, created_at AS at, rowid AS event_order FROM events
+      WHERE type = 'proactive' AND scope = 'owner' AND actor = 'scheduler'
+        AND json_extract(metadata, '$.outcome') IN ('attempt', 'success', 'unknown') ORDER BY rowid`)) {
+      if (!/^[a-f0-9]{64}$/.test(row.key) || attempts.has(row.key)) continue;
+      attempts.set(row.key, { at: Date.parse(row.at), eventOrder: row.event_order });
+    }
+    for (const row of all("SELECT key, created_at AS at FROM deliveries WHERE key LIKE 'proactive:%'")) {
+      const key = row.key.slice('proactive:'.length);
+      if (/^[a-f0-9]{64}$/.test(key) && !attempts.has(key)) attempts.set(key, { at: Date.parse(row.at), eventOrder: null });
+    }
+    let unanswered = 0, recentProactive = 0;
+    for (const attempt of attempts.values()) {
+      if (attempt.at >= now - 3600000 && attempt.at <= now) recentProactive++;
+      if (!lastOwner || (attempt.eventOrder !== null && lastOwner.event_order !== null
+        ? attempt.eventOrder > lastOwner.event_order : attempt.at >= lastOwner.at)) unanswered++;
+    }
+    // Saturating the numeric projection never discards the authoritative delivery history.
+    return { unanswered: Math.min(1000, unanswered), recentProactive: Math.min(1000, recentProactive) };
+  }
+  function companionInputs(now) {
+    integer(now, '陪伴计算时间', 0, 8640000000000000);
+    const envelope = normalizeCompanionEnvelope(api.getSetting('companionState', null));
+    const rows = companionContacts(), latest = rows.at(-1)?.id ?? null;
+    const cursor = envelope?.ownerCursor ?? null, position = cursor === null ? -1 : rows.findIndex(row => row.id === cursor);
+    const fresh = !envelope || (cursor !== null && position < 0) ? [] : rows.slice(position + 1);
+    const start = envelope?.state?.t ?? fresh[0]?.at ?? now;
+    const blocked = fresh.length > 10000 ? 'contact_backlog'
+      : now - start > 366 * 86400000 ? 'contact_gap'
+        : (envelope?.state && now < envelope.state.t) || fresh.some((row, index) => !Number.isSafeInteger(row.at)
+          || row.at > now || row.at < (index ? fresh[index - 1].at : envelope?.state?.t ?? 0)) ? 'contact_clock' : null;
+    return { envelope, expectedRevision: envelope?.revision ?? 0, expectedOwnerId: api.latestOwnerMessage()?.id ?? null,
+      ownerCursor: blocked ? cursor : latest, contacts: blocked ? [] : fresh.map(({ id, at }) => ({ id, at })),
+      ...companionStats(rows, now), ...(blocked ? { blocked } : {}) };
+  }
   function addRevision(memory, now) {
     insertRevision({ id: randomUUID(), memoryId: memory.id, snapshot: memory, createdAt: now });
   }
@@ -687,6 +739,66 @@ export function createStore(dbPath) {
     },
     isConversationSourceBlocked(scope, eventId) {
       return Boolean(get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', scopeValue(scope), identifier(eventId, '对话来源 ID')));
+    },
+    getCompanionMemoryEvidence(id) {
+      const memory = api.getMemory(identifier(id, '记忆 ID'));
+      if (!memory || memory.deletedAt || memory.category === 'promise' || !['owner', 'public'].includes(memory.scope)) return null;
+      const quote = source => ({ eventId: source.id, actor: source.actor, createdAt: source.createdAt, content: source.content });
+      if (memory.scope === 'owner' && memory.sourceType === 'conversation') {
+        const row = get(`SELECT e.* FROM events e JOIN messages u ON u.id = json_extract(e.metadata, '$.messageId')
+          AND u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
+          WHERE e.id = ? AND e.type = 'message' AND e.scope = 'owner' AND e.actor = 'owner'`, memory.sourceRef);
+        if (!row || api.isConversationSourceBlocked('owner', memory.sourceRef)) return null;
+        return { memory, source: quote(eventRow(row)), parts: [] };
+      }
+      if (memory.scope !== 'public') return null;
+      try { assertPublicUrl(memory.sourceRef); } catch { return null; }
+      const pristine = value => value && !value.deletedAt && value.updatedAt === value.createdAt
+        && !get('SELECT 1 FROM revisions WHERE memory_id = ?', value.id);
+      const readingParts = (original, source) => {
+        if (!Object.hasOwn(source.metadata, 'readingGroupId') && !Object.hasOwn(source.metadata, 'partCount')) return [];
+        const count = source.metadata.partCount, groupId = source.metadata.readingGroupId;
+        if (!Number.isInteger(count) || count < 2 || count > 50 || typeof groupId !== 'string') return null;
+        const parts = api.getReadingParts(original.id, ['public']);
+        if (parts.length !== count) return null;
+        const evidence = [];
+        for (const part of parts) {
+          const current = api.getMemory(part.id);
+          if (!pristine(current)) return null;
+          const row = get(`SELECT * FROM events WHERE type = 'reading' AND actor = 'scheduler' AND scope = 'public'
+            AND source_ref = ? AND content = ? AND json_extract(metadata, '$.memoryId') = ?
+            AND json_extract(metadata, '$.readingGroupId') = ? AND json_extract(metadata, '$.partIndex') = ?
+            AND json_extract(metadata, '$.partCount') = ? ORDER BY rowid DESC LIMIT 1`,
+          current.sourceRef, current.content, current.id, groupId, part.partIndex, count);
+          if (!row) return null;
+          evidence.push({ ...part, memory: current, source: quote(eventRow(row)) });
+        }
+        return evidence;
+      };
+      if (!pristine(memory)) return null;
+      if (memory.sourceType === 'webpage' && memory.category === 'reading') {
+        const row = get(`SELECT * FROM events WHERE type = 'reading' AND actor = 'scheduler' AND scope = 'public'
+          AND source_ref = ? AND content = ? AND json_extract(metadata, '$.memoryId') = ? ORDER BY rowid DESC LIMIT 1`, memory.sourceRef, memory.content, memory.id);
+        if (!row) return null;
+        const source = eventRow(row), parts = readingParts(memory, source);
+        return parts === null ? null : { memory, source: quote(source), parts };
+      }
+      if (memory.sourceType !== 'reflection' || memory.category !== 'reading-note') return null;
+      const row = get(`SELECT e.* FROM events e JOIN events r ON r.id = json_extract(e.metadata, '$.readingEventId')
+        JOIN memories original ON original.id = json_extract(e.metadata, '$.readingMemoryId')
+        WHERE e.type = 'reading_reflection' AND e.actor = 'scheduler' AND e.scope = 'public'
+          AND json_extract(e.metadata, '$.memoryId') = ? AND e.content = ? AND e.source_ref = ?
+          AND r.type = 'reading' AND r.actor = 'scheduler' AND r.scope = e.scope AND r.source_ref = e.source_ref
+          AND original.scope = e.scope AND original.source_type = 'webpage' AND original.category = 'reading'
+          AND original.deleted_at IS NULL AND original.source_ref = e.source_ref AND original.content = r.content
+          AND original.id = json_extract(r.metadata, '$.memoryId') AND original.updated_at = original.created_at
+          AND NOT EXISTS (SELECT 1 FROM revisions revision WHERE revision.memory_id = original.id)
+        ORDER BY e.rowid DESC LIMIT 1`, memory.id, memory.content, memory.sourceRef);
+      if (!row) return null;
+      const source = eventRow(row), original = api.getMemory(source.metadata.readingMemoryId);
+      const originalEvent = eventRow(get('SELECT * FROM events WHERE id = ?', source.metadata.readingEventId));
+      const parts = readingParts(original, originalEvent);
+      return parts === null ? null : { memory, source: quote(source), parts: [{ memory: original, source: quote(originalEvent), parts }] };
     },
     getMemorySource(id, scopes) {
       id = identifier(id, '记忆 ID');
@@ -1119,6 +1231,43 @@ export function createStore(dbPath) {
       const row = get("SELECT * FROM messages WHERE scope = 'owner' AND role = 'user' AND actor = 'owner' ORDER BY rowid DESC LIMIT 1");
       return row ? messageRow(row) : null;
     },
+    getCompanionState() {
+      return normalizeCompanionEnvelope(api.getSetting('companionState', null));
+    },
+    getCompanionInputs(input = {}) {
+      record(input, '陪伴输入');
+      if (Object.keys(input).some(key => key !== 'now')) invalid('陪伴输入参数无效。');
+      return companionInputs(input.now === undefined ? Date.now() : input.now);
+    },
+    commitCompanionState(input) {
+      record(input, '陪伴状态提交');
+      const keys = ['expectedRevision', 'expectedOwnerId', 'state', 'ownerCursor', 'opportunityKey'];
+      if (Object.keys(input).length !== keys.length || Object.keys(input).some(key => !keys.includes(key))) invalid('陪伴提交参数无效。');
+      integer(input.expectedRevision, '陪伴状态版本', 0, Number.MAX_SAFE_INTEGER);
+      if (input.expectedOwnerId !== null) identifier(input.expectedOwnerId, '创建人消息 ID');
+      if (input.ownerCursor !== null) identifier(input.ownerCursor, '已处理创建人消息 ID');
+      const state = normalizeCompanionState(input.state);
+      if (state === null || typeof input.opportunityKey !== 'string' || !/^[a-f0-9]{64}$/.test(input.opportunityKey)) invalid('陪伴机会或内核状态无效。');
+      return transaction(() => {
+        const current = companionInputs(state.t);
+        if (current.blocked || current.expectedRevision !== input.expectedRevision || current.expectedOwnerId !== input.expectedOwnerId
+          || current.ownerCursor !== input.ownerCursor || current.envelope?.opportunityKey === input.opportunityKey) return null;
+        const envelope = normalizeCompanionEnvelope({ version: 1, revision: input.expectedRevision + 1, state, ownerCursor: input.ownerCursor, opportunityKey: input.opportunityKey });
+        if (!api.claimDelivery(`companion-opportunity:${input.opportunityKey}`)) return null;
+        api.setSetting('companionState', envelope);
+        return envelope;
+      });
+    },
+    resetCompanionState() {
+      return transaction(() => {
+        const previous = api.getSetting('companionState', null);
+        const revision = Number.isSafeInteger(previous?.revision) && previous.revision >= 0 ? previous.revision : 0;
+        const envelope = normalizeCompanionEnvelope({ version: 1, revision: Math.max(revision, Date.now()) + 1, state: null,
+          ownerCursor: companionContacts().at(-1)?.id ?? null, opportunityKey: null });
+        api.setSetting('companionState', envelope);
+        return envelope;
+      });
+    },
     scheduleFollowup(input) {
       record(input, '聊天跟进');
       if (Object.keys(input).some(key => !['title', 'content', 'dueAt', 'sourceEventId', 'recipientAccountId', 'now'].includes(key))) invalid('聊天跟进包含未知字段。');
@@ -1446,6 +1595,7 @@ export function createStore(dbPath) {
         schemaVersion: 5, exportedAt: new Date().toISOString(),
         persona: personaValue(api.getSetting('persona', null)),
         moodState: normalizeMoodState(api.getSetting('moodState', null)),
+        companionState: normalizeCompanionEnvelope(api.getSetting('companionState', null)),
         memories: all('SELECT * FROM memories ORDER BY rowid').map(memoryRow),
         revisions: all('SELECT * FROM revisions ORDER BY rowid').map(revisionRow),
         events: all('SELECT * FROM events ORDER BY rowid').map(eventRow),
@@ -1473,6 +1623,7 @@ export function createStore(dbPath) {
       timestamp(payload.exportedAt, '备份时间');
       const persona = personaValue(payload.persona);
       const moodState = normalizeMoodState(Object.hasOwn(payload, 'moodState') ? payload.moodState : null);
+      const companionState = normalizeCompanionEnvelope(Object.hasOwn(payload, 'companionState') ? payload.companionState : null);
       let total = 0;
       function rows(name, check, key = clean => clean.id ?? clean.memoryId) {
         if (!Array.isArray(payload[name]) || payload[name].length > 100000) invalid(`备份中的 ${name} 须为最多 100000 项的数组。`);
@@ -1602,6 +1753,7 @@ export function createStore(dbPath) {
 
       return transaction(() => {
         const restoredAt = new Date().toISOString();
+        const previousCompanion = api.getSetting('companionState', null);
         // Restored social inbox entries are history, never a renewed permission to publish.
         for (const item of [...all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_type(metadata, '$.biliNotice') = 'object'"),
           ...events.filter(item => item.metadata.biliNotice).map(item => ({ key: item.metadata.biliNotice.key }))]) claimBili('history', biliKey(item.key), restoredAt);
@@ -1662,9 +1814,16 @@ export function createStore(dbPath) {
           insertFollowup(restored);
           if (['attempted', 'sent', 'unknown'].includes(restored.status)) run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `followup:${restored.id}`, restored.updatedAt);
         }
-        // Only persona and the numeric mood snapshot are restored; runtime settings and credentials stay local.
+        // Restore persona and numeric snapshots; keep runtime credentials local and pause proactive delivery.
         if (persona !== null) api.setSetting('persona', persona);
         api.setSetting('moodState', moodState);
+        const localRevision = Number.isSafeInteger(previousCompanion?.revision) && previousCompanion.revision >= 0 ? previousCompanion.revision : 0;
+        api.setSetting('companionState', normalizeCompanionEnvelope({ version: 1,
+          revision: Math.max(localRevision, companionState?.revision ?? 0) + 1, state: companionState?.state ?? null,
+          ownerCursor: companionContacts().at(-1)?.id ?? null, opportunityKey: companionState?.opportunityKey ?? null }));
+        if (companionState?.opportunityKey) api.claimDelivery(`companion-opportunity:${companionState.opportunityKey}`);
+        const proactive = api.getSetting('proactive', null);
+        if (proactive) api.setSetting('proactive', { ...proactive, enabled: false });
         return api.stats();
       });
     },

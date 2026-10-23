@@ -102,6 +102,7 @@ async function loadState({ fill = false } = {}) {
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
   renderMoodStatus();
   renderProactiveStatus(state.data.proactiveStatus);
+  renderMateStatus();
   renderFollowups();
   renderBookStatus(state.data.bookStatus);
   const dsh = state.data.dshStatus;
@@ -507,7 +508,7 @@ function renderProactiveStatus(status = {}) {
   const config = state.data?.settings.proactive || {};
   const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
   $('proactive-summary').textContent = config.enabled
-    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。先核对到期约定；${state.data?.dshStatus?.enabled ? '随机话题优先延续近期私聊，再考虑实际见闻。' : '随机话题根据实际读过的资料考虑。'}她会在允许的时段内等待合适的开口机会。`
+    ? `已开启 · 今日已考虑 ${inDay ? status.decisionAttempts || 0 : 0} / 6 次。先核对到期约定；${state.data?.dshStatus?.enabled ? state.data?.mateStatus?.enabled && state.data?.mateStatus?.ready ? '随机话题优先延续近期私聊，也可从核验过的旧主题生发。' : '随机话题优先延续近期私聊，再考虑实际见闻。' : '随机话题根据实际读过的资料考虑。'}她会在允许的时段内等待合适的开口机会。`
     : '主动私聊已关闭。保存开启后才安排；已经发起的发送无法保证撤回。';
   $('proactive-next').textContent = !config.enabled ? '启用后安排' : inDay && status.nextRunAt
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -518,6 +519,17 @@ function renderProactiveStatus(status = {}) {
   $('proactive-last').textContent = [status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}` : '', status.lastSuccess ? `最近确认发送：${date(status.lastSuccess)}` : ''].filter(Boolean).join(' · ');
   $('proactive-error').hidden = !status.lastError;
   $('proactive-error').textContent = status.lastError || '';
+}
+
+function renderMateStatus() {
+  const status = state.data?.mateStatus;
+  const version = /^\d+\.\d+\.\d+$/.test(status?.version || '') ? ` ${status.version}` : '';
+  $('mate-summary').textContent = status?.error ? '陪伴内核暂不可用，请核对本机配置；若数值状态损坏或积压，可重置节奏。'
+    : status?.busy ? '正在计算本次陪伴节奏，不调用模型或发送消息。'
+      : !status?.enabled ? '可选陪伴内核尚未启用。安装与本机配置方法见部署说明，原有主动私聊规则继续适用。'
+        : !status.ready ? '陪伴内核尚未就绪，请核对本机运行环境。'
+          : `Mate${version} 本机算法已就绪。随机话题会参考交流节奏；启用内核不会开启主动私聊，发送仍需满足原有条件。`;
+  $('mate-reset').disabled = Boolean(state.mateResetPending || status?.busy || state.data?.proactiveStatus?.busy);
 }
 
 function renderFollowups() {
@@ -914,6 +926,19 @@ $('mood-run').addEventListener('click', () => action($('mood-run'), async () => 
   const notices = { disabled: '请先保存并启用心情评估。', busy: '她正在处理其他事情，稍后再评估。', daily_limit: '今日评估次数已用完。', no_new_input: '没有新的可评估资料。', no_input: '没有新的可评估资料。', cancelled: '本次评估已取消。', low_confidence: '这次判断把握不足，保留原状态。' };
   toast(notices[result.status?.skipped || result.status?.lastOutcome] || result.status?.lastError || '评估已结束，状态见上方。');
 }));
+$('mate-reset').addEventListener('click', () => action($('mate-reset'), async () => {
+  state.mateResetPending = true;
+  renderMateStatus();
+  let reset = false;
+  try {
+    await api('/api/mate/reset', { method: 'POST', data: {} });
+    reset = true;
+    await loadState();
+    toast('已重置数值节奏；记忆、发送记录、未回应记录与开关保持不变。');
+  } catch {
+    throw new Error(reset ? '节奏已重置，但状态刷新未完成，请刷新页面核对。' : '陪伴节奏未重置，请等待当前任务结束并核对本机配置后重试。');
+  } finally { state.mateResetPending = false; }
+}).finally(() => renderMateStatus()));
 $('self-expression-run').addEventListener('click', () => action($('self-expression-run'), async () => {
   renderSelfExpressionStatus({ ...state.data.selfExpressionStatus, busy: true });
   try {

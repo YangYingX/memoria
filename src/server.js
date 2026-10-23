@@ -24,6 +24,7 @@ import { bindOwnerHeybox } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
 import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
 import { createDshRuntime, defaultDshReadingSettings, normalizeDshReadingSettings } from './dsh-runtime.js';
+import { createMateRuntime, mateFailure } from './mate-runtime.js';
 import { biliVideoUrl, biliReadingPage } from './bili-reading.js';
 import { createBiliAccount } from './bili-account.js';
 import { browseBiliVideos } from './bili-browse.js';
@@ -48,6 +49,7 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('POR
 mkdirSync(dataDir, { recursive: true });
 const store = createStore(join(dataDir, 'persona.sqlite'));
 const dshRuntime = createDshRuntime({ store, dataDir });
+const mateRuntime = createMateRuntime({ dataDir });
 const biliAccount = createBiliAccount({ dataDir });
 const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
@@ -266,6 +268,31 @@ function getProactiveRecipient() {
 }
 
 function makeProactiveJobs() {
+  const mateConfiguration = () => createHash('sha256').update(readFileSync(join(dataDir, 'mate-runtime.json'))).digest('hex');
+  const assessCompanion = async ({ now, timeZone, opportunityKey, signal }) => {
+    try {
+      signal?.throwIfAborted();
+      const configuration = mateConfiguration();
+      let input;
+      try { input = store.getCompanionInputs({ now }); }
+      catch { throw mateFailure('INPUT_INVALID'); }
+      if (input.blocked) throw mateFailure('INPUT_INVALID');
+      const { state, ...decision } = await mateRuntime.assess({ state: input.envelope?.state ?? null, now, timeZone,
+        contacts: input.contacts, unanswered: input.unanswered, recentProactive: input.recentProactive, signal });
+      signal?.throwIfAborted();
+      if (configuration !== mateConfiguration()) throw mateFailure('CANCELLED');
+      const committed = store.commitCompanionState({ expectedRevision: input.expectedRevision, expectedOwnerId: input.expectedOwnerId,
+        state, ownerCursor: input.ownerCursor, opportunityKey });
+      if (!committed) throw mateFailure('CANCELLED');
+      return { ...decision, unanswered: input.unanswered, sourcesCurrent() {
+        try {
+          return !signal?.aborted && configuration === mateConfiguration()
+            && store.getCompanionState()?.revision === committed.revision
+            && (store.latestOwnerMessage()?.id ?? null) === input.expectedOwnerId;
+        } catch { return false; }
+      } };
+    } catch (error) { throw mateFailure(signal?.aborted ? 'CANCELLED' : error?.code); }
+  };
   const compose = async (args, signal) => {
     signal?.throwIfAborted();
     if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
@@ -289,8 +316,11 @@ function makeProactiveJobs() {
       try { return JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')); }
       catch { throw new Error('主动私聊决定格式无效。'); }
     },
+    canAssessCompanion: () => { const status = mateRuntime.status(); return status.enabled || Boolean(status.error); },
+    assessCompanion,
     canGenerateConversation: () => dshRuntime.status().enabled,
-    generateConversation: ({ messageId, signal }) => compose({ messageId }, signal),
+    generateConversation: ({ messageId, impulse, signal }) => compose({ messageId, ...(impulse ? { impulse } : {}) }, signal),
+    generateTheme: ({ memoryId, impulse, signal }) => compose({ memoryId, ...(impulse ? { impulse } : {}) }, signal),
     generateAgenda: ({ agendaId, signal }) => compose({ agendaId }, signal),
     send: async (recipient, message, options) => {
       const config = store.getSetting('qq');
@@ -782,7 +812,13 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/mate/reset' && req.method === 'POST') {
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) return json(res, 400, { error: '重置陪伴节奏不接受额外参数。' });
+        if (proactiveJobs.status().busy || mateRuntime.status().busy) return json(res, 409, { error: '请等待当前主动私聊判断完成后重置节奏。' });
+        store.resetCompanionState();
+        return json(res, 200, { ok: true, status: mateRuntime.status(), message: '已重置陪伴节奏。记忆、未回应记录和发送额度保持不变。' });
+      }
       if (path === '/api/feishu/reconnect' && req.method === 'POST') { feishuChat.disconnect(); await feishuRuntime.restart(); return json(res, 200, { status: feishuChat.status(), connection: feishuRuntime.status() }); }
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
@@ -969,5 +1005,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await biliAccount.close(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await biliAccount.close(); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });

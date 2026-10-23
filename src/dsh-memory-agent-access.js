@@ -33,10 +33,10 @@ function checkedArgs(name, args) {
   return { [definition.key]: value, ...(Object.hasOwn(args, 'offset') ? { offset: args.offset } : {}) };
 }
 
-export function createMemoryAgentAccess({ store, scope, actor, query, signal, excludeMessageId = '', request = requestCompletion, purpose = 'recall', messageId, agendaId }) {
+export function createMemoryAgentAccess({ store, scope, actor, query, signal, excludeMessageId = '', request = requestCompletion, purpose = 'recall', messageId, agendaId, memoryId, impulse }) {
   const memoryAccess = createMemoryAccess({ store, scope, actor, excludeMessageId });
   if (!['recall', 'proactive'].includes(purpose) || (purpose === 'proactive' && (scope !== 'owner' || actor !== 'owner' || excludeMessageId))) throw new Error('主动拟聊仅属于已验证的创建人场合。');
-  const proactive = purpose === 'proactive' ? createDshProactiveContext({ store, messageId, agendaId }) : null;
+  const proactive = purpose === 'proactive' ? createDshProactiveContext({ store, messageId, agendaId, memoryId, impulse }) : null;
   if (proactive) query = proactive.query;
   if (typeof query !== 'string' || !query.trim() || query.length > 500 || query.includes('\0') || typeof request !== 'function') {
     throw new Error('记忆子代理需要1–500字查询和有效模型接口。');
@@ -179,7 +179,9 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
     },
     finalResult() {
       available();
-      return state === 'final' ? { text, modelRequests, toolCalls, memoryIds: [...memoryIds], conversationIds: [...conversationIds],
+      const referencedMemories = [...new Set([...memoryIds, ...(proactive?.memoryIds || [])])];
+      if (proactive && referencedMemories.length + conversationIds.size + proactive.historyMessageIds.length > 100) fail('主动拟聊来源索引超过允许的数量。');
+      return state === 'final' ? { text, modelRequests, toolCalls, memoryIds: referencedMemories, conversationIds: [...conversationIds],
         sourcesCurrent, ...(proactive ? { historyMessageIds: proactive.historyMessageIds } : {}) } : null;
     },
   });

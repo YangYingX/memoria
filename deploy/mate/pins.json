@@ -1,0 +1,26 @@
+{
+  "name": "@m-rui/dsh-mate-companion",
+  "version": "1.5.4",
+  "commit": "a6d715c1bfa6dcd81eb0dadcb3964e0d459c1c5a",
+  "archive": "3bc2b35bae767375d6684d3f0191d3d7aba457fbb4efb536558b3640b157e9bd",
+  "files": {
+    "LICENSE": "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
+    "package.json": "bc3439d549c8d7412d42d27fbdb3e8385ba16638073d53de6e6bc9b6078c18c7",
+    "packages/mate/src/birth.ts": "5c49416a939122b6d5c1b73d99f8f21f41d8122dfdd3d3795be42b04789d280b",
+    "packages/mate/src/catchup.ts": "40ec6134d1eb5ec7cf5ab81e7ba4d026bc881ea1a0d7912106b91fc68111c262",
+    "packages/mate/src/context.ts": "099bed1257842732613aa90b6ce9b82ce8818930d5f62c2d4f286ec9500c5567",
+    "packages/mate/src/daemon.ts": "b21f1619c1fc33341cf00dcd3f4102daec4c38648ffae8d4ae8d0b4927a912cf",
+    "packages/mate/src/i18n.ts": "1d100a0def10754c429ba45827c417fd982d9d1a7866195030c6edcd974663cf",
+    "packages/mate/src/index.ts": "afc882a46b254438baa33e14d3f8ad269088145884bafb3373fbdaeddb56c2ee",
+    "packages/mate/src/judge.ts": "458ecc6b4ebef3d9165c1ed8ae0b4d6a43beb1e1dfa7240517dd5425e373b2f7",
+    "packages/mate/src/kernel.ts": "a32833123e5f3f5d72f7b29504a3859e3ade82594740e119218f8eb928259893",
+    "packages/mate/src/memory.ts": "cb899ca7928b36617cbe488671ef5589db7b6e997a863f8df2367445e802d1b7",
+    "packages/mate/src/params.ts": "9ab92fac454ff0caca615e0c7b944c164308062c5199ff00d49ffb11b1e521b8",
+    "packages/mate/src/quantum.ts": "4462cb9250b06e749309da19071345dda857f831c6dc5f31a295623b1a041b4a",
+    "packages/mate/src/rng.ts": "55f5a2f0bc08dca51f52f568d06f3f02d97d899ce4dc06b2357f96e2cf073d74",
+    "packages/mate/src/session.ts": "2fa1fbaca5bf1b6f80e812536d06f2baca257fd04462ecda7e6c7c0dc82dde68",
+    "packages/mate/src/spark.ts": "9f32d9c79a94ff08eca05bce8118681862283199be86d9b25c6063d27a09dbb1",
+    "packages/mate/src/store.ts": "c052ff44cbe02bb8280f3cd7f50ab23db3d1662e44a6b3b649b7af02f67ea52d",
+    "packages/mate/src/types.ts": "5720eb4d71ee81afb643452bb13924d5587d094c3e1437d2c160fa8ea061ea04"
+  }
+}

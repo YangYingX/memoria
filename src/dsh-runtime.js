@@ -7,7 +7,7 @@ import { biliVideoUrl } from './bili-reading.js';
 import { createDshModelAccess } from './dsh-model.js';
 import { moodSnapshot, validateMoodDelta } from './mood.js';
 import { createMemoryAgentAccess, memoryAgentErrorMessage } from './dsh-memory-agent-access.js';
-import { proactiveQuery } from './dsh-proactive-context.js';
+import { normalizeProactiveImpulse, proactiveQuery } from './dsh-proactive-context.js';
 import { expressionSearchItems, expressionSearchQuery, expressionSearchResult } from './expression-search.js';
 import { readBiliCredentials } from './bili-credentials.js';
 
@@ -106,10 +106,14 @@ export function createDshRuntime({ store, dataDir }) {
         if (Object.keys(args).some(key => !['query', 'items'].includes(key))) throw new Error('表情检索只接受关键词和当前场合目录。');
         args = { query: expressionSearchQuery(args.query), items: expressionSearchItems(args.items) };
       } else if (composing) {
-        const key = Object.hasOwn(args, 'agendaId') ? 'agendaId' : 'messageId';
-        if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || Object.keys(args).length !== 1 || !Object.hasOwn(args, key)
-          || typeof args[key] !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args[key])) throw new Error('主动拟聊只接受已验证创建人的消息或约定标识。');
-        args = { [key]: args[key] };
+        const identifiers = ['messageId', 'agendaId', 'memoryId'].filter(key => Object.hasOwn(args, key));
+        const key = identifiers[0];
+        if (scope !== 'owner' || actor !== 'owner' || excludeMessageId || identifiers.length !== 1
+          || Object.keys(args).some(field => ![key, 'impulse'].includes(field))
+          || typeof args[key] !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args[key])) throw new Error('主动拟聊只接受已验证创建人的消息、约定或旧主题标识。');
+        const impulse = normalizeProactiveImpulse(args.impulse);
+        if (key === 'agendaId' && impulse !== undefined) throw new Error('到期约定不接受陪伴节奏建议。');
+        args = { [key]: args[key], ...(impulse ? { impulse } : {}) };
       } else if (recalling) {
         if (Object.keys(args).some(key => key !== 'query') || typeof args.query !== 'string' || !args.query.trim() || args.query.length > 500) throw new Error('记忆子代理只接受 1–500 字的查询。');
         args = { query: args.query.trim() };

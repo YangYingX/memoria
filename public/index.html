@@ -182,17 +182,21 @@
             </div></section>
             <section id="proactive-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">09</span><h2>主动私聊</h2><p class="muted">延续你们的近况与旧话题，也可以分享自己的见闻，选一个合适的时机开口。</p></div><div class="settings-fields">
               <label class="check-label"><input id="proactive-enabled" type="checkbox">允许她主动私聊我</label>
-              <p class="caption">默认关闭。仅发送至最近绑定且仍有效的创建人 QQ 私聊。先核对到期约定；其余随机话题在启用 DSH 后优先从最近七天的最新私聊延续近况，没有新的私聊话题时再考虑实际读过的资料。</p>
+              <p class="caption">默认关闭。仅发送至最近绑定且仍有效的创建人 QQ 私聊。先核对到期约定；其余随机话题在启用 DSH 后优先从最近七天的最新私聊延续近况。另可启用下方陪伴内核，从来源仍有效的旧主题生发；没有合适话题便保持安静，也可分享实际读过的资料。</p>
               <label>主动聊天欲（0–100）<input id="proactive-desire" type="number" min="0" max="100" step="1" required><small>随机话题按这个百分比决定是否考虑开口；0 也暂停约定跟进，100 不保证发送。</small></label>
               <div class="field-row"><label>每天最多尝试发送几次<input id="proactive-daily-limit" type="number" min="0" max="3" step="1" required></label><label>主动聊天机会间隔（分钟）<input id="proactive-cooldown" type="number" min="60" max="1440" step="1" required></label></div>
               <label>聊完后至少安静多久（分钟）<input id="proactive-idle" type="number" min="10" max="1440" step="1" required><small>从最近一次与你的私聊起计算；后台创建人对话也算在内。</small></label>
               <div class="field-row"><label>活跃时段开始（整点）<input id="proactive-start-hour" type="number" min="0" max="23" step="1" required></label><label>活跃时段结束（整点）<input id="proactive-end-hour" type="number" min="1" max="24" step="1" required></label></div>
               <label>主动聊天时区<input id="proactive-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"></label>
               <p class="caption">随机聊天与约定跟进合计每天最多考虑 6 次，共用发送次数、QQ 聊天和模型额度。阅读分享最多一次模型请求；延续旧话题或跟进约定的 DSH 回合最多四次，可检索有权读取的记忆，也可以保持安静。没有有效 QQ 绑定或可用来源时不调用。</p>
-              <p class="caption">同一网页、已读书籍片段或最新私聊记录只判断一次，安静、失败或取消也不自动重试；同一机会选择安静便结束。发起发送后失败或结果未确认也计发送次数。关闭会取消尚未发起的消息；在途消息无法保证撤回。</p>
+              <p class="caption">同一网页、已读书籍片段、最新私聊记录或旧主题条目的同一版本只判断一次，安静、失败或取消也不自动重试；同一机会选择安静便结束。发起发送后失败或结果未确认也计发送次数。关闭会取消尚未发起的消息；在途消息无法保证撤回。</p>
               <p id="proactive-summary" class="muted">正在读取安排…</p>
               <dl class="autonomy-overview" aria-live="polite"><div><dt>下次随机机会</dt><dd id="proactive-next">等待安排</dd></div><div><dt>今日发送尝试</dt><dd id="proactive-count">0 次</dd></div><div><dt>最近结果</dt><dd id="proactive-outcome">还没有记录</dd></div></dl>
               <p id="proactive-last" class="caption" hidden></p><p id="proactive-error" class="connection-result error" role="status" hidden></p>
+              <h3>可选陪伴内核</h3><p id="mate-summary" class="caption" role="status">正在读取陪伴内核状态…</p>
+              <p class="caption">按本机数值节奏考虑好奇、疲劳与未回应后的退避，仍使用栖忆的人格、心境和统一书架；不是另一套记忆或定时器。安装与开关见部署说明的“可选 Mate 陪伴节奏内核”。</p>
+              <div><button id="mate-reset" class="button secondary" type="button">重置陪伴节奏</button></div>
+              <p class="caption">仅恢复内核数值状态，可用于状态损坏或历史积压。不会删除记忆、清空发送或未回应记录，也不会开启主动私聊；当前正在判断时请稍后再试。</p>
               <h3>聊天约定</h3><p class="caption">在创建人私聊中创建、列出、取消或恢复；这里只展示状态。主动私聊默认关闭，保存约定不会自动开启。到期跟进不是准点闹钟，仍受时段、冷却、空闲和额度约束，超过到期后 24 小时不补发。</p>
               <p id="followups-summary" class="caption"></p><div id="followups-list" class="accounts-list" aria-live="polite"></div>
             </div></section>
