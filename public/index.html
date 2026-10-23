@@ -173,7 +173,12 @@
             </div></section>
             <section class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">10</span><h2>DSH 插件运行层</h2><p class="muted">插件执行任务，栖忆保留统一书架与场合权限。</p></div><div class="settings-fields">
               <p id="dsh-summary" class="muted">正在读取状态…</p>
-              <div class="connection-test"><button id="dsh-test" class="button secondary" type="button">检测插件运行层</button><p class="caption">当前支持只读接入核对，不调用模型或发布内容。独立宿主配置方法见仓库部署说明。</p><p id="dsh-test-result" class="connection-result" role="status" hidden></p></div>
+              <p id="bili-account-summary" class="muted">正在读取专用账号状态…</p>
+              <div class="field-row"><button id="bili-login" class="button secondary" type="button">登录 B站专用账号</button><button id="bili-login-confirm" class="button secondary" type="button">完成登录，保存状态</button></div>
+              <p class="caption">项目打开独立浏览器，由你手动登录；确认后只把读取所需的登录凭据保存在本机。专用执行账号不用于认定创建人身份。Windows 使用独立 Edge 窗口，Linux 需图形会话；凭据不进入备份或 GitHub。登录不会自动解除已有的平台风险暂停。</p>
+              <label>每天最多尝试读取几个 B站视频<input id="dsh-reading-limit" type="number" min="0" max="50" step="1" required><small>默认 6 次，所有聊天场合共用，按 UTC 日期计数；失败也计次，重启或换会话不清零。0 表示暂停新读取，已有记忆仍可翻阅。</small></label>
+              <p class="caption">在聊天或网页阅读中提供完整的 B站 BV 视频链接，也可加入固定网址阅读安排。通过只读接口获取字幕文字，不读取画面或音频；全部取得文字分段存入书架。平台验证可能阻止读取；暂停后不自动重试。阅读不消耗公开发布额度。</p>
+              <div class="connection-test"><button id="dsh-test" class="button secondary" type="button">检测插件运行层</button><p class="caption">此按钮只检测宿主，不调用模型或访问平台。独立宿主配置方法见仓库部署说明。</p><p id="dsh-test-result" class="connection-result" role="status" hidden></p></div>
             </div></section><div class="settings-footer"><p id="settings-result" class="muted" role="status"></p><button class="button primary" type="submit">保存设置 <span>✓</span></button></div></form>
         </section>
       </div>

@@ -3,12 +3,38 @@ import { existsSync, readFileSync, statSync, mkdirSync, mkdtempSync, realpathSyn
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMemoryAccess } from './memory-access.js';
+import { biliVideoUrl } from './bili-reading.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
 const memoryTools = ['search_memory', 'read_memory', 'read_memory_source'];
+export const defaultDshReadingSettings = { dailyReadLimit: 6 };
+
+export function normalizeDshReadingSettings(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'dailyReadLimit')
+    || !Number.isSafeInteger(input.dailyReadLimit) || input.dailyReadLimit < 0 || input.dailyReadLimit > 50) throw new Error('DSH 每日阅读尝试上限须为 0–50。');
+  return { dailyReadLimit: input.dailyReadLimit };
+}
+
+const readingErrors = {
+  PLATFORM_PAUSED: 'B站拒绝访问或要求验证，读取已暂停；不会自动重试或清空暂停记录。',
+  PERSISTENT_PAUSE: 'B站读取仍处于暂停状态，请先在本机核对平台访问情况。',
+  NO_READABLE_TEXT: '未取得可读字幕；没有保存阅读经历，也没有推断视频内容。',
+  NETWORK_FAILED: 'B站文字获取失败，未自动重试。',
+  READ_TOKEN_BUDGET: '视频文字超过单次资料上限，未截断保存。',
+  INVALID_SOURCE: '视频文字来源或分页校验失败，未保存阅读经历。',
+  SOURCE_TOO_LARGE: '视频资料超过单次读取上限，本次未截断保存。',
+  DSH_READ_FAILED: 'B站文字读取未完成，未自动重试。',
+};
 
 export function createDshRuntime({ store, dataDir }) {
   let busy = false;
+  function readingStatus() {
+    const day = new Date().toISOString().slice(0, 10);
+    const saved = store.getSetting('dshReadingStatus', {});
+    const settings = normalizeDshReadingSettings(store.getSetting('dshReading', defaultDshReadingSettings));
+    const attempts = saved.day === day && Number.isSafeInteger(saved.attempts) && saved.attempts >= 0 ? saved.attempts : 0;
+    return { day, attempts, dailyLimit: settings.dailyReadLimit, remaining: Math.max(0, settings.dailyReadLimit - attempts) };
+  }
   function config() {
     const path = join(dataDir, 'dsh-runtime.json');
     if (!existsSync(path)) return { enabled: false };
@@ -27,20 +53,38 @@ export function createDshRuntime({ store, dataDir }) {
   }
   return {
     status() {
-      try { return { enabled: config().enabled, busy, mode: 'read-only', memoryAuthority: 'memoria' }; }
+      try { return { enabled: config().enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus() }; }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
     },
     async execute({ scope, actor, name, args = {}, signal }) {
-      const memory = createMemoryAccess({ store, scope, actor });
-      if (!['inspect', ...memoryTools].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
-        || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态核对和只读书架工具。');
+      const reading = name === 'read_bili_video';
+      const memory = createMemoryAccess({ store, scope: reading ? 'public' : scope, actor });
+      if (!['inspect', ...memoryTools, 'read_bili_video'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
+        || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
+      if (reading) {
+        if (Object.keys(args).some(key => key !== 'url') || typeof args.url !== 'string' || args.url.length > 4096) throw new Error('视频阅读只接受完整网址。');
+        const url = biliVideoUrl(args.url);
+        if (!url) throw new Error('请提供完整 B站 BV 视频网址。');
+        args = { url };
+      }
       const settings = config();
       if (!settings.enabled) throw new Error('尚未启用 DSH 插件运行层。');
       if (busy) throw new Error('已有 DSH 任务运行，请稍后再试。');
       signal?.throwIfAborted();
+      if (reading) {
+        const usage = readingStatus();
+        if (!usage.remaining) throw new Error('已达到今日 DSH 阅读尝试上限，可在人格与设置中调整。');
+        store.setSetting('dshReadingStatus', { day: usage.day, attempts: usage.attempts + 1, lastAttemptAt: new Date().toISOString() });
+      }
       busy = true;
       let workspace;
       try {
+        let cacheDirectory;
+        if (reading) {
+          cacheDirectory = join(resolve(dataDir), 'dsh-cache', 'humanism');
+          mkdirSync(cacheDirectory, { recursive: true });
+          cacheDirectory = realpathSync(cacheDirectory);
+        }
         // Disposable profile/cache; the authoritative memories stay in Memoria's database.
         workspace = mkdtempSync(join(settings.hostDirectory, '.memoria-job-'));
         for (const folder of ['home', 'appdata', 'localappdata', 'tmp', 'dsh']) mkdirSync(join(workspace, folder));
@@ -55,7 +99,7 @@ export function createDshRuntime({ store, dataDir }) {
           const child = spawn(settings.nodePath, [hostScript], { cwd: workspace, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
           let result, failure, received = false, requests = 0, stderrBytes = 0;
           const stop = message => { failure ||= new Error(message); child.kill(); };
-          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), 30000);
+          const timeout = setTimeout(() => stop('DSH 任务超时，未自动重试。'), reading ? 110000 : 30000);
           const abort = () => stop('DSH 任务已取消。');
           signal?.addEventListener('abort', abort, { once: true });
           if (signal?.aborted) abort();
@@ -64,9 +108,11 @@ export function createDshRuntime({ store, dataDir }) {
             if (stderrBytes > 65536) stop('DSH 日志超过大小限制。');
           });
           child.on('error', () => stop('DSH 子进程未能启动。'));
-          child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace, operation: { name, args } }));
+          const credentialPath = join(resolve(dataDir), 'bili-credentials.json');
+          child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace,
+            ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}), operation: { name, args } }));
           child.on('message', message => {
-            if (!message || typeof message !== 'object' || JSON.stringify(message).length > 100000) return stop('DSH 返回格式无效。');
+            if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
             if (message.type === 'memory') {
               if (++requests > 10 || !memoryTools.includes(message.name) || !Number.isSafeInteger(message.id) || message.id < 1) return stop('DSH 记忆请求超出限制。');
               let response;
@@ -75,7 +121,8 @@ export function createDshRuntime({ store, dataDir }) {
               if (child.connected) child.send({ type: 'memory-result', id: message.id, ...response }, () => {});
             } else if (message.type === 'result' && !received) {
               received = true; result = message.result;
-            } else if (message.type === 'failure') stop('DSH 核对未完成，请检查固定版本依赖与本机配置。');
+            } else if (message.type === 'failure') stop(reading && typeof message.code === 'string' && Object.hasOwn(readingErrors, message.code)
+              ? readingErrors[message.code] : 'DSH 核对未完成，请检查固定版本依赖与本机配置。');
             else stop('DSH 返回了不支持的消息。');
           });
           child.on('close', code => {

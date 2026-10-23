@@ -6,7 +6,9 @@ export function allowedScopes(scope) {
 
 export function withConversationSource(store, memory, scope) {
   const source = store.getMemorySource(memory.id, allowedScopes(scope));
-  return source ? { ...memory, conversationSource: { actor: source.actor, recordedAt: source.createdAt } } : memory;
+  const parts = store.getReadingParts(memory.id, allowedScopes(scope));
+  return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt } } : {}),
+    ...(parts?.length ? { readingParts: parts } : {}) };
 }
 
 export function memoryPage(memory, offset, size) {

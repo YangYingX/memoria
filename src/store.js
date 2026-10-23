@@ -417,22 +417,83 @@ export function createStore(dbPath) {
     },
     recordReading({ page, scope, actor = 'owner' }) {
       record(page, '网页');
-      const fields = memoryFields({ title: text(page.title, '网页标题', 500).slice(0, 150), content: page.text,
-        category: 'reading', scope, sourceType: 'webpage', sourceRef: text(page.url, '网页地址', LIMITS.sourceRef) });
+      const title = text(page.title, '网页标题', 500);
+      const suppliedParts = page.parts !== undefined;
+      if (suppliedParts && (!Array.isArray(page.parts) || !page.parts.length || page.parts.length > 50
+        || page.text !== page.parts[0])) invalid('分段阅读须提供 1–50 段正文，且首段须与网页正文一致。');
+      const contents = (suppliedParts ? page.parts : [page.text]).map(part => text(part, '阅读正文', LIMITS.memory));
+      if (suppliedParts && page.parts.reduce((sum, part) => sum + part.length, 0) > 1000000) invalid('分段阅读正文合计不能超过 1000000 字。');
+      const multipart = contents.length > 1;
+      const evidence = page.evidence === undefined ? undefined : metadataValue(page.evidence);
+      const readAt = timestamp(page.readAt, '阅读时间');
       const now = new Date().toISOString();
-      const event = { id: randomUUID(), ...eventFields({ type: 'reading', scope: fields.scope, actor,
-        content: fields.content, sourceRef: fields.sourceRef,
-        metadata: { title: page.title, readAt: timestamp(page.readAt, '阅读时间'), truncated: Boolean(page.truncated) } }), createdAt: now };
+      const sections = contents.map((content, index) => {
+        const suffix = contents.length > 1 ? ` · 文字 ${index + 1}/${contents.length}` : '';
+        const fields = memoryFields({ title: title.slice(0, 150 - suffix.length) + suffix, content,
+          category: 'reading', scope, sourceType: 'webpage', sourceRef: text(page.url, '网页地址', LIMITS.sourceRef) });
+        const event = { id: randomUUID(), ...eventFields({ type: 'reading', scope: fields.scope, actor,
+          content: fields.content, sourceRef: fields.sourceRef,
+          metadata: { title: page.title, readAt, truncated: Boolean(page.truncated),
+            ...(evidence === undefined ? {} : { evidence }),
+            ...(multipart ? { partIndex: index + 1, partCount: contents.length } : {}) } }), createdAt: now };
+        return { fields, event };
+      });
       return transaction(() => {
-        const existing = memoryRow(get(`SELECT * FROM memories WHERE deleted_at IS NULL AND scope = ?
-          AND source_type = 'webpage' AND category = 'reading' AND source_ref = ? AND title = ? AND content = ?
-          ORDER BY updated_at DESC, rowid DESC LIMIT 1`, fields.scope, fields.sourceRef, fields.title, fields.content));
-        const memory = existing || { id: randomUUID(), ...fields, createdAt: now, updatedAt: now, deletedAt: null };
-        if (!existing) insertMemory(memory);
-        event.metadata.memoryId = memory.id;
-        event.metadata.reusedMemory = Boolean(existing);
-        insertEvent(event);
-        return { memory, eventId: event.id, reusedMemory: Boolean(existing) };
+        const readings = sections.map(({ fields, event }) => {
+          const existing = memoryRow(get(`SELECT * FROM memories WHERE deleted_at IS NULL AND scope = ?
+            AND source_type = 'webpage' AND category = 'reading' AND source_ref = ? AND title = ? AND content = ?
+            ORDER BY updated_at DESC, rowid DESC LIMIT 1`, fields.scope, fields.sourceRef, fields.title, fields.content));
+          const memory = existing || { id: randomUUID(), ...fields, createdAt: now, updatedAt: now, deletedAt: null };
+          return { memory, event, reusedMemory: Boolean(existing) };
+        });
+        const memoryParts = multipart ? readings.map(({ memory }, index) => ({ id: memory.id, title: memory.title, partIndex: index + 1 })) : undefined;
+        for (const [index, reading] of readings.entries()) {
+          reading.event.metadata = metadataValue({ ...reading.event.metadata, memoryId: reading.memory.id,
+            reusedMemory: reading.reusedMemory, ...(multipart ? { readingGroupId: readings[0].event.id } : {}),
+            ...(multipart && index === 0 ? { memoryParts } : {}) });
+        }
+        for (const { memory, event, reusedMemory } of readings) {
+          if (!reusedMemory) insertMemory(memory);
+          insertEvent(event);
+        }
+        const first = readings[0];
+        return { memory: first.memory, eventId: first.event.id, reusedMemory: first.reusedMemory, ...(multipart ? { memoryParts } : {}) };
+      });
+    },
+    getReadingParts(id, scopes) {
+      id = identifier(id, '记忆 ID');
+      if (!Array.isArray(scopes) || scopes.length > 100) invalid('阅读分段索引须提供最多 100 个明确的可见范围。');
+      const permitted = [...new Set(scopes.map(scopeValue))];
+      if (!permitted.length) return [];
+      const memory = memoryRow(get(`SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL
+        AND source_type = 'webpage' AND category = 'reading' AND scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted));
+      if (!memory) return [];
+      const origin = get(`SELECT * FROM events WHERE type = 'reading' AND scope = ? AND source_ref = ? AND content = ?
+        AND json_extract(metadata, '$.memoryId') = ? AND json_type(metadata, '$.readingGroupId') = 'text'
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`, memory.scope, memory.sourceRef, memory.content, id);
+      if (!origin) return [];
+      const groupId = eventRow(origin).metadata.readingGroupId;
+      const first = get("SELECT * FROM events WHERE id = ? AND type = 'reading' AND scope = ? AND source_ref = ?", groupId, memory.scope, memory.sourceRef);
+      if (!first) return [];
+      const metadata = eventRow(first).metadata;
+      const originMetadata = eventRow(origin).metadata;
+      const parts = metadata.memoryParts;
+      if (metadata.readingGroupId !== groupId || !Array.isArray(parts) || parts.length < 2 || parts.length > 50
+        || parts.some((part, index) => !part || typeof part !== 'object' || Array.isArray(part)
+          || typeof part.id !== 'string' || part.partIndex !== index + 1)
+        || new Set(parts.map(part => part.id)).size !== parts.length
+        || metadata.memoryId !== parts[0].id || metadata.partIndex !== 1 || metadata.partCount !== parts.length
+        || originMetadata.partCount !== parts.length
+        || !parts.some(part => part.id === id && part.partIndex === originMetadata.partIndex)) return [];
+      return parts.flatMap(part => {
+        const current = memoryRow(get(`SELECT * FROM memories WHERE id = ? AND deleted_at IS NULL AND scope = ?
+          AND source_type = 'webpage' AND category = 'reading' AND source_ref = ?`, part.id, memory.scope, memory.sourceRef));
+        if (!current) return [];
+        const matching = get(`SELECT 1 FROM events WHERE type = 'reading' AND scope = ? AND source_ref = ? AND content = ?
+          AND json_extract(metadata, '$.memoryId') = ? AND json_extract(metadata, '$.readingGroupId') = ?
+          AND json_extract(metadata, '$.partIndex') = ? AND json_extract(metadata, '$.partCount') = ? LIMIT 1`,
+        current.scope, current.sourceRef, current.content, current.id, groupId, part.partIndex, parts.length);
+        return matching ? [{ id: current.id, title: current.title, partIndex: part.partIndex }] : [];
       });
     },
     recordReadingReflection({ readingEventId, note }) {

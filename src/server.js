@@ -23,7 +23,9 @@ import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettin
 import { bindOwnerHeybox } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
 import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
-import { createDshRuntime } from './dsh-runtime.js';
+import { createDshRuntime, defaultDshReadingSettings, normalizeDshReadingSettings } from './dsh-runtime.js';
+import { biliVideoUrl, biliReadingPage } from './bili-reading.js';
+import { createBiliAccount } from './bili-account.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -33,6 +35,7 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('POR
 mkdirSync(dataDir, { recursive: true });
 const store = createStore(join(dataDir, 'persona.sqlite'));
 const dshRuntime = createDshRuntime({ store, dataDir });
+const biliAccount = createBiliAccount({ dataDir });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
@@ -43,6 +46,7 @@ const defaults = {
   selfExpression: defaultExpressionSettings,
   books: defaultBookSettings,
   proactive: defaultProactiveSettings,
+  dshReading: defaultDshReadingSettings,
   backup: { enabled: false, intervalHours: 6, keepLocal: 30, localDirectory: resolve(process.env.PERSONA_BACKUP_DIR || join(root, 'backups')), passphrase: '', webdav: { enabled: false, url: '', username: '', password: '' } },
 };
 for (const [key, value] of Object.entries(defaults)) if (!store.getSetting(key)) store.setSetting(key, value);
@@ -324,7 +328,7 @@ function publicSettings() {
   const persona = store.getSetting('persona'), model = store.getSetting('model'), qq = store.getSetting('qq');
   const { apiKey, ...modelView } = model;
   const { accessToken, ...qqView } = qq;
-  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
+  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
 function saveSettings(input) {
@@ -362,6 +366,7 @@ function saveSettings(input) {
   if (input.selfExpression) next.selfExpression = normalizeExpressionSettings(input.selfExpression, store.getSetting('selfExpression'), expressionPlatforms);
   if (input.books) next.books = normalizeBookSettings(input.books, store.getSetting('books'));
   if (input.proactive) next.proactive = normalizeProactiveSettings(input.proactive, store.getSetting('proactive'));
+  if (input.dshReading) next.dshReading = normalizeDshReadingSettings(input.dshReading);
   if (next.autonomy && JSON.stringify(next.autonomy) !== JSON.stringify(store.getSetting('autonomy'))) autonomyJobs.cancel();
   if (['selfExpression', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) selfExpressionJobs.cancel();
   if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) bookJobs.cancel();
@@ -375,7 +380,8 @@ async function readAndRemember(url, scope, actor = 'owner') {
   if (readingJobs.size >= 2 || readingJobs.has(key)) throw new Error('已有阅读任务进行中，请稍后重试。');
   readingJobs.add(key); activeMutation++;
   try {
-    const page = await readPage(url);
+    const videoUrl = biliVideoUrl(url);
+    const page = videoUrl ? biliReadingPage(await dshRuntime.execute({ scope, actor, name: 'read_bili_video', args: { url: videoUrl } }), videoUrl) : await readPage(url);
     return { page, ...store.recordReading({ page, scope, actor }) };
   } finally { readingJobs.delete(key); activeMutation--; }
 }
@@ -614,7 +620,9 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
+      if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
       if (path === '/api/dsh/check' && req.method === 'POST') {
         activeMutation++;
         try { return json(res, 200, await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'inspect' })); }
@@ -782,5 +790,5 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`Data: ${dataDir}`);
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); server.close(() => { store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 3000).unref(); });
+server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); void biliAccount.close(); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); server.close(async () => { await biliAccount.close(); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 3000).unref(); });

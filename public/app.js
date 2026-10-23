@@ -102,8 +102,12 @@ async function loadState({ fill = false } = {}) {
   renderProactiveStatus(state.data.proactiveStatus);
   renderBookStatus(state.data.bookStatus);
   const dsh = state.data.dshStatus;
-  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? '已配置只读运行层。长期记忆由栖忆书架提供，不按 DSH 会话另建记忆库。' : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
+  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
   $('dsh-test').disabled = !dsh?.enabled || dsh.busy;
+  const biliAccount = state.data.biliAccountStatus;
+  $('bili-account-summary').textContent = biliAccount?.configured ? `已保存专用账号 ${biliAccount.accountId || ''} 的本机登录状态。此状态不表示当前平台认证仍有效。`
+    : biliAccount?.browserOpen ? '专用登录窗口已打开。登录完成后点击“完成登录，保存状态”。' : '尚未保存 B站专用账号；读取时使用匿名公开接口。';
+  $('bili-login-confirm').disabled = !biliAccount?.browserOpen;
   if (fill) { fillSettings(); fillBackupSettings(); }
 }
 
@@ -400,7 +404,8 @@ function renderAccounts() {
 }
 
 function fillSettings() {
-  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {} } = state.data.settings;
+  const { persona, model, qq, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {} } = state.data.settings;
+  $('dsh-reading-limit').value = dshReading.dailyReadLimit ?? 6;
   $('persona-name').value = persona.name;
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
@@ -722,8 +727,8 @@ $('read-form').addEventListener('submit', event => {
   action($('read-form'), async () => {
     $('read-submit').textContent = '正在阅读…';
     try {
-      const { page, memory, reusedMemory } = await api('/api/read', { method: 'POST', data: { url: $('read-url').value.trim(), scope: $('read-scope').value } });
-      const saved = node('p', reusedMemory ? '已重新阅读，正文未变化，沿用原有记忆' : '已阅读并保存到记忆书架', 'eyebrow');
+      const { page, memory, reusedMemory, memoryParts } = await api('/api/read', { method: 'POST', data: { url: $('read-url').value.trim(), scope: $('read-scope').value } });
+      const saved = node('p', page.evidence?.sourceKind === 'bilibili-transcript' ? `已取得视频文字，保存为 ${memoryParts?.length || 1} 段书架资料` : reusedMemory ? '已重新阅读，正文未变化，沿用原有记忆' : '已阅读并保存到记忆书架', 'eyebrow');
       const link = node('a', page.url, 'article-url');
       const url = new URL(page.url);
       if (['http:', 'https:'].includes(url.protocol)) { link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
@@ -731,6 +736,7 @@ $('read-form').addEventListener('submit', event => {
       edit.addEventListener('click', () => editMemory(memory));
       $('reading-result').replaceChildren(saved, node('h2', page.title), link, node('p', page.excerpt || page.text?.slice(0, 7000), 'article-body'), edit);
       if (page.truncated) $('reading-result').append(node('p', '正文超过本次提取上限，已保存前部内容；不代表读完原网页。', 'caption'));
+      if (page.evidence?.sourceKind === 'bilibili-transcript') $('reading-result').append(node('p', '已保存本次取得的全部文字与时间戳；未观看画面或收听音频，也不保证完整覆盖视频。其他分段可在记忆书架按视频标题查找。', 'caption'));
       await Promise.all([loadEvents(), loadState()]);
       toast('阅读完成，内容与来源已保存。');
     } finally { $('read-submit').textContent = '阅读并保存 ↗'; }
@@ -894,6 +900,14 @@ $('dsh-test').addEventListener('click', () => action($('dsh-test'), async () => 
     output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。`;
   } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
+$('bili-login').addEventListener('click', () => action($('bili-login'), async () => {
+  await api('/api/bili/login', { method: 'POST', data: {} });
+  await loadState(); toast('专用浏览器已打开，请手动登录后保存状态。');
+}));
+$('bili-login-confirm').addEventListener('click', () => action($('bili-login-confirm'), async () => {
+  await api('/api/bili/login/confirm', { method: 'POST', data: {} });
+  await loadState(); toast('B站专用账号登录状态已保存到本机。');
+}));
 $('settings-form').addEventListener('submit', event => {
   event.preventDefault();
   action($('settings-form'), async () => {
@@ -905,6 +919,7 @@ $('settings-form').addEventListener('submit', event => {
     $('settings-result').textContent = '正在保存…';
     try {
       await api('/api/settings', { method: 'PUT', data: {
+        dshReading: { dailyReadLimit: Number($('dsh-reading-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups') },
