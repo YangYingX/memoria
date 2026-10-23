@@ -8,16 +8,16 @@ export function followupView(store, row) {
 export function createFollowupActions({ store, getRecipient, cancel, signal, assertActive, clock = Date.now }) {
   const check = () => { signal?.throwIfAborted(); assertActive?.(); };
   function status() {
-    const config = store.getSetting('proactive'), qq = store.getSetting('qq');
-    return { enabled: config.enabled === true && qq.enabled === true, timeZone: config.timeZone,
+    const config = store.getSetting('proactive'), current = getRecipient();
+    return { enabled: config.enabled === true && Boolean(current), timeZone: config.timeZone,
       now: new Date(clock()).toISOString(), earliestDelaySeconds: 60, maxDays: 366, expiresAfterHours: 24,
-      ready: Boolean(config.desire > 0 && config.dailyLimit > 0 && getRecipient() && store.getSetting('model')?.apiKey),
+      ready: Boolean(config.desire > 0 && config.dailyLimit > 0 && current && store.getSetting('model')?.apiKey),
       startHour: config.startHour, endHour: config.endHour, idleMinutes: config.idleMinutes, cooldownMinutes: config.cooldownMinutes };
   }
   const result = row => ({ ok: Boolean(row), followup: followupView(store, row), ...status() });
-  const recipient = () => {
-    const current = getRecipient();
-    if (!current) throw new Error('请先验证创建人 QQ 账号并启用 QQ 接入，再安排跟进。');
+  const recipient = (sourceEventId, allowLegacyQQ = false) => {
+    const current = getRecipient(sourceEventId, allowLegacyQQ);
+    if (!current) throw new Error('请先在原私聊渠道验证创建人账号并启用该渠道，再安排跟进。');
     return current.accountId;
   };
   return {
@@ -25,14 +25,16 @@ export function createFollowupActions({ store, getRecipient, cancel, signal, ass
     list() { check(); return { ok: true, followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), ...status() }; },
     schedule(input) {
       check();
-      const row = store.scheduleFollowup({ ...input, recipientAccountId: recipient(), now: clock() });
+      const row = store.scheduleFollowup({ ...input, recipientAccountId: recipient(input.sourceEventId), now: clock() });
       cancel();
       return result(row);
     },
     cancel(id) { check(); const row = store.cancelFollowup(id, clock()); cancel(); return result(row); },
     resume(id) {
       check();
-      const row = store.resumeFollowup({ id, recipientAccountId: recipient(), now: clock() });
+      const previous = store.getFollowup(id);
+      if (!previous) return result(null);
+      const row = store.resumeFollowup({ id, recipientAccountId: recipient(previous.sourceEventId, true), now: clock() });
       cancel();
       return { ...result(row), ok: row?.status === 'pending' };
     },

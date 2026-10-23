@@ -7,6 +7,7 @@ import { assertPublicUrl } from './public-fetch.js';
 import { normalizeMoodState } from './mood.js';
 import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
 import { normalizeQQReplyContext } from './qq-message.js';
+import { normalizeConversationOrigin } from './conversation-origin.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
 import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
@@ -133,6 +134,10 @@ function eventFields(input) {
   const type = text(input.type, '经历类型', 40);
   const content = text(input.content, '经历正文', LIMITS.event);
   const metadata = metadataValue(input.metadata);
+  if (Object.hasOwn(metadata, 'conversationOrigin')) {
+    if (type !== 'message' || input.scope !== 'owner' || input.actor !== 'owner') invalid('私聊来源只能关联创建人原始消息。');
+    metadata.conversationOrigin = normalizeConversationOrigin(metadata.conversationOrigin);
+  }
   if (Object.hasOwn(metadata, 'qqBatchSources')) {
     if (type !== 'message') invalid('QQ 合并消息来源只能保存在消息经历中。');
     metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
@@ -166,6 +171,10 @@ function messageFields(input) {
   if (!['user', 'assistant'].includes(input.role)) invalid('消息角色须为 user 或 assistant。');
   const content = text(input.content, '消息正文', input.role === 'user' ? 8000 : 16000);
   const metadata = metadataValue(input.metadata);
+  if (Object.hasOwn(metadata, 'conversationOrigin')) {
+    if (input.role !== 'user' || input.scope !== 'owner' || input.actor !== 'owner') invalid('私聊来源只能保存在创建人用户消息中。');
+    metadata.conversationOrigin = normalizeConversationOrigin(metadata.conversationOrigin);
+  }
   if (Object.hasOwn(metadata, 'qqBatchSources')) {
     if (input.role !== 'user') invalid('QQ 合并消息来源只能保存在用户消息中。');
     metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
@@ -467,14 +476,58 @@ export function createStore(dbPath) {
     }
   }
   function validFollowupRecipient(account) {
-    return account?.platform === 'qq' && account.personId === 'owner' && /^[1-9]\d{4,19}$/.test(account.userId);
+    return account?.personId === 'owner' && (account.platform === 'qq' && /^[1-9]\d{4,19}$/.test(account.userId)
+      || account.platform === 'feishu' && /^im1:[a-f0-9]{64}$/.test(account.userId));
   }
   function validFollowupSource(source, message) {
     return source?.type === 'message' && source.scope === 'owner' && source.actor === 'owner'
       && typeof source.metadata?.messageId === 'string' && message?.id === source.metadata.messageId
       && message.role === 'user' && message.scope === 'owner' && message.actor === 'owner' && message.content === source.content;
   }
-  function followupEvidence(item) {
+  function pairedConversationOrigin(source, message) {
+    if (!validFollowupSource(source, message)) return null;
+    try {
+      const metadata = typeof message.metadata === 'string' ? JSON.parse(message.metadata) : message.metadata;
+      const user = normalizeConversationOrigin(metadata.conversationOrigin), event = normalizeConversationOrigin(source.metadata.conversationOrigin);
+      if (user === undefined && event === undefined) return undefined;
+      return user && event && JSON.stringify(user) === JSON.stringify(event) ? user : null;
+    } catch { return null; }
+  }
+  const feishuOriginAccount = origin => `im1:${createHash('sha256').update(JSON.stringify(['feishu-sender-v1', origin.fingerprint, origin.actorId])).digest('hex')}`;
+  function followupRecipientForSource(account, source, message, origin = pairedConversationOrigin(source, message)) {
+    if (!validFollowupRecipient(account) || origin === null) return false;
+    if (origin === undefined) return account.platform === 'qq';
+    return account.platform === origin.platform && (origin.platform === 'qq' ? account.userId === origin.userId
+      : account.id === origin.accountId && account.userId === feishuOriginAccount(origin));
+  }
+  function currentConversationOrigin(source, message, requireCurrent = true) {
+    const origin = pairedConversationOrigin(source, message);
+    if (origin === null || get("SELECT 1 FROM conversation_blocks WHERE scope = 'owner' AND event_id = ?", source.id)
+      || get(`SELECT 1 FROM conversation_blocks b JOIN events e ON e.id = b.event_id AND e.scope = b.scope
+        WHERE e.type = 'message' AND e.scope = 'owner' AND (
+          (json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = ?)
+          OR (json_type(e.metadata, '$.messageId') IS NOT 'text' AND e.actor = 'owner' AND e.content = ?)) LIMIT 1`, message.id, message.content)) return null;
+    if (origin === undefined || !requireCurrent) return origin;
+    if (origin.platform === 'qq') {
+      // QQ may be explicitly rebound after restore; its captured binding ID remains historical.
+      const account = accountRow(get("SELECT * FROM accounts WHERE platform = 'qq' AND user_id = ?", origin.userId));
+      return followupRecipientForSource(account, source, message, origin) ? origin : null;
+    }
+    const account = accountRow(get('SELECT * FROM accounts WHERE id = ?', origin.accountId));
+    const inbox = get('SELECT * FROM feishu_messages WHERE key = ?', origin.inboxKey);
+    if (!followupRecipientForSource(account, source, message, origin) || !inbox || inbox.scope !== 'owner' || inbox.actor !== 'owner'
+      || ['received', 'canceled'].includes(inbox.state)) return null;
+    try {
+      const input = JSON.parse(inbox.input);
+      const key = createHash('sha256').update(JSON.stringify(['feishu-message-v1', origin.fingerprint, input.messageId])).digest('hex');
+      return input.version === 1 && input.channel === 'feishu' && input.control === undefined && input.botId === origin.botId
+        && input.fingerprint === origin.fingerprint && input.conversation?.kind === 'dm' && input.conversation.id === origin.conversationId
+        && input.actor?.kind === 'user' && input.actor.id === origin.actorId && typeof input.text === 'string' && input.text.trim() === message.content
+        && input.reply?.messageId === input.messageId && input.reply.conversationId === origin.conversationId && input.reply.actorId === origin.actorId
+        && key === origin.inboxKey ? origin : null;
+    } catch { return null; }
+  }
+  function followupEvidence(item, requireCurrentOrigin = true) {
     if (!item || FOLLOWUP_TERMINAL_STATUSES.includes(item.status)) return null;
     const memory = memoryRow(get('SELECT * FROM memories WHERE id = ?', item.memoryId));
     const row = get('SELECT * FROM events WHERE id = ?', item.sourceEventId);
@@ -485,10 +538,34 @@ export function createStore(dbPath) {
       && memory.title.length <= 80 && memory.content.length <= 600
       && memory.updatedAt === memory.createdAt && !get('SELECT 1 FROM revisions WHERE memory_id = ?', item.memoryId)
       && !get('SELECT 1 FROM tombstones WHERE memory_id = ?', item.memoryId)
-      && !get("SELECT 1 FROM conversation_blocks WHERE scope = 'owner' AND event_id = ?", item.sourceEventId);
+      && !get("SELECT 1 FROM conversation_blocks WHERE scope = 'owner' AND event_id = ?", item.sourceEventId)
+      && currentConversationOrigin(source, message, requireCurrentOrigin) !== null;
     return valid ? { followup: item, memory, source, message: messageRow(message) } : null;
   }
-  const currentFollowupSource = item => Boolean(followupEvidence(item));
+  const currentFollowupSource = (item, requireCurrentOrigin = true) => Boolean(followupEvidence(item, requireCurrentOrigin));
+  function feishuChatQuota(dailyLimit, now) {
+    const day = now.slice(0, 10), saved = api.getSetting('feishuChatStatus', {}) || {};
+    const sameDay = saved.day === day;
+    if (sameDay && (!Number.isSafeInteger(saved.attempts) || saved.attempts < 0)) invalid('飞书当日聊天计数无效。');
+    const attempts = sameDay ? saved.attempts : 0;
+    const dayStamp = value => typeof value === 'string' && value.startsWith(`${day}T`) ? timestamp(value, '飞书额度记录时间') : '';
+    return { day, timeZone: 'UTC', dailyLimit, attempts, remaining: Math.max(0, dailyLimit - attempts),
+      lastAttemptAt: sameDay ? dayStamp(saved.lastAttemptAt) : '', lastLimitedAt: sameDay ? dayStamp(saved.lastLimitedAt) : '' };
+  }
+  function reserveFeishuQuota(dailyLimit, now) {
+    const status = feishuChatQuota(dailyLimit, now);
+    if (!status.remaining) {
+      const firstLimited = !status.lastLimitedAt;
+      if (firstLimited) {
+        status.lastLimitedAt = now;
+        api.setSetting('feishuChatStatus', { day: status.day, attempts: status.attempts, lastAttemptAt: status.lastAttemptAt, lastLimitedAt: now });
+      }
+      return { allowed: false, firstLimited, status };
+    }
+    status.attempts++; status.remaining--; status.lastAttemptAt = now;
+    api.setSetting('feishuChatStatus', { day: status.day, attempts: status.attempts, lastAttemptAt: now, lastLimitedAt: status.lastLimitedAt });
+    return { allowed: true, firstLimited: false, status };
+  }
   const biliClaimed = (kind, key) => Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', `bili-${kind}:${key}`));
   function claimBili(kind, key, now) {
     return run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `bili-${kind}:${key}`, now).changes > 0;
@@ -1294,6 +1371,21 @@ export function createStore(dbPath) {
       const row = get("SELECT * FROM messages WHERE scope = 'owner' AND role = 'user' AND actor = 'owner' ORDER BY rowid DESC LIMIT 1");
       return row ? messageRow(row) : null;
     },
+    getConversationOrigin(messageId) {
+      const message = get("SELECT * FROM messages WHERE id = ? AND role = 'user' AND scope = 'owner' AND actor = 'owner'", identifier(messageId, '私聊消息 ID'));
+      if (!message) return null;
+      const sources = all(`SELECT * FROM events WHERE type = 'message' AND scope = 'owner'
+        AND json_type(metadata, '$.messageId') = 'text' AND json_extract(metadata, '$.messageId') = ?`, message.id);
+      if (!sources.length) return null;
+      const origins = sources.map(row => currentConversationOrigin(eventRow(row), message));
+      return origins.some(origin => origin === null || JSON.stringify(origin) !== JSON.stringify(origins[0])) ? null : origins[0];
+    },
+    getConversationOriginByEvent(sourceEventId) {
+      const row = get('SELECT * FROM events WHERE id = ?', identifier(sourceEventId, '私聊来源 ID'));
+      const source = row ? eventRow(row) : null;
+      const message = source && typeof source.metadata.messageId === 'string' ? get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId) : null;
+      return currentConversationOrigin(source, message);
+    },
     getCompanionState() {
       return normalizeCompanionEnvelope(api.getSetting('companionState', null));
     },
@@ -1346,7 +1438,7 @@ export function createStore(dbPath) {
         const recipient = accountRow(get('SELECT * FROM accounts WHERE id = ?', recipientAccountId));
         if (!validFollowupSource(source, message) || source.createdAt > now
           || get("SELECT 1 FROM conversation_blocks WHERE scope = 'owner' AND event_id = ?", sourceEventId)) invalid('跟进必须来自创建人私聊的有效原始消息。');
-        if (!validFollowupRecipient(recipient)) invalid('跟进需要已验证的创建人 QQ 账号。');
+        if (!followupRecipientForSource(recipient, source, message) || currentConversationOrigin(source, message) === null) invalid('跟进需要原私聊渠道中当前已验证的创建人账号。');
         for (const row of all("SELECT * FROM followups WHERE status IN ('pending', 'paused', 'deciding') AND expires_at <= ?", now)) {
           updateFollowup(followupRow(row), { status: 'expired' }, now);
         }
@@ -1392,7 +1484,10 @@ export function createStore(dbPath) {
         const patch = { status, ...(options.nextDecisionAt === undefined ? {} : { nextDecisionAt: options.nextDecisionAt }) };
         if (status === 'deciding' || status === 'attempted') {
           if (now >= previous.expiresAt) patch.status = 'expired';
-          else if (!currentFollowupSource(previous) || !validFollowupRecipient(accountRow(get('SELECT * FROM accounts WHERE id = ?', previous.recipientAccountId)))) patch.status = 'invalidated';
+          else {
+            const evidence = followupEvidence(previous), recipient = accountRow(get('SELECT * FROM accounts WHERE id = ?', previous.recipientAccountId));
+            if (!evidence || !followupRecipientForSource(recipient, evidence.source, evidence.message)) patch.status = 'invalidated';
+          }
         }
         if (patch.status === 'deciding') {
           if (now < previous.nextDecisionAt || now < previous.dueAt) return null;
@@ -1422,9 +1517,12 @@ export function createStore(dbPath) {
       return transaction(() => {
         const previous = followupRow(get('SELECT * FROM followups WHERE id = ?', id));
         if (!previous || previous.status !== 'paused') return null;
-        if (!validFollowupRecipient(accountRow(get('SELECT * FROM accounts WHERE id = ?', recipientAccountId)))) invalid('跟进需要重新验证创建人 QQ 账号。');
+        const recipient = accountRow(get('SELECT * FROM accounts WHERE id = ?', recipientAccountId));
+        if (!validFollowupRecipient(recipient)) invalid('请在约定的原私聊渠道重新验证创建人账号。');
         if (now >= previous.expiresAt || previous.decisionAttempts >= 3) return updateFollowup(previous, { status: 'expired' }, now);
-        if (!currentFollowupSource(previous)) return updateFollowup(previous, { status: 'invalidated' }, now);
+        const evidence = followupEvidence(previous);
+        if (!evidence) return updateFollowup(previous, { status: 'invalidated' }, now);
+        if (!followupRecipientForSource(recipient, evidence.source, evidence.message)) invalid('跟进收件人必须属于约定的原私聊渠道。');
         if (get('SELECT 1 FROM deliveries WHERE key = ?', `followup:${id}`)) return updateFollowup(previous, { status: 'unknown' }, now);
         return updateFollowup(previous, { status: 'pending', recipientAccountId }, now, 'resumed');
       });
@@ -1463,6 +1561,16 @@ export function createStore(dbPath) {
       limit = integer(limit, '待处理飞书消息条数', 1, 100);
       return all("SELECT * FROM feishu_messages WHERE state = 'received' ORDER BY created_at, rowid LIMIT ?", limit).map(feishuMessageRow);
     },
+    reserveFeishuChat(input) {
+      record(input, '飞书聊天额度');
+      if (Object.keys(input).some(key => !['dailyLimit', 'now'].includes(key))) invalid('飞书聊天额度参数无效。');
+      const dailyLimit = integer(input.dailyLimit, '飞书每日聊天上限', 0, 1000);
+      const now = timestamp(input.now === undefined ? new Date().toISOString() : input.now, '飞书判断时间');
+      return transaction(() => {
+        const { allowed, status } = reserveFeishuQuota(dailyLimit, now);
+        return { allowed, attempts: status.attempts, dailyLimit, day: status.day };
+      });
+    },
     beginFeishuMessage(key, { dailyLimit, now = new Date().toISOString() }) {
       key = feishuMessageKey(key);
       dailyLimit = integer(dailyLimit, '飞书每日聊天上限', 0, 1000);
@@ -1470,26 +1578,12 @@ export function createStore(dbPath) {
       return transaction(() => {
         const message = feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key));
         if (!message) invalid('飞书消息不存在。');
-        const day = now.slice(0, 10), saved = api.getSetting('feishuChatStatus', {}) || {};
-        const sameDay = saved.day === day;
-        if (sameDay && (!Number.isSafeInteger(saved.attempts) || saved.attempts < 0)) invalid('飞书当日聊天计数无效。');
-        const attempts = sameDay ? saved.attempts : 0;
-        const dayStamp = value => typeof value === 'string' && value.startsWith(`${day}T`) ? timestamp(value, '飞书额度记录时间') : '';
-        const status = { day, timeZone: 'UTC', dailyLimit, attempts, remaining: Math.max(0, dailyLimit - attempts),
-          lastAttemptAt: sameDay ? dayStamp(saved.lastAttemptAt) : '', lastLimitedAt: sameDay ? dayStamp(saved.lastLimitedAt) : '' };
+        const status = feishuChatQuota(dailyLimit, now);
         if (message.state !== 'received') return { allowed: false, firstLimited: false, status, message };
-        if (!status.remaining) {
-          const firstLimited = !status.lastLimitedAt;
-          if (firstLimited) {
-            status.lastLimitedAt = now;
-            api.setSetting('feishuChatStatus', { day, attempts, lastAttemptAt: status.lastAttemptAt, lastLimitedAt: now });
-          }
-          return { allowed: false, firstLimited, status, message };
-        }
-        if (!run("UPDATE feishu_messages SET state = 'processing', updated_at = ? WHERE key = ? AND state = 'received'", now, key).changes) return { allowed: false, firstLimited: false, status, message };
-        status.attempts++; status.remaining--; status.lastAttemptAt = now;
-        api.setSetting('feishuChatStatus', { day, attempts: status.attempts, lastAttemptAt: now, lastLimitedAt: status.lastLimitedAt });
-        return { allowed: true, firstLimited: false, status, message: feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key)) };
+        const reserved = reserveFeishuQuota(dailyLimit, now);
+        if (!reserved.allowed) return { ...reserved, message };
+        if (!run("UPDATE feishu_messages SET state = 'processing', updated_at = ? WHERE key = ? AND state = 'received'", now, key).changes) invalid('飞书消息状态已变化，未重复预留。');
+        return { ...reserved, message: feishuMessageRow(get('SELECT * FROM feishu_messages WHERE key = ?', key)) };
       });
     },
     saveFeishuReply(key, reply) {
@@ -1810,7 +1904,8 @@ export function createStore(dbPath) {
           || memory.sourceRef !== item.sourceEventId || memory.createdAt !== item.createdAt || memory.updatedAt !== memory.createdAt
           || memory.title.length > 80 || memory.content.length > 600 || revisedIds.has(item.memoryId) || deletedIds.has(item.memoryId)
           || !validFollowupSource(source, messageById.get(source?.metadata?.messageId)) || source.createdAt > item.createdAt
-          || blockedSources.has(item.sourceEventId) || (!validFollowupRecipient(accountById.get(item.recipientAccountId))
+          || pairedConversationOrigin(source, messageById.get(source?.metadata?.messageId)) === null
+          || blockedSources.has(item.sourceEventId) || (!followupRecipientForSource(accountById.get(item.recipientAccountId), source, messageById.get(source?.metadata?.messageId))
             && !(item.status === 'paused' && !accountById.has(item.recipientAccountId)))) invalid('备份中的有效聊天跟进缺少完整的创建人来源或账号关联。');
       }
 
@@ -1872,7 +1967,7 @@ export function createStore(dbPath) {
             restored = normalizeFollowupRecord({ ...item, status: item.status === 'attempted' ? 'unknown' : 'paused', revision: item.revision + 1,
               updatedAt: item.updatedAt > restoredAt ? item.updatedAt : restoredAt });
             // Preserved memory tombstones or conversation blocks can invalidate a formerly valid backup source.
-            if (restored.status === 'paused' && !currentFollowupSource(restored)) restored.status = 'invalidated';
+            if (restored.status === 'paused' && !currentFollowupSource(restored, false)) restored.status = 'invalidated';
           }
           insertFollowup(restored);
           if (['attempted', 'sent', 'unknown'].includes(restored.status)) run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `followup:${restored.id}`, restored.updatedAt);

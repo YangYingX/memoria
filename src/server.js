@@ -20,6 +20,7 @@ import { defaultExpressionSettings, normalizeExpressionSettings, publicExpressio
 import { defaultBookSettings, normalizeBookSettings, createBookJobs } from './book-jobs.js';
 import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
+import { createProactiveRecipientResolver } from './proactive-recipient.js';
 import { bindOwnerHeybox } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
 import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
@@ -97,9 +98,11 @@ function cancelQQ() { qqEpoch++; qqChatBatch?.cancel(); }
 function qqBusy() { const status = qqChatBatch?.status(); return Boolean(status && (status.busy || status.pending)); }
 const feishuRuntime = createFeishuRuntime({ dataDir,
   getSettings: () => normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)),
-  onEvent: event => feishuChat.receive(event), onReady: () => { void feishuChat.tick(); }, onPause: () => feishuChat?.disconnect() });
+  onEvent: event => feishuChat.receive(event), onReady: () => { void feishuChat.tick(); },
+  onPause: () => { feishuChat?.disconnect(); proactiveJobs?.cancel(); } });
 feishuChat = createFeishuChat({ store, transport: feishuRuntime,
   chat: (scope, message, actor, options) => chat(scope, message, actor, [], '', options),
+  onOwnerMessage: () => proactiveJobs?.cancel(),
   onError: code => store.addEvent({ type: 'error', scope: 'owner', actor: 'feishu', content: '飞书消息处理未完成，未自动重发。', metadata: { platform: 'feishu', code } }) });
 function bindHeyboxOwner(userId) {
   const configPath = join(dataDir, 'android-runtime.json');
@@ -270,12 +273,11 @@ function makeBookJobs() {
 }
 bookJobs = makeBookJobs();
 
-function getProactiveRecipient() {
-  const qq = store.getSetting('qq');
-  if (!qq.enabled) return null;
-  const account = store.listAccounts().find(item => item.platform === 'qq' && item.personId === 'owner'
-    && /^\d{1,20}$/.test(item.userId) && item.userId !== qq.botId);
-  return account ? { accountId: account.id, userId: account.userId } : null;
+const getProactiveRecipient = createProactiveRecipientResolver({ store, getFeishuStatus: () => feishuRuntime.status() });
+
+function reserveProactiveChat(recipient) {
+  const allowed = recipient.platform === 'feishu' ? feishuChat.reserveChat().allowed : reserveQQChat();
+  if (!allowed) throw new Error('原聊天渠道的今日智能对话额度已用完。');
 }
 
 function makeProactiveJobs() {
@@ -304,9 +306,9 @@ function makeProactiveJobs() {
       } };
     } catch (error) { throw mateFailure(signal?.aborted ? 'CANCELLED' : error?.code); }
   };
-  const compose = async (args, signal) => {
+  const compose = async (args, recipient, signal) => {
     signal?.throwIfAborted();
-    if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
+    reserveProactiveChat(recipient);
     const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args, signal });
     let proposal;
     try { proposal = JSON.parse(result.text); }
@@ -314,10 +316,11 @@ function makeProactiveJobs() {
     return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
       historyMessageIds: result.historyMessageIds, sourcesCurrent: result.sourcesCurrent };
   };
-  return createProactiveJobs({ store, getRecipient: getProactiveRecipient, canGenerate: () => qqChatBudget.status().remaining > 0,
-    generate: async ({ instructions, signal, ...context }) => {
+  return createProactiveJobs({ store, getRecipient: getProactiveRecipient,
+    canGenerate: recipient => recipient.platform === 'feishu' ? feishuChat.status().chat.remaining > 0 : qqChatBudget.status().remaining > 0,
+    generate: async ({ instructions, recipient, signal, ...context }) => {
       signal?.throwIfAborted();
-      if (!reserveQQChat()) throw new Error('QQ 智能对话额度已用完。');
+      reserveProactiveChat(recipient);
       const result = await requestCompletion({ store, signal, maxTokens: 600, messages: [
         { role: 'system', content: instructions },
         { role: 'user', content: JSON.stringify(context) },
@@ -330,15 +333,23 @@ function makeProactiveJobs() {
     canAssessCompanion: () => { const status = mateRuntime.status(); return status.enabled || Boolean(status.error); },
     assessCompanion,
     canGenerateConversation: () => dshRuntime.status().enabled,
-    generateConversation: ({ messageId, impulse, signal }) => compose({ messageId, ...(impulse ? { impulse } : {}) }, signal),
-    generateTheme: ({ memoryId, impulse, signal }) => compose({ memoryId, ...(impulse ? { impulse } : {}) }, signal),
-    generateAgenda: ({ agendaId, signal }) => compose({ agendaId }, signal),
+    generateConversation: ({ messageId, impulse, recipient, signal }) => compose({ messageId, ...(impulse ? { impulse } : {}) }, recipient, signal),
+    generateTheme: ({ memoryId, impulse, recipient, signal }) => compose({ memoryId, ...(impulse ? { impulse } : {}) }, recipient, signal),
+    generateAgenda: ({ agendaId, recipient, signal }) => compose({ agendaId }, recipient, signal),
     send: async (recipient, message, options) => {
+      if (recipient.platform === 'feishu') {
+        const source = store.getFeishuMessage(recipient.sourceInboxKey);
+        if (!source || source.input.conversation.kind !== 'dm') throw new Error('飞书原私聊来源已失效。');
+        const receipt = await feishuRuntime.sendProactive({ kind: 'dm', ...source.input.reply }, message,
+          { ...options, epoch: recipient.epoch });
+        if (receipt?.sent !== true || receipt.conversationId !== recipient.conversationId) throw new Error('飞书原私聊发送结果未确认。');
+        return receipt;
+      }
       const config = store.getSetting('qq');
       if (!(await testQQ(options.signal)).ok) throw new Error('QQ 未在线或登录账号不匹配。');
       return sendQQ(config, { user_id: recipient.userId }, message, [], '', options);
     },
-    isBusy: () => activeMutation > 0 || qqBusy() || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || moodJobs?.status().busy || dshRuntime.status().busy,
+    isBusy: () => activeMutation > 0 || qqBusy() || feishuChat.status().busy || feishuChat.status().pending > 0 || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || moodJobs?.status().busy || dshRuntime.status().busy,
   });
 }
 proactiveJobs = makeProactiveJobs();
@@ -497,7 +508,7 @@ function saveSettings(input) {
   if (next.autonomy && JSON.stringify(next.autonomy) !== JSON.stringify(store.getSetting('autonomy'))) autonomyJobs.cancel();
   if (['selfExpression', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) selfExpressionJobs.cancel();
   if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) bookJobs.cancel();
-  if (['proactive', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) proactiveJobs.cancel();
+  if (['proactive', 'qq', 'feishu', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) proactiveJobs.cancel();
   if (['mood', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) moodJobs.cancel();
   if (['feishu', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) feishuChat.cancel();
   if ((next.qq && qqConfigSignature(next.qq) !== qqConfigSignature(store.getSetting('qq')))
@@ -549,11 +560,11 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
       } : undefined;
       const collectExpression = origin ? input => { options.signal?.throwIfAborted(); options.assertActive?.(); return store.saveExpression({ ...input, scope, origin, actor }); } : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, signal: options.signal, assertActive: options.assertActive,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions,
-          followupActions: createFollowupActions({ store, getRecipient: getProactiveRecipient, cancel: () => proactiveJobs.cancel(), signal: options.signal, assertActive: options.assertActive }) } : {}) });
+          followupActions: createFollowupActions({ store, getRecipient: (sourceEventId, allowLegacyQQ = false) => getProactiveRecipient({ sourceEventId, allowLegacyQQ }), cancel: () => proactiveJobs.cancel(), signal: options.signal, assertActive: options.assertActive }) } : {}) });
       try { if (!result.silent && !options.deferAssistant) moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
     }
@@ -697,7 +708,10 @@ async function runQQBatch(items, { signal }) {
     }
     const result = await chat(context.scope, items.map(item => item.text).join('\n'), context.actor, first.imageUrls, context.origin,
       { signal, assertActive, qqBatchSources: items.length > 1 ? sources : undefined,
-        qqReplyContext: qqReplyContext.length ? qqReplyContext : undefined, allowSilence: ambient, deferAssistant: true });
+        qqReplyContext: qqReplyContext.length ? qqReplyContext : undefined,
+        ...(context.scope === 'owner' && context.account?.personId === 'owner' ? { conversationOrigin: {
+          version: 1, platform: 'qq', accountId: context.account.id, botId: context.config.botId, userId: context.account.userId } } : {}),
+        allowSilence: ambient, deferAssistant: true });
     assertActive();
     if (ambient && result.silent === true) return;
     if (typeof result.commitDeliveredReply !== 'function') throw new Error('QQ 回复尚未准备好记录确认结果。');

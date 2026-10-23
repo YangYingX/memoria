@@ -72,7 +72,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       historyMessageIds.push(item.id);
       if (validReference(item.metadata.replyTo)) conversationIds.add(item.metadata.replyTo);
     }
-    return { messages: proactiveRecentMessages(history).map(({ text, ...item }) => ({ ...item, content: text })),
+    return { messages: proactiveRecentMessages(history, id => store.getConversationOrigin(id)).map(({ text, ...item }) => ({ ...item, content: text })),
       historyMessageIds, conversationIds: [...conversationIds] };
   }
   const inHours = (time, config) => {
@@ -158,14 +158,16 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     return references;
   }
 
-  function dueAgenda(time, recipient) {
+  function dueAgenda(time) {
     for (const item of store.listFollowups({ includeTerminal: false, limit: 20 })) {
       if (item.status !== 'pending') continue;
       if (time >= Date.parse(item.expiresAt)) { store.transitionFollowup(item.id, item.revision, 'expired', { now: time }); continue; }
-      if (item.recipientAccountId !== recipient.accountId) { store.transitionFollowup(item.id, item.revision, 'paused', { now: time }); continue; }
       const evidence = store.getFollowupEvidence(item.id);
       if (!evidence) { store.transitionFollowup(item.id, item.revision, 'invalidated', { now: time }); continue; }
-      if (time >= Date.parse(item.dueAt) && time >= Date.parse(item.nextDecisionAt)) return { kind: 'agenda', agenda: item, evidence, url: '' };
+      const recipient = getRecipient({ sourceEventId: item.sourceEventId, allowLegacyQQ: true, legacyAccountId: item.recipientAccountId });
+      if (!recipient) continue;
+      if (item.recipientAccountId !== recipient.accountId) { store.transitionFollowup(item.id, item.revision, 'paused', { now: time }); continue; }
+      if (time >= Date.parse(item.dueAt) && time >= Date.parse(item.nextDecisionAt)) return { kind: 'agenda', agenda: item, evidence, recipient, url: '' };
     }
     return null;
   }
@@ -177,10 +179,10 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     if (!config.enabled || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
     if (!recovered) { store.recoverFollowups(time); recovered = true; }
     if (!config.dailyLimit || !config.desire) return { ...status(), skipped: 'quiet' };
-    const recipient = getRecipient();
+    let selected = dueAgenda(time);
+    let recipient = selected?.recipient || getRecipient();
     if (!recipient || !store.getSetting('model')?.apiKey) return { ...status(), skipped: recipient ? 'no_model' : 'no_recipient' };
-    if (!canGenerate()) return { ...status(), skipped: 'platform_limit' };
-    let selected = dueAgenda(time, recipient);
+    if (!canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
     let state = plan(config, time);
     if (time < Date.parse(state.dayStartAt) || !inHours(time, config)) return { ...status(), skipped: 'outside_hours' };
     if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), skipped: 'daily_limit' };
@@ -206,6 +208,12 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     }
     if (!selected && companion && typeof generateTheme === 'function' && canGenerateConversation() === true) selected = theme(time);
     selected ||= reading(time);
+    const recipientSource = selected?.kind === 'agenda' ? { sourceEventId: selected.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: selected.agenda.recipientAccountId }
+      : selected?.kind === 'conversation' ? { messageId: selected.message.id }
+        : selected?.kind === 'theme' && selected.memory.sourceType === 'conversation' ? { sourceEventId: selected.memory.sourceRef } : {};
+    recipient = getRecipient(recipientSource);
+    if (!recipient) return { ...status(), skipped: 'no_recipient' };
+    if (!canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
     if (!selected || (selected.kind !== 'agenda' && draw() >= config.desire / 100)) {
       save({ ...state, lastOutcome: 'quiet' });
       return { ...status(), skipped: selected ? 'quiet' : 'no_reading' };
@@ -222,9 +230,16 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     const activeController = controller = new AbortController();
     const context = recentContext();
     let sourcesCurrent = () => true;
-    const dependencies = () => JSON.stringify({ recipient: getRecipient(), persona: store.getSetting('persona'), model: store.getSetting('model'), qq: store.getSetting('qq'),
+    const agendaEvidence = () => {
+      const evidence = store.getFollowupEvidence(selected.agenda.id);
+      // Acknowledging our own reserved send must not look like a source edit.
+      return selected.attempt && evidence && JSON.stringify(evidence.followup) === JSON.stringify(selected.attempt)
+        ? { ...evidence, followup: selected.evidence.followup } : evidence;
+    };
+    const dependencies = () => JSON.stringify({ recipient: getRecipient(recipientSource), persona: store.getSetting('persona'), model: store.getSetting('model'),
+      channel: store.getSetting(recipient.platform || 'qq'),
       ...(selected.kind === 'reading' ? { memory: store.getMemory(selected.memory.id), bookExists: !selected.bookId || Boolean(store.getBook(selected.bookId)) }
-        : selected.kind === 'agenda' ? { agenda: store.getFollowupEvidence(selected.agenda.id), conversationAvailable: canGenerateConversation() === true }
+        : selected.kind === 'agenda' ? { agenda: agendaEvidence(), conversationAvailable: canGenerateConversation() === true }
         : selected.kind === 'theme' ? { theme: store.getCompanionMemoryEvidence(selected.memory.id), conversationAvailable: canGenerateConversation() === true }
         : { seed: conversationSeed(now(), selected.message.id), conversationAvailable: canGenerateConversation() === true }),
       ...(companion ? { companionAvailable: canAssessCompanion() === true } : {}),
@@ -276,14 +291,14 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         : '开始根据实际阅读判断是否主动分享，同一来源不自动重试。');
       if (selected.kind === 'conversation' || selected.kind === 'theme') {
         decision = selected.kind === 'conversation'
-          ? await generateConversation({ messageId: selected.message.id, ...(impulse ? { impulse } : {}), signal: activeController.signal })
-          : await generateTheme({ memoryId: selected.memory.id, impulse, signal: activeController.signal });
+          ? await generateConversation({ messageId: selected.message.id, recipient, ...(impulse ? { impulse } : {}), signal: activeController.signal })
+          : await generateTheme({ memoryId: selected.memory.id, recipient, impulse, signal: activeController.signal });
         references = trustedReferences(decision);
         const companionSourcesCurrent = sourcesCurrent, decisionSourcesCurrent = decision.sourcesCurrent;
         sourcesCurrent = () => companionSourcesCurrent() === true && decisionSourcesCurrent() === true;
       } else if (selected.kind === 'agenda') {
         if (typeof generateAgenda === 'function' && canGenerateConversation() === true) {
-          decision = await generateAgenda({ agendaId: selected.agenda.id, signal: activeController.signal });
+          decision = await generateAgenda({ agendaId: selected.agenda.id, recipient, signal: activeController.signal });
           references = trustedReferences(decision);
           sourcesCurrent = decision.sourcesCurrent;
         } else {
@@ -291,14 +306,14 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
           const quote = source?.eventId === selected.evidence.source.id && source.actor === selected.evidence.message.actor
             && source.content === selected.evidence.message.content ? proactiveQuoteContext(source.qqReplyContext, source.content) : {};
           const { text: originalText, ...excerpt } = proactiveTextExcerpt(selected.evidence.source.content, 3000);
-          decision = await generate({ instructions: FOLLOWUP_INSTRUCTIONS, persona: store.getSetting('persona'),
+          decision = await generate({ instructions: FOLLOWUP_INSTRUCTIONS, recipient, persona: store.getSetting('persona'),
           mood: moodSnapshot(store, now()), recentMessages: context.messages,
           followup: { title: selected.evidence.memory.title, content: selected.evidence.memory.content,
             dueAt: selected.agenda.dueAt, expiresAt: selected.agenda.expiresAt,
             actor: selected.evidence.message.actor, recordedAt: selected.evidence.source.createdAt, originalText, ...excerpt, ...quote,
             now: stamp(now()), timeZone: config.timeZone }, signal: activeController.signal });
         }
-      } else decision = await generate({ instructions: PROACTIVE_INSTRUCTIONS, persona: store.getSetting('persona'),
+      } else decision = await generate({ instructions: PROACTIVE_INSTRUCTIONS, recipient, persona: store.getSetting('persona'),
         ...(impulse ? { impulse } : {}),
         mood: moodSnapshot(store, now()), recentMessages: context.messages,
         reading: { type: selected.index.type, title: selected.memory.title, readAt: selected.index.readAt,
@@ -323,8 +338,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         if (attempted || state.sendAttempts >= config.dailyLimit || store.hasProactiveAttempt(selected.sourceKey)
           || !store.claimDelivery(`proactive:${selected.sourceKey}`)) throw new Error('本次话题不再发送。');
         update({ sendAttempts: state.sendAttempts + 1, lastOutcome: 'pending' });
-        event(selected, 'attempt', selected.kind === 'reading' ? '开始向已验证的创建人 QQ 私聊分享阅读，本次已计入额度。'
-          : '开始向已验证的创建人 QQ 私聊主动搭话，本次已计入额度。');
+        event(selected, 'attempt', selected.kind === 'reading' ? '开始向已验证的创建人原私聊分享阅读，本次已计入额度。'
+          : '开始向已验证的创建人原私聊主动搭话，本次已计入额度。', { platform: recipient.platform || 'qq' });
         attempted = true;
       };
       try {
@@ -333,17 +348,21 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       if (!sameState()) return { ...status(), busy: false, skipped: stopped ? 'stopped' : 'cancelled' };
       if (!attempted) {
         const cancelled = !current() || isBusy();
-        update({ lastOutcome: cancelled ? 'cancelled' : 'error', lastError: cancelled ? '' : 'QQ 未通过发送前检查，本次未发送。' });
+        update({ lastOutcome: cancelled ? 'cancelled' : 'error', lastError: cancelled ? '' : '原聊天渠道未通过发送前检查，本次未发送。' });
         event(selected, cancelled ? 'cancelled' : 'error', '主动私聊未通过发送前检查，未发起发送。');
         return { ...status(), busy: false, skipped: cancelled ? 'cancelled' : 'preflight_failed' };
       }
       const messageId = result?.messageId;
-      const confirmed = (typeof messageId === 'string' && messageId.length > 0 && messageId.length <= 100 && !messageId.includes('\0')) || Number.isSafeInteger(messageId);
-      if (confirmed) {
+      const confirmed = (typeof messageId === 'string' && messageId.length > 0 && messageId.length <= (recipient.platform === 'feishu' ? 128 : 100) && !messageId.includes('\0')) || Number.isSafeInteger(messageId);
+      if (confirmed && current()) {
         store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: message,
           metadata: { mode: 'live', proactive: true, kind: selected.kind, memoryIds, conversationIds, historyMessageIds,
-            sourceKey: selected.sourceKey, platform: 'qq', messageId: String(messageId) } });
+            sourceKey: selected.sourceKey, platform: recipient.platform || 'qq', messageId: String(messageId) } });
         event(selected, 'success', message, { messageId: String(messageId) });
+        update({ lastOutcome: 'success', lastSuccess: stamp(now()), lastError: '' });
+        if (selected.attempt) store.transitionFollowup(selected.attempt.id, selected.attempt.revision, 'sent', { now: now() });
+      } else if (confirmed) {
+        event(selected, 'success', '原私聊已取得发送回执；背景随后变化，未保存失效的拟聊正文。', { messageId: String(messageId), platform: recipient.platform || 'qq' });
         update({ lastOutcome: 'success', lastSuccess: stamp(now()), lastError: '' });
         if (selected.attempt) store.transitionFollowup(selected.attempt.id, selected.attempt.revision, 'sent', { now: now() });
       } else {

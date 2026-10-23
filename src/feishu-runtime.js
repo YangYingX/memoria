@@ -49,7 +49,7 @@ export function createFeishuRuntime({ dataDir, getSettings, onEvent, onReady = (
   }
   function status() {
     return { connected: current?.ready === true, connecting: Boolean(starting), epoch: current?.epoch || '',
-      botId: current?.botId || '', fingerprint: current?.fingerprint || '', error: lastError };
+      botId: current?.botId || '', fingerprint: current?.fingerprint || '', proactiveReady: current?.proactiveReady === true, error: lastError };
   }
   function pause(state) {
     if (current !== state) return;
@@ -106,6 +106,7 @@ export function createFeishuRuntime({ dataDir, getSettings, onEvent, onReady = (
                 || descriptor.botId !== state.botId || descriptor.account?.fingerprint !== state.fingerprint || descriptor.connected !== true
                 || !Array.isArray(descriptor.capabilities) || !['exclusive-text-consumer', 'reply-text-checked'].every(value => descriptor.capabilities.includes(value))) return fail();
               state.ready = true; lastError = ''; settled = true; clearTimeout(timer); accept();
+              state.proactiveReady = ['proactive-text-checked', 'proactive-receipt-checked', 'history-text-checked'].every(value => descriptor.capabilities.includes(value));
               void Promise.resolve().then(onReady).catch(fail);
             } else if (message.type === 'inbound') {
               if (!state.ready || !Number.isSafeInteger(message.id) || message.id < 1
@@ -113,10 +114,42 @@ export function createFeishuRuntime({ dataDir, getSettings, onEvent, onReady = (
               Promise.resolve().then(() => onEvent(message.event)).then(result => {
                 if (current === state) send(state, { type: 'inbound-result', epoch: state.epoch, id: message.id, accepted: result?.accepted === true }, fail);
               }).catch(() => { if (current === state) send(state, { type: 'inbound-result', epoch: state.epoch, id: message.id, accepted: false }, fail); });
+            } else if (message.type === 'proactive-prepared') {
+              if (!state.ready || !Number.isSafeInteger(message.id) || Object.keys(message).some(key => !['type', 'epoch', 'id'].includes(key))) return fail();
+              const task = pending.get(message.id);
+              if (!task || task.kind !== 'proactive' || task.prepared) return;
+              task.prepared = true;
+              try {
+                task.check();
+                const result = task.beforeSend();
+                if (result && typeof result.then === 'function') throw new Error('ASYNC_SEND_GUARD');
+                task.check(); task.permitted = true;
+                send(state, { type: 'proactive-permit', epoch: state.epoch, id: message.id, allowed: true }, task.abort);
+              } catch {
+                pending.delete(message.id);
+                send(state, { type: 'proactive-permit', epoch: state.epoch, id: message.id, allowed: false });
+                task.reject(new Error('飞书主动私聊未通过发送前核对。'));
+              }
+            } else if (message.type === 'proactive-result') {
+              if (!state.ready || !Number.isSafeInteger(message.id) || !['sent', 'failed', 'unknown'].includes(message.outcome)
+                || Object.keys(message).some(key => !['type', 'epoch', 'id', 'outcome', 'receipt', 'code'].includes(key))) return fail();
+              const task = pending.get(message.id);
+              if (!task) return;
+              if (task.kind !== 'proactive') return fail();
+              pending.delete(message.id);
+              const receipt = message.receipt;
+              if (message.outcome === 'sent' && task.permitted && receipt?.sent === true
+                && Object.keys(receipt).length === 5 && ['sent', 'messageId', 'conversationId', 'botId', 'fingerprint'].every(key => Object.hasOwn(receipt, key))
+                && typeof receipt.messageId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(receipt.messageId)
+                && receipt.conversationId === task.conversationId && receipt.botId === state.botId && receipt.fingerprint === state.fingerprint) {
+                try { task.check(); task.accept({ sent: true, messageId: receipt.messageId, conversationId: receipt.conversationId }); }
+                catch { task.reject(new Error('飞书主动私聊结果未确认，不自动重试。')); }
+              } else task.reject(new Error(task.permitted ? '飞书主动私聊结果未确认，不自动重试。' : '飞书主动私聊未通过发送前核对。'));
             } else if (message.type === 'reply-result') {
               if (!state.ready || !Number.isSafeInteger(message.id) || !['sent', 'failed', 'unknown'].includes(message.outcome)) return fail();
               const task = pending.get(message.id);
               if (!task) return;
+              if (task.kind === 'proactive') return fail();
               pending.delete(message.id);
               if (message.outcome === 'sent' && message.receipt?.sent === true) task.accept(message.receipt);
               else task.reject(new Error('飞书发送结果未确认。'));
@@ -149,6 +182,43 @@ export function createFeishuRuntime({ dataDir, getSettings, onEvent, onReady = (
   return {
     status, start, stop,
     restart() { lifecycle = lifecycle.catch(() => {}).then(async () => { await stop(); return start(); }); return lifecycle; },
+    async sendProactive(route, text, { signal, epoch, beforeSend } = {}) {
+      signal?.throwIfAborted();
+      const state = current;
+      let settings, runtimeSettings;
+      try { settings = JSON.stringify(getSettings()); runtimeSettings = readFileSync(join(dataDir, 'feishu-runtime.json'), 'utf8'); }
+      catch { throw new Error('飞书主动私聊来源或连接无效。'); }
+      const validId = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(value);
+      if (!state?.ready || !state.proactiveReady || state.epoch !== epoch || typeof beforeSend !== 'function'
+        || typeof text !== 'string' || !text.trim() || text.length > 4000 || text.includes('\0')
+        || !route || typeof route !== 'object' || Array.isArray(route) || route.kind !== 'dm'
+        || Object.keys(route).some(key => !['kind', 'messageId', 'conversationId', 'actorId', 'threadId', 'rootId', 'parentId'].includes(key))
+        || !['messageId', 'conversationId', 'actorId'].every(key => validId(route[key]))
+        || ['threadId', 'rootId', 'parentId'].some(key => route[key] !== undefined && !validId(route[key]))) throw new Error('飞书主动私聊来源或连接无效。');
+      const check = () => {
+        signal?.throwIfAborted();
+        const next = getSettings();
+        if (current !== state || !state.ready || !next.enabled || state.epoch !== epoch || next.botId !== state.botId
+          || next.expectedFingerprint !== state.fingerprint || JSON.stringify(next) !== settings
+          || readFileSync(join(dataDir, 'feishu-runtime.json'), 'utf8') !== runtimeSettings) throw new Error('飞书主动私聊来源或连接已变化。');
+      };
+      check();
+      const id = ++sequence;
+      return new Promise((accept, reject) => {
+        const finish = action => value => { clearTimeout(timer); signal?.removeEventListener('abort', abort); action(value); };
+        const abort = () => {
+          if (!pending.delete(id)) return;
+          if (current === state) send(state, { type: 'cancel', epoch, id });
+          finish(reject)(new Error('飞书主动私聊结果未确认，不自动重试。'));
+        };
+        const timer = setTimeout(abort, 45000);
+        pending.set(id, { kind: 'proactive', conversationId: route.conversationId, check, beforeSend, abort,
+          prepared: false, permitted: false, accept: finish(accept), reject: finish(reject) });
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) return abort();
+        send(state, { type: 'proactive', epoch, id, route: structuredClone(route), text }, abort);
+      });
+    },
     async reply(route, text, { signal, epoch, recovered = false } = {}) {
       signal?.throwIfAborted();
       const state = current;

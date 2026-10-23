@@ -11,6 +11,7 @@ const acknowledgements = new Map();
 const routes = new Map();
 const replies = new Map();
 const replyCodes = new Set(['account-changed', 'account-unverified', 'bot-not-connected', 'stale-route', 'bad-request', 'capability-unavailable', 'consumer-unavailable', 'cancelled']);
+const proactiveCodes = new Set([...replyCodes, 'target-changed', 'unknown-target', 'target-conflict', 'invalid-target', 'history-permission-denied', 'history-unavailable']);
 let input, runtime, registration, directory, directoryParent, bootPromise, stopping;
 let ready = false, closing = false, sequence = 0, lastReplyId = 0;
 
@@ -58,7 +59,8 @@ function descriptor(value) {
     || value.account?.fingerprint !== input.expectedFingerprint || !Array.isArray(value.capabilities)
     || !['exclusive-text-consumer', 'reply-text-checked'].every(item => value.capabilities.includes(item))) failure('DSH_IM_ACCOUNT_UNVERIFIED');
   return { version: 1, botId: input.botId, channel: 'feishu', account: { fingerprint: input.expectedFingerprint }, connected: true,
-    capabilities: ['exclusive-text-consumer', 'reply-text-checked'] };
+    capabilities: ['exclusive-text-consumer', 'reply-text-checked', 'proactive-text-checked', 'proactive-receipt-checked', 'history-text-checked']
+      .filter(item => value.capabilities.includes(item)) };
 }
 function accept(event, { signal }) {
   active();
@@ -140,6 +142,78 @@ async function reply(message) {
     await result({ outcome: code === 'reply-result-unknown' || code === 'cancelled' ? 'unknown' : 'failed', code });
   } finally {
     if (task) task.entry.pending--;
+    if (replies.get(message.id) === task) replies.delete(message.id);
+  }
+}
+async function proactive(message) {
+  if (!id(message.id) || message.id <= lastReplyId) return;
+  lastReplyId = message.id;
+  let task;
+  const result = async value => {
+    if (task?.reported || closing) return;
+    if (task) task.reported = true;
+    await send({ type: 'proactive-result', epoch: input.epoch, id: message.id, ...value }).catch(() => {});
+  };
+  try {
+    active();
+    if (!ready || replies.size >= 4 || !fields(message, ['type', 'epoch', 'id', 'route', 'text'])
+      || !message.route || message.route.kind !== 'dm' || typeof message.text !== 'string' || !message.text.trim()
+      || message.text.length > 4000 || message.text.includes('\0')) failure('bad-request');
+    const { kind, ...route } = message.route;
+    routeKey(route);
+    const controller = new AbortController();
+    task = { kind: 'proactive', controller, reported: false, permitted: false, result };
+    replies.set(message.id, task);
+    const signal = AbortSignal.any([controller.signal, lifecycle.signal]);
+    const check = () => { active(); signal.throwIfAborted(); };
+    const api = runtime.ctx.get('dshIm');
+    const account = descriptor(await api.describeBot(input.botId)); check();
+    if (!['proactive-text-checked', 'proactive-receipt-checked', 'history-text-checked'].every(value => account.capabilities.includes(value))
+      || typeof api.historyChecked !== 'function' || typeof api.sendChecked !== 'function') failure('capability-unavailable');
+    // The parent proves this was an owner DM. The original checked read revalidates
+    // its source sender/chat/thread; its nearby page is neither a new input nor a model prompt.
+    await api.historyChecked(input.botId, route, { scope: 'group', limit: 1 }, { expectedFingerprint: input.expectedFingerprint, signal }); check();
+    const targetId = `memoria_dm_${createHash('sha256').update(JSON.stringify([input.expectedFingerprint, route.conversationId, route.actorId])).digest('hex').slice(0, 40)}`;
+    let targets = await api.listTargets(input.botId); check();
+    if (!Array.isArray(targets) || targets.length > 1000) failure('capability-unavailable');
+    if (!targets.some(value => value?.targetId === targetId)) {
+      if (targets.length >= 1000) failure('capability-unavailable');
+      // Native "group" means chat_id addressing here. The destination remains the
+      // parent's verified private chat; it never enables unsolicited group sends.
+      await api.createTarget(input.botId, { targetId, kind: 'group', route: { chatId: route.conversationId } }); check();
+      targets = await api.listTargets(input.botId); check();
+    }
+    const target = targets.find(value => value?.targetId === targetId);
+    if (!target || target.kind !== 'group' || !fields(target.route, ['chatId']) || Object.keys(target.route).length !== 1
+      || target.route.chatId !== route.conversationId) failure('target-changed');
+    const expectedTargetDigest = createHash('sha256').update(JSON.stringify({ kind: 'group', route: { chatId: route.conversationId } })).digest('hex');
+    await new Promise((accept, reject) => {
+      const finish = allowed => {
+        if (!task.permit) return;
+        task.permit = undefined; clearTimeout(timer); signal.removeEventListener('abort', abort);
+        if (allowed !== true || signal.aborted || closing) reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }));
+        else { task.permitted = true; accept(); }
+      };
+      const abort = () => finish(false);
+      const timer = setTimeout(abort, 10000);
+      task.permit = finish;
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) return abort();
+      send({ type: 'proactive-prepared', epoch: input.epoch, id: message.id }).catch(abort);
+    });
+    check();
+    const sent = await api.sendChecked(input.botId, targetId, message.text,
+      { expectedFingerprint: input.expectedFingerprint, expectedTargetDigest, signal, format: 'plain', receipt: true });
+    check();
+    if (sent?.sent !== true || sent.receipt?.version !== 1 || !identifier(sent.receipt.messageId)
+      || sent.receipt.conversationId !== route.conversationId) failure('send-result-unknown');
+    await result({ outcome: 'sent', receipt: { sent: true, messageId: sent.receipt.messageId, conversationId: route.conversationId,
+      botId: input.botId, fingerprint: input.expectedFingerprint } });
+  } catch (error) {
+    const code = proactiveCodes.has(error?.code) ? error.code : 'send-result-unknown';
+    await result({ outcome: task?.permitted ? 'unknown' : 'failed', code });
+  } finally {
+    task?.permit?.(false);
     if (replies.get(message.id) === task) replies.delete(message.id);
   }
 }
@@ -243,6 +317,11 @@ process.on('message', message => {
   if (message.type === 'inbound-result' && fields(message, ['type', 'epoch', 'id', 'accepted']) && id(message.id) && typeof message.accepted === 'boolean') {
     acknowledgements.get(message.id)?.finish(null, message.accepted);
   } else if (message.type === 'reply' && id(message.id)) void reply(message);
+  else if (message.type === 'proactive' && id(message.id)) void proactive(message);
+  else if (message.type === 'proactive-permit' && fields(message, ['type', 'epoch', 'id', 'allowed']) && id(message.id) && typeof message.allowed === 'boolean') {
+    const task = replies.get(message.id);
+    if (task?.kind === 'proactive') task.permit?.(message.allowed);
+  }
   else if (message.type === 'cancel' && fields(message, ['type', 'epoch', 'id']) && id(message.id)) {
     const task = replies.get(message.id);
     if (task) { task.controller.abort(); void task.result({ outcome: 'unknown', code: 'cancelled' }); }

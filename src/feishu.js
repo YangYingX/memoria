@@ -1,7 +1,7 @@
 import { normalizeFeishuEvent, normalizeFeishuSettings, defaultFeishuSettings, feishuConversation } from './feishu-message.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
-export function createFeishuChat({ store, chat, transport, onError = () => {} }) {
+export function createFeishuChat({ store, chat, transport, onError = () => {}, onOwnerMessage = () => {} }) {
   let stopped = false, started = false, running, controller, activeKey = '', binding;
   const sourceEpochs = new Map();
   const settings = () => normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings));
@@ -54,7 +54,12 @@ export function createFeishuChat({ store, chat, transport, onError = () => {} })
     };
     try {
       check();
-      const result = await chat(item.scope, event.text, item.actor, { signal: taskController.signal, assertActive: check, textOnly: true });
+      const account = item.scope === 'owner' && item.actor === 'owner'
+        ? store.findAccount('feishu', feishuConversation(event, { store, ...config }).accountId) : null;
+      const result = await chat(item.scope, event.text, item.actor, { signal: taskController.signal, assertActive: check, textOnly: true,
+        ...(account?.personId === 'owner' ? { conversationOrigin: { version: 1, platform: 'feishu', accountId: account.id,
+          inboxKey: item.key, botId: event.botId, fingerprint: event.fingerprint,
+          conversationId: event.conversation.id, actorId: event.actor.id } } : {}) });
       check();
       if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 4000) throw new Error('FEISHU_REPLY_INVALID');
       if (!store.saveFeishuReply(item.key, result.reply)) throw new Error('FEISHU_MESSAGE_CANCELED');
@@ -87,6 +92,11 @@ export function createFeishuChat({ store, chat, transport, onError = () => {} })
     return running;
   }
   return {
+    reserveChat() {
+      const config = settings();
+      if (stopped || !started || !config.enabled || !transport.status().connected) return { allowed: false };
+      return store.reserveFeishuChat({ dailyLimit: config.dailyChatLimit });
+    },
     status() {
       const config = settings(), day = new Date().toISOString().slice(0, 10);
       const saved = store.getSetting('feishuChatStatus', {}) || {};
@@ -121,6 +131,7 @@ export function createFeishuChat({ store, chat, transport, onError = () => {} })
           controller?.abort(); cancelReceived();
           store.receiveFeishuMessage({ key: route.key, input: { ...event, text: '[创建人绑定命令，口令未保留]', control: 'owner-binding' }, scope: 'owner', actor: 'owner' });
           store.bindAccount({ platform: 'feishu', userId: route.accountId, personId: 'owner', label: '创建人飞书（私聊口令验证）' });
+          onOwnerMessage();
           store.finishFeishuMessage(route.key, 'canceled', 'OWNER_BOUND');
           binding = undefined;
           return { accepted: true };
@@ -139,6 +150,7 @@ export function createFeishuChat({ store, chat, transport, onError = () => {} })
         }
         if (!previous && store.listReceivedFeishuMessages(100).length >= 100) return { accepted: false };
         const received = store.receiveFeishuMessage({ key: route.key, input: event, scope: route.scope, actor: route.actor });
+        if (!previous && route.scope === 'owner' && route.actor === 'owner') onOwnerMessage();
         if (received.message.state === 'received') sourceEpochs.set(route.key, transport.status().epoch);
       } catch { report('INTAKE_FAILED'); return { accepted: false }; }
       queueMicrotask(tick);
