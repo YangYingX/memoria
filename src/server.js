@@ -23,6 +23,7 @@ import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettin
 import { bindOwnerHeybox } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
 import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
+import { createDshRuntime } from './dsh-runtime.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -31,6 +32,7 @@ const port = Number(process.env.PORT || 3210);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('PORT 必须介于 1024 和 65535。');
 mkdirSync(dataDir, { recursive: true });
 const store = createStore(join(dataDir, 'persona.sqlite'));
+const dshRuntime = createDshRuntime({ store, dataDir });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
@@ -612,7 +614,12 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), backupStatus: backupJobs.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/dsh/check' && req.method === 'POST') {
+        activeMutation++;
+        try { return json(res, 200, await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'inspect' })); }
+        finally { activeMutation--; }
+      }
       if (path === '/api/settings' && req.method === 'PUT') return json(res, 200, { settings: saveSettings(input) });
       if (path === '/api/books' && req.method === 'GET') return json(res, 200, { books: store.listBooks(), status: bookJobs.status() });
       if (path === '/api/books' && req.method === 'POST') return json(res, 201, { book: store.addBook({ title: input.title, text: input.text }) });

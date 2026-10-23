@@ -101,6 +101,9 @@ async function loadState({ fill = false } = {}) {
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
   renderProactiveStatus(state.data.proactiveStatus);
   renderBookStatus(state.data.bookStatus);
+  const dsh = state.data.dshStatus;
+  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? '已配置只读运行层。长期记忆由栖忆书架提供，不按 DSH 会话另建记忆库。' : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
+  $('dsh-test').disabled = !dsh?.enabled || dsh.busy;
   if (fill) { fillSettings(); fillBackupSettings(); }
 }
 
@@ -879,6 +882,16 @@ $('qq-test').addEventListener('click', () => action($('qq-test'), async () => {
     output.classList.toggle('error', !result.ok || !result.online);
     const identity = [result.nickname, result.botId].filter(Boolean).join(' · ');
     output.textContent = `${result.message || (result.online ? '协议端在线。' : '协议端未在线。')}${identity ? `\n${identity}` : ''}${result.lastEventAt ? `\n最近收到事件：${date(result.lastEventAt)}` : ''}`;
+  } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
+}));
+$('dsh-test').addEventListener('click', () => action($('dsh-test'), async () => {
+  const output = $('dsh-test-result');
+  output.hidden = false;
+  output.classList.remove('error');
+  output.textContent = '正在启动独立插件宿主并核对只读工具…';
+  try {
+    const result = await api('/api/dsh/check', { method: 'POST', data: {} });
+    output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。`;
   } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
 $('settings-form').addEventListener('submit', event => {

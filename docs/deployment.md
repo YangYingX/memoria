@@ -153,4 +153,33 @@ ssh -N -L 3210:127.0.0.1:3210 your-user@your-server
 
 自主表达与阅读分别设置。QQ 支持空间动态、签名和头像，需要协议端提供相应能力；Windows 上的小黑盒发帖、评论与回复需要已配置并登录的[专用 MuMu 设备](android.md)，评论和回复另需 Google Android CLI 与 SDK Platform Tools。各平台与动作可分别开关，评论和回复默认关闭。发帖、评论与回复共用每天 80 次的默认总额度，可自定义 0–100，同时受各平台上限、时段和间隔约束；失败和结果未确认也计次。模型可以选择安静，80 次并非必须完成的任务。Linux 核心服务目前没有小黑盒客户端发布适配。绘图 API 只保留配置入口，尚不调用；保留密钥为空不影响现有聊天、阅读和内置表情。
 
+## DSH 只读插件接入
+
+此功能可选。核心服务仍使用 Node.js 22.16 或以上；独立插件宿主需要 Node.js 24。目前固定支持 DSH `0.2.1-rc.2` 与 `dsh-bili-humanism` `1.7.0`，不自动加载其他插件。可以在 Windows 或 Linux 配置对应系统的 Node.js 路径。
+
+在项目和个人 DSH 配置之外建立专用宿主目录。下载作者 [1.7.0 发布页](https://github.com/InariNGT-Ofiicial/dsh-bili-humanism/releases/tag/v1.7.0) 的 `dsh-bili-humanism-1.7.0.tgz`，在专用目录使用 Node.js 24 附带的 npm 安装：
+
+```bash
+npm init -y
+npm install --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.2 /absolute/path/dsh-bili-humanism-1.7.0.tgz
+```
+
+将示例中的包文件路径换为实际下载地址。在 Memoria 的数据目录创建 `dsh-runtime.json`（默认数据目录为项目中的 `data/`）：
+
+```json
+{
+  "enabled": true,
+  "nodePath": "D:/tools/node24/node.exe",
+  "hostDirectory": "D:/tools/memoria-dsh-host"
+}
+```
+
+Linux 可分别填写 `/opt/node24/bin/node` 和 `/var/lib/persona-agent/dsh-host` 等实际绝对路径。Memoria 服务用户须有执行 Node 和写入专用宿主目录的权限。使用仓库 systemd 模板时，宿主放在可写的 `StateDirectory` 内；其他位置还须加入该服务的 `ReadWritePaths`。此文件仅由部署者在本机设置，不接受聊天或插件修改路径。无需在宿主中填写模型密钥、登录账号或复制个人 DSH profile。
+
+在后台“人格与设置 → DSH 插件运行层”点击检测。服务启动独立子进程，核对真实插件注册及只读开关，结束后关闭宿主并清理临时 profile。当前入口不调用模型或平台；不等于已开放 B站浏览、评论、语音或所有 DSH 插件。关闭方法是将 `enabled` 改为 `false` 或移除配置文件，无需改变聊天与书架设置。
+
+DSH 通过栖忆提供的搜索、分页正文和来源工具读取当前场合获准使用的记忆。场合与发言者由栖忆确定，工具参数不能指定或扩大权限。每次读取查询当前书架；换会话或重启宿主不会清空已存记忆。长期记忆、来源、修订和删除记录继续进入栖忆加密备份，临时插件缓存不属于备份内容。单次模型上下文仍有限，保存的信息需按问题检索和分段读取，不保证一次调用回想所有经历。
+
+只安装信任的代码：独立进程和关闭网络接口属于应用隔离措施，并非操作系统安全沙箱。
+
 参考：[Node.js 下载](https://nodejs.org/en/download)、[systemd 执行环境与 StateDirectory](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)。

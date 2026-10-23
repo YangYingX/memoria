@@ -1,5 +1,6 @@
 import { requestCompletion } from './model.js';
-import { queryTokens } from './store.js';
+import { allowedScopes, withConversationSource, memoryPage, memoryExcerpt } from './memory-access.js';
+export { allowedScopes } from './memory-access.js';
 import { omitImagePayload, validateConversationImages } from './images.js';
 import { ownerIdentityContext } from './identity.js';
 
@@ -71,38 +72,6 @@ function bookNotes(notes) {
     result.push(summary);
   }
   return result;
-}
-
-export function allowedScopes(scope) {
-  return [scope, 'public'];
-}
-
-function withConversationSource(store, memory, scope) {
-  const source = store.getMemorySource(memory.id, allowedScopes(scope));
-  return source ? { ...memory, conversationSource: { actor: source.actor, recordedAt: source.createdAt } } : memory;
-}
-
-function memoryPage(memory, offset, size) {
-  const end = Math.min(offset + size, memory.content.length);
-  return { ...memory, content: memory.content.slice(offset, end), offset,
-    totalLength: memory.content.length, nextOffset: end < memory.content.length ? end : null };
-}
-
-function memoryExcerpt(memory, query) {
-  const tokens = queryTokens(query);
-  let bestOffset = 0, bestScore = -1;
-  for (let offset = 0; offset < memory.content.length; offset += 900) {
-    const fragment = memory.content.slice(offset, offset + 1800).normalize('NFKC').toLowerCase();
-    // Keep whole-word matching even when a window starts or ends inside a word.
-    const before = memory.content.slice(Math.max(0, offset - 1), offset).normalize('NFKC').toLowerCase();
-    const after = memory.content.slice(offset + 1800, offset + 1801).normalize('NFKC').toLowerCase();
-    const words = new Set([...(before + fragment + after).matchAll(/[a-z0-9_]+/g)]
-      .filter(match => match.index >= before.length && match.index + match[0].length <= before.length + fragment.length)
-      .map(match => match[0]));
-    const score = tokens.reduce((sum, token) => sum + Number(/^[a-z0-9_]+$/.test(token) ? words.has(token) : fragment.includes(token)), 0);
-    if (score > bestScore) { bestScore = score; bestOffset = offset; }
-  }
-  return memoryPage(memory, bestOffset, 1800);
 }
 
 export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], expressions = [], collectExpression, bookActions, activityActions }) {
