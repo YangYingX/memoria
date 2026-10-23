@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { triggerSpeakUp } from './dsh-speak-up.js';
 
 const tools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
 const names = tools.map(name => `memoria_${name}`);
@@ -13,9 +14,9 @@ function validArgs(name, args) {
 }
 
 // The parent owns model history and authorizes each tool call. Neither callback accepts child history.
-export async function runMemoryAgent({ ctx, load, query, requestModel, requestMemory, signal }) {
+export async function runMemoryAgent({ ctx, load, query, requestModel, requestMemory, signal, trigger = 'direct' }) {
   if (typeof query !== 'string' || !query.trim() || query.length > 500 || query.includes('\0')
-    || typeof load !== 'function' || typeof requestModel !== 'function' || typeof requestMemory !== 'function') {
+    || typeof load !== 'function' || typeof requestModel !== 'function' || typeof requestMemory !== 'function' || !['direct', 'speak-up'].includes(trigger)) {
     throw new Error('DSH_AGENT_INVALID_INPUT');
   }
   const { LlmAdapter, LlmError, resolveRetryPolicy, createUserMessage } = await load('@deepseek-ai/dsh-llm');
@@ -24,8 +25,8 @@ export async function runMemoryAgent({ ctx, load, query, requestModel, requestMe
   const controller = new AbortController();
   const taskSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   const approved = new Map(), usedIds = new Set();
-  let handle, unregister, failureCode = '', outcome, failed;
-  let modelRequests = 0, toolCalls = 0, turnStarts = 0, turnEnds = 0, completed = false, agentError = false;
+  let handle, unregister, disposeTrigger, failureCode = '', outcome, failed;
+  let modelRequests = 0, toolCalls = 0, turnStarts = 0, turnEnds = 0, triggerMessages = 0, completed = false, agentError = false;
   let lastModelText, lastNativeText;
 
   function fail(code) {
@@ -130,7 +131,8 @@ export async function runMemoryAgent({ ctx, load, query, requestModel, requestMe
         agentCtx.on('agent/error', event => { if (event.agent === agent) agentError = true; });
         agentCtx.on('session/event', (session, event) => {
           if (session !== agent.session) return;
-          if (event.type === 'turn/start') turnStarts++;
+          if (event.type === 'user/message' && event.data.source?.kind === 'speak-up') triggerMessages++;
+          else if (event.type === 'turn/start') turnStarts++;
           else if (event.type === 'turn/end') { turnEnds++; completed = event.data.reason?.kind === 'completed'; }
           else if (event.type === 'assistant/message') {
             const blocks = event.data.message?.content;
@@ -142,15 +144,17 @@ export async function runMemoryAgent({ ctx, load, query, requestModel, requestMe
     if (taskSignal.aborted) fail('DSH_AGENT_CANCELLED');
     const visible = ctx.tools.schemas(handle.agent).map(tool => tool.name).sort();
     if (JSON.stringify(visible) !== JSON.stringify([...names].sort())) fail('DSH_AGENT_INVALID_RESULT');
-    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: query }], source: { kind: 'memoria-memory-agent' } }));
+    if (trigger === 'speak-up') disposeTrigger = await triggerSpeakUp({ ctx, load, agent: handle.agent, query, signal: taskSignal });
+    else handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: query }], source: { kind: 'memoria-memory-agent' } }));
     await handle.agent.whenIdle();
     if (taskSignal.aborted) fail('DSH_AGENT_CANCELLED');
-    if (agentError || turnStarts !== 1 || turnEnds !== 1 || !completed || approved.size || !modelRequests
+    if (agentError || turnStarts !== 1 || turnEnds !== 1 || (trigger === 'speak-up' && triggerMessages !== 1) || !completed || approved.size || !modelRequests
       || typeof lastModelText !== 'string' || lastModelText !== lastNativeText) fail('DSH_AGENT_FAILED');
     outcome = { text: lastModelText, completed: true, modelRequests, toolCalls };
   } catch { failed = new Error(failureCode || (signal?.aborted ? 'DSH_AGENT_CANCELLED' : 'DSH_AGENT_FAILED')); }
   finally {
     signal?.removeEventListener('abort', abort); controller.abort();
+    try { await disposeTrigger?.(); } catch { failed ||= new Error('DSH_AGENT_CLEANUP_FAILED'); }
     try { await handle?.dispose(); } catch { failed ||= new Error('DSH_AGENT_CLEANUP_FAILED'); }
     try { await unregister?.(); } catch { failed ||= new Error('DSH_AGENT_CLEANUP_FAILED'); }
   }

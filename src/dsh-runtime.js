@@ -33,6 +33,7 @@ const readingErrors = {
 export function createDshRuntime({ store, dataDir }) {
   let busy = false, stopped = false, cancelCurrent;
   let drained = Promise.resolve();
+  let lastProactiveTurn = null;
   function readingStatus() {
     const day = new Date().toISOString().slice(0, 10);
     const saved = store.getSetting('dshReadingStatus', {});
@@ -47,19 +48,24 @@ export function createDshRuntime({ store, dataDir }) {
     try { input = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')); }
     catch { throw new Error('DSH 本机配置无法读取。'); }
     if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.enabled !== 'boolean'
-      || Object.keys(input).some(key => !['enabled', 'nodePath', 'hostDirectory'].includes(key))) throw new Error('DSH 本机配置无效。');
+      || Object.keys(input).some(key => !['enabled', 'nodePath', 'hostDirectory', 'proactivePlugin'].includes(key))
+      || (Object.hasOwn(input, 'proactivePlugin') && input.proactivePlugin !== 'dsh-speak-up')) throw new Error('DSH 本机配置无效。');
     if (!input.enabled) return { enabled: false };
     if (![input.nodePath, input.hostDirectory].every(value => typeof value === 'string' && isAbsolute(value))
       || !statSync(input.nodePath, { throwIfNoEntry: false })?.isFile()
       || !statSync(join(input.hostDirectory, 'package.json'), { throwIfNoEntry: false })?.isFile()) {
       throw new Error('请配置独立的 Node.js 24 和已安装 DSH 的宿主目录。');
     }
-    return { enabled: true, nodePath: realpathSync(input.nodePath), hostDirectory: realpathSync(input.hostDirectory) };
+    return { enabled: true, nodePath: realpathSync(input.nodePath), hostDirectory: realpathSync(input.hostDirectory), proactivePlugin: input.proactivePlugin };
   }
   return {
     stop() { stopped = true; cancelCurrent?.(); return drained; },
     status() {
-      try { return { enabled: config().enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus() }; }
+      try {
+        const settings = config();
+        return { enabled: settings.enabled, busy, mode: 'read-only', memoryAuthority: 'memoria', reading: readingStatus(),
+          proactive: { configuredEngine: settings.proactivePlugin || 'native', lastCompletedTurn: lastProactiveTurn } };
+      }
       catch { return { enabled: false, busy, mode: 'read-only', memoryAuthority: 'memoria', error: '请检查本机 DSH 配置。' }; }
     },
     async execute({ scope, actor, name, args = {}, signal, selectVideo, excludeMessageId = '' }) {
@@ -176,7 +182,8 @@ export function createDshRuntime({ store, dataDir }) {
           const credentialPath = join(resolve(dataDir), 'bili-credentials.json');
           child.on('spawn', () => child.send({ type: 'start', hostDirectory: settings.hostDirectory, workspace,
             ...(reading ? { cacheDirectory, ...(existsSync(credentialPath) ? { credentialPath } : {}) } : {}),
-            operation: composing ? { name: 'recall_memory', args: { query: proactiveQuery } } : { name, args } }));
+            ...(name === 'inspect' && settings.proactivePlugin ? { proactivePlugin: settings.proactivePlugin } : {}),
+            operation: composing ? { name: settings.proactivePlugin ? 'compose_proactive' : 'recall_memory', args: { query: proactiveQuery } } : { name, args } }));
           child.on('message', message => {
             if (!message || typeof message !== 'object' || Buffer.byteLength(JSON.stringify(message)) > (reading ? 2 * 1024 * 1024 : 100000)) return stop('DSH 返回格式无效或超过资料上限。');
             if (['agent-model', 'agent-memory'].includes(message.type)) {
@@ -246,7 +253,10 @@ export function createDshRuntime({ store, dataDir }) {
             else if (judging) {
               try { accept(validateMoodDelta(JSON.parse(result.text))); }
               catch { reject(new Error('DSH 未返回有效的情绪变化。')); }
-            } else accept(result);
+            } else {
+              if (composing) lastProactiveTurn = { engine: settings.proactivePlugin || 'native', completedAt: new Date().toISOString() };
+              accept(composing ? { ...result, engine: settings.proactivePlugin || 'native' } : result);
+            }
           });
         });
       } finally {

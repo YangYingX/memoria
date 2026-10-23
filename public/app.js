@@ -103,7 +103,7 @@ async function loadState({ fill = false } = {}) {
   renderProactiveStatus(state.data.proactiveStatus);
   renderBookStatus(state.data.bookStatus);
   const dsh = state.data.dshStatus;
-  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
+  $('dsh-summary').textContent = dsh?.error || (dsh?.enabled ? `已配置只读运行层。今日视频阅读尝试 ${dsh.reading?.attempts ?? 0}/${dsh.reading?.dailyLimit ?? 6} 次（UTC）。主动拟聊选择：${dsh.proactive?.configuredEngine === 'dsh-speak-up' ? '原版主动搭话插件' : 'DSH 原生回合'}。${dsh.proactive?.lastCompletedTurn ? `本次服务启动后最近完成拟聊：${date(dsh.proactive.lastCompletedTurn.completedAt)}。` : '本次服务启动后尚未完成拟聊回合。'}长期记忆保存在栖忆书架。` : '尚未启用。当前聊天与书架继续由栖忆服务运行。');
   $('dsh-test').disabled = !dsh?.enabled || dsh.busy;
   const biliAccount = state.data.biliAccountStatus;
   $('bili-account-summary').textContent = biliAccount?.configured ? `已保存专用账号 ${biliAccount.accountId || ''} 的本机登录状态。此状态不表示当前平台认证仍有效。`
@@ -930,7 +930,7 @@ $('dsh-test').addEventListener('click', () => action($('dsh-test'), async () => 
   output.textContent = '正在启动独立插件宿主并核对只读工具…';
   try {
     const result = await api('/api/dsh/check', { method: 'POST', data: {} });
-    output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。`;
+    output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。${result.proactive?.packageVerified ? '\n主动搭话原包已通过固定版本与文件校验；本次检测未执行拟聊回合。' : ''}`;
   } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
 $('bili-login').addEventListener('click', () => action($('bili-login'), async () => {
