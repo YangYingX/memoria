@@ -567,28 +567,36 @@ export function createStore(dbPath) {
         .map(item => ({ ...item, title: item.title.slice(0, 120) }));
     },
     searchMemories(query, scopes, limit = 6) {
+      return api.searchMemoryPage(query, scopes, limit).items;
+    },
+    searchMemoryPage(query, scopes, limit = 6, offset = 0) {
       query = text(query, '记忆查询', 8000, { empty: true });
       if (!Array.isArray(scopes) || scopes.length > 100) invalid('记忆查询须提供最多 100 个明确的可见范围。');
       const permitted = [...new Set(scopes.map(scopeValue))];
       limit = integer(limit, '检索条数', 1, 100);
-      if (!permitted.length) return [];
+      offset = integer(offset, '检索位置', 0, Number.MAX_SAFE_INTEGER);
+      if (!permitted.length) return { items: [], total: 0, offset, nextOffset: null };
       // Filter scopes in SQL before matching, so inaccessible content never enters scoring.
       const rows = all(`SELECT * FROM memories WHERE deleted_at IS NULL AND scope IN (${permitted.map(() => '?').join(',')}) ORDER BY updated_at DESC, rowid DESC`, ...permitted).map(memoryRow);
-      if (!query) return rows.slice(0, limit);
-      const tokens = queryTokens(query);
-      if (!tokens.length) return [];
-      return rows.map(memory => {
-        const title = normalize(memory.title);
-        const content = normalize(memory.content);
-        const titleWords = new Set(title.match(/[a-z0-9_]+/g) ?? []);
-        const contentWords = new Set(content.match(/[a-z0-9_]+/g) ?? []);
-        const score = tokens.reduce((sum, token) => {
-          const ascii = /^[a-z0-9_]+$/.test(token);
-          return sum + ((ascii ? titleWords.has(token) : title.includes(token)) ? 4 : 0)
-            + ((ascii ? contentWords.has(token) : content.includes(token)) ? 1 : 0);
-        }, 0);
-        return { memory, score };
-      }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map(item => item.memory);
+      let matches = rows;
+      if (query) {
+        const tokens = queryTokens(query);
+        matches = tokens.length ? rows.map(memory => {
+          const title = normalize(memory.title);
+          const content = normalize(memory.content);
+          const titleWords = new Set(title.match(/[a-z0-9_]+/g) ?? []);
+          const contentWords = new Set(content.match(/[a-z0-9_]+/g) ?? []);
+          const score = tokens.reduce((sum, token) => {
+            const ascii = /^[a-z0-9_]+$/.test(token);
+            return sum + ((ascii ? titleWords.has(token) : title.includes(token)) ? 4 : 0)
+              + ((ascii ? contentWords.has(token) : content.includes(token)) ? 1 : 0);
+          }, 0);
+          return { memory, score };
+        }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.memory) : [];
+      }
+      const total = matches.length;
+      const items = offset < total ? matches.slice(offset, offset + limit) : [];
+      return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null };
     },
     listRevisions(id) {
       return all('SELECT * FROM revisions WHERE memory_id = ? ORDER BY created_at DESC, rowid DESC', identifier(id, '记忆 ID')).map(revisionRow);

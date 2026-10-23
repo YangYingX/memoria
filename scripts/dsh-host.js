@@ -352,13 +352,13 @@ async function main(input) {
 
   // No model prompt or DSH session owns these memories: the parent binds verified identity and scope.
   for (const name of memoryTools) {
-    const keys = name === 'search_memory' ? ['query'] : ['id', 'offset'];
+    const keys = name === 'search_memory' ? ['query', 'offset'] : ['id', 'offset'];
     ctx.tools.register(defineTool({
       name: `memoria_${name}`,
-      description: name === 'search_memory' ? 'Search the persistent Memoria bookshelf in the current verified scope.'
+      description: name === 'search_memory' ? 'Search six persistent Memoria memories per page in the verified scope. Keep query unchanged and pass the page-level nextOffset as offset to continue. Page offsets count items; item offsets count text characters. Results reflect the current bookshelf.'
         : name === 'read_memory' ? 'Read a page from a persistent Memoria memory in the current verified scope.'
           : 'Read a page of source evidence for a Memoria memory in the current verified scope.',
-      parameters: name === 'search_memory' ? { query: { type: 'string', required: true } }
+      parameters: name === 'search_memory' ? { query: { type: 'string', required: true }, offset: { type: 'integer' } }
         : { id: { type: 'string', required: true }, offset: { type: 'integer' } },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
       async execute(args, exec) {

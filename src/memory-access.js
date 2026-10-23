@@ -42,14 +42,15 @@ export function createMemoryAccess({ store, scope, actor }) {
   const scopes = allowedScopes(scope);
   return Object.freeze({
     execute(name, args) {
-      const definitions = { search_memory: ['query'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'] };
+      const definitions = { search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'] };
       const fields = typeof name === 'string' && Object.hasOwn(definitions, name) ? definitions[name] : null;
       if (!fields || !args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !fields.includes(key))) {
         throw new Error('记忆工具或参数无效，不能更改身份、范围或会话。');
       }
       if (name === 'search_memory') {
         if (typeof args.query !== 'string' || args.query.length > 500) throw new Error('查询无效。');
-        return store.searchMemories(args.query, scopes, 6).map(memory => withConversationSource(store, memoryExcerpt(memory, args.query), scope));
+        const page = store.searchMemoryPage(args.query, scopes, 6, args.offset === undefined ? 0 : args.offset);
+        return { ...page, items: page.items.map(memory => withConversationSource(store, memoryExcerpt(memory, args.query), scope)) };
       }
       if (typeof args.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(args.id)) throw new Error('记忆 ID 无效。');
       const offset = args.offset === undefined ? 0 : args.offset;
