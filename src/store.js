@@ -11,6 +11,8 @@ import { normalizeConversationOrigin } from './conversation-origin.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
 import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
+import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
+import { defaultProactiveSettings } from './proactive.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -811,6 +813,33 @@ export function createStore(dbPath) {
       const clean = jsonValue(value, '设置', 50000);
       run('INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, JSON.stringify(clean));
       return clean;
+    },
+    updateProactivePreferences(input) {
+      record(input, '陪伴偏好更新');
+      if (Reflect.ownKeys(input).length !== 3 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings'].includes(key))) invalid('陪伴偏好更新参数无效。');
+      let patch;
+      try { patch = normalizeCompanionPreferencePatch(input.patch); }
+      catch { invalid('陪伴偏好仅允许有效的主动开关、表达欲、每日条数和冷却时间。'); }
+      const sourceEventId = identifier(input.sourceEventId, '陪伴偏好来源 ID');
+      const expected = jsonValue(record(input.expectedSettings, '原陪伴设置'), '原陪伴设置', 50000);
+      return transaction(() => {
+        const current = api.getSetting('proactive', defaultProactiveSettings);
+        if (JSON.stringify(current) !== JSON.stringify(expected)) invalid('主动私聊设置已变化，请重新确认当前偏好。');
+        const sourceRow = get('SELECT * FROM events WHERE id = ?', sourceEventId), source = sourceRow ? eventRow(sourceRow) : null;
+        const message = source && typeof source.metadata.messageId === 'string' ? get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId) : null;
+        const now = new Date().toISOString();
+        if (!validFollowupSource(source, message) || source.createdAt > now || currentConversationOrigin(source, message) === null) invalid('陪伴偏好须来自创建人当前有效的聊天原话。');
+        if (get("SELECT 1 FROM events WHERE type = 'companion_preference' AND source_ref = ?", sourceEventId)
+          || !api.claimDelivery(`companion-preference:${sourceEventId}`)) invalid('这条聊天已调整过陪伴偏好，请用新的消息确认。');
+        let before, after;
+        const next = { ...current, ...patch };
+        try { before = companionPreferenceValues(current); after = companionPreferenceValues(next); }
+        catch { invalid('当前主动私聊设置无效，请先在后台修复。'); }
+        api.setSetting('proactive', next);
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'companion_preference', scope: 'owner', actor: 'owner',
+          sourceRef: sourceEventId, content: '已根据创建人当前聊天调整主动陪伴偏好。', metadata: { patch, before, after } }), createdAt: now });
+        return after;
+      });
     },
     listMemories(options = {}) {
       record(options, '记忆筛选参数');

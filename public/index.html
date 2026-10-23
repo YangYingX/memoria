@@ -185,6 +185,7 @@
             </div></section>
             <section id="proactive-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">09</span><h2>主动私聊</h2><p class="muted">延续你们的近况与旧话题，也可以分享自己的见闻，选一个合适的时机开口。</p></div><div class="settings-fields">
               <label class="check-label"><input id="proactive-enabled" type="checkbox">允许她主动私聊我</label>
+              <p class="caption">创建人也可在私聊中说“先别主动找我”“可以主动找我聊天了”“主动聊天每天最多2次”或“主动聊天间隔改成120分钟”。这份偏好同时用于 QQ 与飞书。暂停需明确恢复，频率调整不会自行开启，也不清空已用额度或约定。</p>
               <p class="caption">默认关闭。可在已验证的创建人 QQ 或飞书原私聊中开口，不会因原渠道不可用而改发到另一平台。先核对到期约定；其余随机话题在启用 DSH 后优先从最近七天的最新私聊延续近况。另可启用下方陪伴内核，从来源仍有效的旧主题生发；没有合适话题便保持安静，也可分享实际读过的资料。</p>
               <label>主动聊天欲（0–100）<input id="proactive-desire" type="number" min="0" max="100" step="1" required><small>随机话题按这个百分比决定是否考虑开口；0 也暂停约定跟进，100 不保证发送。</small></label>
               <div class="field-row"><label>每天最多尝试发送几次<input id="proactive-daily-limit" type="number" min="0" max="3" step="1" required></label><label>主动聊天机会间隔（分钟）<input id="proactive-cooldown" type="number" min="60" max="1440" step="1" required></label></div>

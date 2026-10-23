@@ -38,6 +38,7 @@ import { createQQGroupAttention, normalizeQQGroupAttentionSettings } from './qq-
 import { deliverQQReply, normalizeQQReplySettings } from './qq-reply-rhythm.js';
 import { captureQQContext, isQQContextCanceled, qqConfigSignature } from './qq-context.js';
 import { createFollowupActions, followupView } from './followups.js';
+import { createCompanionPreferenceActions } from './companion-preferences.js';
 import { readBiliCredentials } from './bili-credentials.js';
 import { createBiliSocialRuntime } from './bili-social-runtime.js';
 import { createBiliSocialDiscussion } from './bili-social.js';
@@ -564,6 +565,8 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions,
+          companionActions: createCompanionPreferenceActions({ store, cancel: () => proactiveJobs.cancel(), signal: options.signal,
+            assertActive: options.assertActive, getReadiness: () => Boolean(getProactiveRecipient() && store.getSetting('model')?.apiKey) }),
           followupActions: createFollowupActions({ store, getRecipient: (sourceEventId, allowLegacyQQ = false) => getProactiveRecipient({ sourceEventId, allowLegacyQQ }), cancel: () => proactiveJobs.cancel(), signal: options.signal, assertActive: options.assertActive }) } : {}) });
       try { if (!result.silent && !options.deferAssistant) moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
