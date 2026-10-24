@@ -1,12 +1,14 @@
 import { queryTokens } from './store.js';
 import { biliReadingPage } from './bili-reading.js';
 
-export async function browseBiliVideos({ store, runtime, interests, failedUrls = [], signal, random = Math.random }) {
+export async function browseBiliVideos({ store, runtime, interests, failedUrls = [], signal, background = false, onYield, random = Math.random }) {
+  if (typeof background !== 'boolean') throw new Error('B站浏览任务来源无效。');
   const tokens = queryTokens(`${interests || ''} ${store.getSetting('persona', {}).description || ''}`);
   const excluded = new Set(failedUrls);
   let selectedUrl = '', selectionReason = '';
   try {
     const payload = await runtime.execute({ scope: 'owner', actor: 'scheduler', name: 'browse_bili', signal,
+      priority: background ? 'background' : 'normal', ...(onYield === undefined ? {} : { onYield }),
       selectVideo(candidates) {
         signal?.throwIfAborted();
         const unread = candidates.filter(item => !excluded.has(item.url) && !store.hasReadUrl(item.url, 'owner')).map(item => {

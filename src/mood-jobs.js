@@ -43,7 +43,7 @@ function publicReadingUrl(value) {
 }
 
 export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = Date.now }) {
-  let busy = false, stopped = false, controller;
+  let busy = false, stopped = false, controller, backgroundRun = false;
   let lastState = store.getSetting('moodStatus', {});
   let lastConfig = normalizeMoodSettings({}, store.getSetting('mood', defaultMoodSettings));
   const now = () => Number(clock());
@@ -126,7 +126,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
       .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
   }
 
-  async function run({ force = false } = {}) {
+  async function run({ force = false, background = false } = {}) {
+    if (typeof background !== 'boolean') throw new Error('心情评估任务来源无效。');
     if (stopped) return { ...status(), skipped: 'stopped' };
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
     const config = settings(), time = now(), currentState = state(time);
@@ -144,6 +145,7 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     save({ ...currentState, attempts: currentState.attempts + 1, runId, lastAttemptAt: stamp(time), lastOutcome: 'evaluating',
       lastInputAt: selected.at, lastInputKeys: [...currentState.lastInputKeys.filter(value => value !== selected.key), selected.key].slice(-INPUT_KEYS_LIMIT) });
     busy = true;
+    backgroundRun = background;
     const activeController = controller = new AbortController();
     const sameRun = () => !stopped && store.getSetting('moodStatus', {}).runId === runId;
     function valid() {
@@ -169,17 +171,17 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     try {
       if (!valid()) return finish('cancelled');
       const proposal = validateMoodDelta(await evaluate({ scope: selected.scope, kind: selected.kind, text: selected.text,
-        ...(selected.reply === undefined ? {} : { reply: selected.reply }), mood: moodSnapshot(store, time), signal: activeController.signal }));
+        ...(selected.reply === undefined ? {} : { reply: selected.reply }), mood: moodSnapshot(store, time), signal: activeController.signal, background }));
       if (!valid()) return finish('cancelled');
       const result = applyMoodDelta(store, proposal, { now: now(), expectedState });
       return finish(result.applied ? 'success' : 'low_confidence', result, proposal);
     } catch {
       if (stopped) return { ...status(), busy: false, skipped: 'stopped' };
       return finish(valid() ? 'error' : 'cancelled');
-    } finally { busy = false; if (controller === activeController) controller = null; }
+    } finally { busy = false; if (controller === activeController) { controller = null; backgroundRun = false; } }
   }
-  async function tick() { try { return await run(); } catch { return status(); } }
-  function cancel() { controller?.abort(); }
+  async function tick() { try { return await run({ background: true }); } catch { return status(); } }
+  function cancel({ backgroundOnly = false } = {}) { if (!backgroundOnly || backgroundRun) controller?.abort(); }
   function stop() { stopped = true; cancel(); }
   return { status, observeConversation, run, tick, cancel, stop };
 }

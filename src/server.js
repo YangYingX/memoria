@@ -92,7 +92,7 @@ const sessions = createSessions();
 const activeConversations = new Set();
 const conversationQueues = new Map();
 const readingJobs = new Set();
-let readingBusy = false;
+let readingBusy = false, scheduledReadingController, closing = false;
 let activeMutation = 0;
 let attempts = [];
 let pendingBinding = null;
@@ -154,10 +154,12 @@ function makeAutonomyJobs() {
       if (biliVideoUrl(reading.url) !== reading.url || reading.evidence?.plugin !== 'dsh-bili-humanism') return reflectReading(store, reading);
       const { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence, previousNotes } = reading;
       const note = await dshRuntime.execute({ scope: 'owner', actor: 'scheduler', name: 'note_bili_reading',
-        args: { reading: { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence, previousNotes } }, signal: reading.signal });
+        args: { reading: { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence, previousNotes } }, signal: reading.signal,
+        priority: reading.background ? 'background' : 'normal', ...(reading.background ? { onYield: () => autonomyJobs.cancel() } : {}) });
       return note.text;
     },
-    browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, ...options }),
+    browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, ...options,
+      ...(options.background ? { onYield: () => autonomyJobs.cancel() } : {}) }),
     discoverPosts: async (source, options) => {
       if (source !== 'heybox') throw new Error('此社区尚未接入。');
       return { url: 'https://www.xiaoheihe.cn/app/bbs/home', posts: await discoverHeyboxPosts(options) };
@@ -325,7 +327,8 @@ function makeProactiveJobs() {
   const compose = async (args, recipient, signal) => {
     signal?.throwIfAborted();
     reserveProactiveChat(recipient);
-    const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args, signal });
+    const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args, signal,
+      priority: 'background', onYield: () => proactiveJobs.cancel() });
     let proposal;
     try { proposal = JSON.parse(result.text); }
     catch { throw new Error('原生主动私聊未返回有效决定。'); }
@@ -381,8 +384,9 @@ proactiveJobs = makeProactiveJobs();
 
 function makeMoodJobs() {
   return createMoodJobs({ store,
-    evaluate: ({ scope, kind, text, reply, signal }) => dshRuntime.execute({ scope, actor: scope === 'owner' ? 'owner' : 'scheduler',
-      name: 'evaluate_mood', args: { input: { kind, text, ...(kind === 'conversation' ? { reply } : {}) } }, signal }),
+    evaluate: ({ scope, kind, text, reply, signal, background }) => dshRuntime.execute({ scope, actor: scope === 'owner' ? 'owner' : 'scheduler',
+      name: 'evaluate_mood', args: { input: { kind, text, ...(kind === 'conversation' ? { reply } : {}) } }, signal,
+      priority: background ? 'background' : 'normal', ...(background ? { onYield: () => moodJobs.cancel({ backgroundOnly: true }) } : {}) }),
     isBusy: () => activeMutation > 0 || qqBusy() || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy
       || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || dshRuntime.status().busy
       || chatMemoryJobs?.status().busy
@@ -579,7 +583,8 @@ async function readAndRemember(url, scope, actor = 'owner', options = {}) {
   readingJobs.add(key); activeMutation++;
   try {
     const videoUrl = biliVideoUrl(url);
-    const page = videoUrl ? biliReadingPage(await dshRuntime.execute({ scope, actor, name: 'read_bili_video', args: { url: videoUrl }, signal: options.signal }), videoUrl) : await readPage(url);
+    const page = videoUrl ? biliReadingPage(await dshRuntime.execute({ scope, actor, name: 'read_bili_video', args: { url: videoUrl }, signal: options.signal,
+      priority: options.background ? 'background' : 'normal', ...(options.background ? { onYield: options.onYield } : {}) }), videoUrl) : await readPage(url);
     options.signal?.throwIfAborted(); options.assertActive?.();
     return { page, ...store.recordReading({ page, scope, actor }) };
   } finally { readingJobs.delete(key); activeMutation--; }
@@ -588,7 +593,7 @@ async function readAndRemember(url, scope, actor = 'owner', options = {}) {
 async function chat(scope, message, actor = 'owner', imageUrls = [], origin = '', options = {}) {
   options.signal?.throwIfAborted(); options.assertActive?.();
   chatMemoryJobs.cancel();
-  moodJobs.cancel();
+  moodJobs.cancel({ backgroundOnly: true });
   if (scope === 'owner' && actor === 'owner') {
     proactiveJobs.cancel();
     if (!options.deferAssistant) cancelQQ();
@@ -608,15 +613,25 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         .map(({ id, name, description }) => ({ id, name, description }));
       const expressions = currentExpressions();
       const expressionRuntime = dshRuntime.status();
-      const searchExpressions = expressionRuntime.enabled && expressionRuntime.expressions?.configuredEngine === 'dsh-meme' ? async query => {
-        const found = await dshRuntime.execute({ scope, actor, name: 'search_expressions', args: { query, items: expressions }, signal: options.signal });
+      const ownerChat = scope === 'owner' && actor === 'owner';
+      const dshAvailable = expressionRuntime.enabled && !expressionRuntime.error && (ownerChat ? expressionRuntime.ownerChatReady : !expressionRuntime.busy);
+      const searchExpressions = dshAvailable && expressionRuntime.expressions?.configuredEngine === 'dsh-meme' ? async query => {
+        options.signal?.throwIfAborted(); options.assertActive?.();
+        const found = await dshRuntime.execute({ scope, actor, name: 'search_expressions', args: { query, items: expressions }, signal: options.signal,
+          priority: ownerChat ? 'owner-chat' : 'normal', assertActive: options.assertActive });
+        options.signal?.throwIfAborted(); options.assertActive?.();
         const current = new Map(currentExpressions().map(item => [item.id, JSON.stringify(item)]));
         return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
       } : undefined;
       const collectExpression = origin ? input => { options.signal?.throwIfAborted(); options.assertActive?.(); return store.saveExpression({ ...input, scope, origin, actor }); } : undefined;
       const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
-        ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
-          ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
+        ...(dshAvailable ? { memoryAgent: async (query, excludeMessageId) => {
+          options.signal?.throwIfAborted(); options.assertActive?.();
+          const recalled = await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal,
+            priority: ownerChat ? 'owner-chat' : 'normal', assertActive: options.assertActive });
+          options.signal?.throwIfAborted(); options.assertActive?.();
+          return { ok: true, ...recalled };
+        } } : {}),
         ...(scope === 'owner' && actor === 'owner' ? { bookActions: { ...bookActions, read: id => bookActions.read(id, { signal: options.signal, assertActive: options.assertActive }) }, activityActions,
           autonomyControlActions: createAutonomyControlActions({ store, cancel: keys => {
             for (const key of keys) {
@@ -941,7 +956,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
 
 async function scheduledReading() {
   const config = store.getSetting('reading');
-  if (!store.getSetting('admin') || !config.enabled || readingBusy || qqBusy() || activeConversations.size || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy || chatMemoryJobs.status().busy) return;
+  if (closing || !store.getSetting('admin') || !config.enabled || readingBusy || qqBusy() || activeConversations.size || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy || chatMemoryJobs.status().busy) return;
   const now = Date.now(), day = new Date().toISOString().slice(0, 10);
   let status = store.getSetting('readingStatus', { day, count: 0, cursor: 0 });
   if (status.day !== day) status = { ...status, day, count: 0 };
@@ -950,13 +965,16 @@ async function scheduledReading() {
   const url = config.urls[(status.cursor || 0) % config.urls.length];
   status = { ...status, lastAttempt: now, cursor: (status.cursor || 0) + 1, count: status.count + 1 };
   store.setSetting('readingStatus', status);
+  const activeController = scheduledReadingController = new AbortController();
   try {
-    await readAndRemember(url, 'owner', 'scheduler');
+    await readAndRemember(url, 'owner', 'scheduler', { signal: activeController.signal, background: true, onYield: () => activeController.abort() });
+    if (closing) return;
     store.setSetting('readingStatus', { ...status, lastRun: new Date().toISOString(), lastError: '' });
   } catch (error) {
-    store.setSetting('readingStatus', { ...status, lastError: error.message });
-    store.addEvent({ type: 'error', scope: 'owner', actor: 'scheduler', content: `计划阅读失败：${error.message}`, sourceRef: url });
-  } finally { readingBusy = false; }
+    if (closing) return;
+    store.setSetting('readingStatus', { ...status, lastError: activeController.signal.aborted ? '本次计划阅读已取消，未自动重试。' : error.message });
+    if (!activeController.signal.aborted) store.addEvent({ type: 'error', scope: 'owner', actor: 'scheduler', content: `计划阅读失败：${error.message}`, sourceRef: url });
+  } finally { readingBusy = false; if (scheduledReadingController === activeController) scheduledReadingController = null; }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1210,5 +1228,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
