@@ -1,6 +1,6 @@
 {
   "name": "memoria",
-  "version": "0.3.72",
+  "version": "0.3.73",
   "private": true,
   "description": "A local-first personal agent with scoped memories and verifiable experiences.",
   "type": "module",
@@ -17,6 +17,7 @@
   "dependencies": {
     "@mozilla/readability": "0.6.0",
     "linkedom": "0.18.12",
-    "playwright": "1.64.1"
+    "playwright": "1.64.1",
+    "yauzl": "3.4.0"
   }
 }

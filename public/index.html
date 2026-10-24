@@ -79,7 +79,7 @@
         </section>
 
         <section id="page-books" class="page" aria-labelledby="books-title" hidden>
-          <div class="page-heading"><div><p class="eyebrow">04 / BOOK ROOM</p><h1 id="books-title">一起，把一本书慢慢读完。</h1><p class="muted">日常可以在已绑定的 QQ 私聊发送 TXT，直接聊阅读进度和笔记。这里用于查看与管理。</p></div><button id="refresh-books" class="button secondary" type="button">刷新书房 ↻</button></div>
+          <div class="page-heading"><div><p class="eyebrow">04 / BOOK ROOM</p><h1 id="books-title">一起，把一本书慢慢读完。</h1><p class="muted">日常可以在已绑定的 QQ 私聊发送 TXT 或 EPUB，直接聊阅读进度和笔记。这里用于查看与管理。</p></div><button id="refresh-books" class="button secondary" type="button">刷新书房 ↻</button></div>
           <section class="panel padded autonomy-panel" aria-labelledby="book-rhythm-title">
             <h2 id="book-rhythm-title">她的读书时光</h2><p id="book-schedule-summary" class="muted">正在读取安排…</p>
             <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次阅读</dt><dd id="book-next">等待安排</dd></div><div><dt>今日阅读尝试</dt><dd id="book-count">0 次</dd></div><div><dt>最近结果</dt><dd id="book-outcome">还没有记录</dd></div></dl>
@@ -88,7 +88,7 @@
             <p class="caption autonomy-note">需要先保存并启用读书设置、配置对话模型。现在试读也计入当天次数，失败同样计次。笔记仅创建人可见，成功保存后才推进阅读位置。</p>
           </section>
           <div class="book-import-grid">
-            <form id="book-file-form" class="panel padded"><h2>带一本书进来</h2><label>UTF-8 文本文件<input id="book-file" type="file" accept=".txt,text/plain" required><small>支持 TXT，每本不超过 3 MiB、100 万字符。</small></label><label>书名<input id="book-file-title" maxlength="200" placeholder="留空使用文件名"></label><p class="caption">书架最多保存 10 本，正文合计不超过 5 MiB。导入只保存正文，不调用模型。</p><button class="button primary" type="submit">导入文本 <span>↑</span></button><p id="book-file-result" class="caption book-import-result" role="status"></p></form>
+            <form id="book-file-form" class="panel padded"><h2>带一本书进来</h2><label>TXT 或 EPUB 文件<input id="book-file" type="file" accept=".txt,.epub,text/plain,application/epub+zip" required><small>文件不超过 3 MiB；提取后的文字不超过 3 MiB、100 万字符。TXT 使用 UTF-8 编码。</small></label><label>书名<input id="book-file-title" maxlength="200" placeholder="留空使用电子书书名或文件名"></label><p class="caption">书架最多保存 10 本，正文合计不超过 5 MiB。EPUB 只保存文字，不保留图片与排版；不支持正文加密或扫描图片书。导入不调用模型。</p><button class="button primary" type="submit">导入书籍 <span>↑</span></button><p id="book-file-result" class="caption book-import-result" role="status"></p></form>
             <form id="book-url-form" class="panel padded"><h2>从公开网页导入</h2><label>当前页面地址<input id="book-url" type="url" required placeholder="https://…"></label><label>书名或篇名<input id="book-url-title" maxlength="200" placeholder="留空使用网页标题"></label><p class="caption">只导入这个页面可公开访问的正文；分页作品仅导入当前页，不会自动读取其他章节。需要登录或验证码的内容暂不支持。</p><button class="button secondary" type="submit">导入当前页 <span>↗</span></button><p id="book-url-result" class="caption book-import-result" role="status"></p></form>
           </div>
           <div class="section-heading"><h2>正在读与准备读的书</h2><span id="book-library-size" class="caption">正在加载…</span></div><div id="book-list" class="book-grid"></div>

@@ -870,18 +870,17 @@ $('book-file-form').addEventListener('submit', event => {
   action($('book-file-form'), async () => {
     const file = $('book-file').files[0], output = $('book-file-result'); let imported = false;
     output.textContent = '';
-    if (!file || !/\.txt$/i.test(file.name)) throw new Error('请选择 UTF-8 编码的 TXT 文本文件。');
-    if (!file.size || file.size > 3 * 1024 * 1024) throw new Error('文本文件须非空，且不超过 3 MiB。');
-    let content;
-    try { content = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()); }
-    catch { throw new Error('文件不是有效的 UTF-8 文本，请先转换编码后再导入。'); }
-    if (!content.trim() || content.includes('\0') || content.length > 1000000) throw new Error('正文须非空、无空字符，且不超过 100 万字符。');
-    const title = $('book-file-title').value.trim() || file.name.replace(/\.txt$/i, '').slice(0, 200);
+    if (!file || !/\.(?:txt|epub)$/i.test(file.name)) throw new Error('请选择 UTF-8 TXT 或 EPUB 电子书。');
+    if (!file.size || file.size > 3 * 1024 * 1024) throw new Error('书籍文件须非空，且不超过 3 MiB。');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    const title = $('book-file-title').value.trim();
     try {
-      output.textContent = '正在导入文本…';
-      await api('/api/books', { method: 'POST', data: { title, text: content } }); imported = true;
+      output.textContent = '正在提取并导入文字…';
+      await api('/api/books/file', { method: 'POST', data: { name: file.name, data: btoa(binary), ...(title ? { title } : {}) } }); imported = true;
       $('book-file-form').reset(); await loadBooks();
-      output.textContent = '文本已加入书房，尚未调用模型阅读。'; toast('文本已导入书房。');
+      output.textContent = '书籍文字已加入书房，尚未调用模型阅读；EPUB 不保留图片与排版。'; toast('书籍已导入书房。');
     } catch (error) { output.textContent = imported ? '已导入，列表刷新未完成。请点击「刷新书房」。' : '导入未完成，请检查文件后重试。'; throw error; }
   });
 });

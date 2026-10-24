@@ -19,6 +19,7 @@ import { defaultDrawingSettings, normalizeDrawingSettings, publicDrawingSettings
 import { defaultExpressionSettings, normalizeExpressionSettings, publicExpressionSettings, createSelfExpressionJobs, expressionPlatforms } from './self-expression.js';
 import { defaultBookSettings, normalizeBookSettings, createBookJobs } from './book-jobs.js';
 import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
+import { parseBookFile, BOOK_FILE_MAX_BYTES } from './book-files.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 import { createProactiveRecipientResolver } from './proactive-recipient.js';
 import { composeProactive } from './proactive-compose.js';
@@ -964,7 +965,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     const deliveryKey = `qq-book:${bookFile.fileKey}`;
     if (store.hasDelivery(deliveryKey) || receivingBook === bookFile.fileKey) return;
     if (bookFile.unsupported) { if (store.claimDelivery(`qq-book-rejected:${bookFile.fileKey}`)) await send(bookFile.reason); return; }
-    if (receivingBook) { await send('正在收另一本书，请稍后重新发送这份 TXT。'); return; }
+    if (receivingBook) { await send('正在收另一本书，请稍后重新发送这份书籍。'); return; }
     receivingBook = bookFile.fileKey; activeMutation++;
     let bookReply, importedBook, commitBookReply, assertBookSource;
     try {
@@ -983,12 +984,13 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
       const book = store.addBook(uploaded, { deliveryKey });
       if (!book) return;
       importedBook = book;
-      const content = `收到 TXT《${book.title}》，已放入书房，正文 ${book.totalChars} 字符。`;
+      const format = /\.epub$/i.test(bookFile.name) ? 'EPUB' : 'TXT';
+      const content = `收到 ${format}《${book.title}》，已放入书房，正文 ${book.totalChars} 字符。${format === 'EPUB' ? '已提取文字，不含图片与排版。' : ''}`;
       store.addEvent({ type: 'book_import', scope: 'owner', actor: 'owner', content, sourceRef: `book:${book.id}` });
       bookReply = `${content}${store.getSetting('books').enabled ? '我会按阅读安排分段看，并记下笔记。' : '你可以直接让我读一小段；想让我自行分段阅读，也可以在后台设置节奏。'}\n也可以直接问我“书架里有什么”“这本读到哪里了”“读一小段”或“给我看看笔记”。`;
       const conversationOrigin = { version: 1, platform: 'qq', accountId: account.id, botId: config.botId, userId: account.userId };
       const metadata = { bookId: book.id, conversationOrigin };
-      const incoming = store.addMessage({ scope, role: 'user', actor: 'owner', content: `[QQ 文件上传记录，非文字指令：TXT《${book.title}》]`, metadata });
+      const incoming = store.addMessage({ scope, role: 'user', actor: 'owner', content: `[QQ 文件上传记录，非文字指令：${format}《${book.title}》]`, metadata });
       store.addEvent({ type: 'message', scope, actor: 'owner', content: incoming.content, metadata: { ...metadata, messageId: incoming.id } });
       const expectedOrigin = JSON.stringify(conversationOrigin);
       assertBookSource = () => {
@@ -1098,7 +1100,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (path.startsWith('/api/')) {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
-      const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
+      const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/books/file' ? Math.ceil(BOOK_FILE_MAX_BYTES / 3) * 4 + 4096 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
       if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
       if (path === '/api/mate/reset' && req.method === 'POST') {
@@ -1123,6 +1125,24 @@ const server = http.createServer(async (req, res) => {
       if (path === '/api/settings' && req.method === 'PUT') return json(res, 200, { settings: saveSettings(input) });
       if (path === '/api/books' && req.method === 'GET') return json(res, 200, { books: store.listBooks(), status: bookJobs.status() });
       if (path === '/api/books' && req.method === 'POST') return json(res, 201, { book: store.addBook({ title: input.title, text: input.text }) });
+      if (path === '/api/books/file' && req.method === 'POST') {
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['name', 'data', 'title'].includes(key))
+          || typeof input.data !== 'string' || !input.data.length || input.data.length > Math.ceil(BOOK_FILE_MAX_BYTES / 3) * 4
+          || input.data.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(input.data)) throw new Error('书籍文件上传格式无效。');
+        const bytes = Buffer.from(input.data, 'base64');
+        if (!bytes.length || bytes.length > BOOK_FILE_MAX_BYTES || bytes.toString('base64') !== input.data) throw new Error('书籍文件为空、超过 3 MiB 或编码无效。');
+        if (closing || readingBusy || activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy || backupJobs.status().busy || chatMemoryJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成后导入。' });
+        const controller = new AbortController(), cancel = () => controller.abort();
+        res.once('close', cancel);
+        activeMutation++;
+        try {
+          const uploaded = await parseBookFile({ name: input.name, bytes, title: input.title, signal: controller.signal });
+          controller.signal.throwIfAborted();
+          if (closing) throw new Error('服务正在关闭，本次书籍导入已取消。');
+          const book = store.addBook({ title: uploaded.title, text: uploaded.text });
+          return json(res, 201, { book, message: '已保存书籍文字，尚未调用模型阅读；EPUB 不保留图片与排版。' });
+        } finally { activeMutation--; res.off('close', cancel); }
+      }
       if (path === '/api/books/import' && req.method === 'POST') {
         if (readingBusy || activeMutation || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy || backupJobs.status().busy || chatMemoryJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成后导入。' });
         activeMutation++;
