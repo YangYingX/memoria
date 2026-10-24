@@ -110,7 +110,11 @@ const feishuRuntime = createFeishuRuntime({ dataDir,
 feishuChat = createFeishuChat({ store, transport: feishuRuntime,
   chat: (scope, message, actor, options) => chat(scope, message, actor, [], '', options),
   onOwnerMessage: () => proactiveJobs?.cancel(),
-  onError: code => store.addEvent({ type: 'error', scope: 'owner', actor: 'feishu', content: '飞书消息处理未完成，未自动重发。', metadata: { platform: 'feishu', code } }) });
+  onReplyDelivered: (scope, messageId) => moodJobs?.observeConversation(scope, messageId),
+  onError: code => store.addEvent({ type: 'error', scope: 'owner', actor: 'feishu',
+    content: code === 'ARCHIVE_FAILED' ? '飞书已确认发送，但保存本机对话档案未完成；不会自动重发。'
+      : code === 'SENT_STATE_FAILED' ? '飞书已确认发送，但保存本机发送状态未完成；不会自动重发。' : '飞书消息处理未完成，未自动重发。',
+    metadata: { platform: 'feishu', code } }) });
 function bindHeyboxOwner(userId) {
   const configPath = join(dataDir, 'android-runtime.json');
   let agentAccountId = '';
@@ -866,7 +870,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     if (bookFile.unsupported) { if (store.claimDelivery(`qq-book-rejected:${bookFile.fileKey}`)) await send(bookFile.reason); return; }
     if (receivingBook) { await send('正在收另一本书，请稍后重新发送这份 TXT。'); return; }
     receivingBook = bookFile.fileKey; activeMutation++;
-    let bookReply;
+    let bookReply, importedBook, commitBookReply, assertBookSource;
     try {
       const uploaded = await loadQQBookFile({ file: bookFile, resolveUrl: async (id, { signal }) => {
         const response = await fetch(`${config.apiBaseUrl}/get_private_file_url`, {
@@ -882,18 +886,43 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
       context.assertActive();
       const book = store.addBook(uploaded, { deliveryKey });
       if (!book) return;
+      importedBook = book;
       const content = `收到 TXT《${book.title}》，已放入书房，正文 ${book.totalChars} 字符。`;
-      store.addMessage({ scope: 'owner', role: 'user', actor: 'owner', content: `[发送了一本 TXT：${book.title}]`, metadata: { bookId: book.id } });
       store.addEvent({ type: 'book_import', scope: 'owner', actor: 'owner', content, sourceRef: `book:${book.id}` });
       bookReply = `${content}${store.getSetting('books').enabled ? '我会按阅读安排分段看，并记下笔记。' : '你可以直接让我读一小段；想让我自行分段阅读，也可以在后台设置节奏。'}\n也可以直接问我“书架里有什么”“这本读到哪里了”“读一小段”或“给我看看笔记”。`;
-      store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: bookReply, metadata: { bookId: book.id } });
+      const conversationOrigin = { version: 1, platform: 'qq', accountId: account.id, botId: config.botId, userId: account.userId };
+      const metadata = { bookId: book.id, conversationOrigin };
+      const incoming = store.addMessage({ scope, role: 'user', actor: 'owner', content: `[QQ 文件上传记录，非文字指令：TXT《${book.title}》]`, metadata });
+      store.addEvent({ type: 'message', scope, actor: 'owner', content: incoming.content, metadata: { ...metadata, messageId: incoming.id } });
+      const expectedOrigin = JSON.stringify(conversationOrigin);
+      assertBookSource = () => {
+        context.assertActive();
+        if (JSON.stringify(store.getConversationOrigin(incoming.id)) !== expectedOrigin) throw new Error('收书消息来源已变化，本次确认不再保存。');
+      };
+      const commit = store.prepareAssistantReply({ scope, role: 'assistant', actor: 'agent', content: bookReply,
+        metadata: { mode: 'live', bookId: book.id, replyTo: incoming.id, userMessageIds: [incoming.id] } });
+      commitBookReply = endOffset => { assertBookSource(); return commit(endOffset); };
     } catch (error) {
       if (isQQContextCanceled(error)) return;
       context.assertActive();
-      store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: `收书未完成：${error.message}` });
-      bookReply = `这本书暂时没有收好：${error.message}`;
+      if (importedBook) {
+        store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: 'TXT 已放入书房，但保存本次收书对话未完成；不会重复导入。' });
+        bookReply ||= `TXT《${importedBook.title}》已放入书房，可在书房查看。`;
+      } else {
+        store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: `收书未完成：${error.message}` });
+        bookReply = `这本书暂时没有收好：${error.message}`;
+      }
     } finally { receivingBook = ''; activeMutation--; }
-    await send(bookReply);
+    let confirmed = false;
+    try {
+      assertBookSource?.();
+      await send(bookReply);
+      confirmed = true;
+      commitBookReply?.(Math.min(bookReply.length, 5000));
+    } catch {
+      store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: confirmed
+        ? 'QQ 已确认收书回复发送，但保存本机对话档案未完成；不会自动重发。' : '收书回复发送未完成或结果未确认；不会自动重发。' });
+    }
     return;
   }
   const mergeable = Boolean(message) && !imageUrls.length && (segments.length

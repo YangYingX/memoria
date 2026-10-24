@@ -47,6 +47,39 @@ const memoryChangeTools = [
   { type: 'function', function: { name: 'forget_memory', description: '按当前用户明确的忘记或移除要求，将一条记忆从当前书架移除。先用 read_memory 从开头核对本轮条目。每轮更正或忘记合计最多尝试一次；不清除原始聊天、经历或旧备份，不得声称彻底擦除。', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } } },
 ];
 
+function completedConversationAnswer(completion, round, tools, toolCount, seenCallIds) {
+  const record = value => value && typeof value === 'object' && !Array.isArray(value)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+  const invalid = () => { throw new Error('模型未返回完整有效的单一回复，本次对话已停止。'); };
+  if (!Array.isArray(completion?.choices) || completion.choices.length !== 1) invalid();
+  const choice = completion.choices[0], answer = choice?.message;
+  if (!record(choice) || (Object.hasOwn(choice, 'index') && choice.index !== 0) || !record(answer) || answer.role !== 'assistant'
+    || answer.function_call != null || answer.refusal != null
+    || (answer.content != null && typeof answer.content !== 'string') || (typeof answer.content === 'string' && answer.content.length > 16000)
+    || (answer.tool_calls != null && !Array.isArray(answer.tool_calls))) invalid();
+  const calls = answer.tool_calls || [];
+  if (!calls.length) {
+    if (choice.finish_reason !== 'stop' || typeof answer.content !== 'string' || !answer.content.trim()) invalid();
+    return answer;
+  }
+  if (round >= 3 || choice.finish_reason !== 'tool_calls') invalid();
+  if (calls.length > 5 || toolCount + calls.length > 5) throw new Error('本次对话已达到 5 次工具调用上限。');
+  const names = new Set(tools.map(tool => tool.function.name)), batchIds = new Set();
+  for (const [index, call] of calls.entries()) {
+    if (!record(call) || Object.keys(call).some(key => !['index', 'id', 'type', 'function'].includes(key))
+      || (Object.hasOwn(call, 'index') && call.index !== index) || call.type !== 'function'
+      || typeof call.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(call.id) || seenCallIds.has(call.id) || batchIds.has(call.id)
+      || !record(call.function) || Object.keys(call.function).some(key => !['name', 'arguments'].includes(key))
+      || !names.has(call.function.name) || typeof call.function.arguments !== 'string' || call.function.arguments.length > 40000) invalid();
+    let args;
+    try { args = JSON.parse(call.function.arguments); } catch { invalid(); }
+    if (!record(args)) invalid();
+    batchIds.add(call.id);
+  }
+  for (const id of batchIds) seenCallIds.add(id);
+  return answer;
+}
+
 function memoryChangeRequests(text) {
   const direct = text.replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|<(blockquote|q)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
     .replace(/^[\t ]*>[^\r\n]*(?:\r?\n(?![\t ]*(?:\r?\n|$))[^\r\n]*)*|“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"|'[^']*'|`[^`]*`/gm, ' ').trim();
@@ -300,20 +333,21 @@ export async function runConversation({ store, readAndRemember, scope, message, 
           : `${replyContext ? `[本轮QQ引用与点名：${JSON.stringify(replyContext)}]\n` : ''}${text}` },
       ];
       let toolCount = 0;
+      const seenCallIds = new Set();
       for (let round = 0; round < 4; round++) {
         const newlyShownExpressionIds = new Set();
         checkMemoryAgentSources();
         const completion = await requestCompletion({ store, messages, signal, ...(round < 3 ? { tools } : {}) });
         checkMemoryAgentSources();
         if (allowSilence && (!Array.isArray(completion.choices) || completion.choices.length !== 1)) throw new Error('自主群聊须返回唯一的回复或静默决定。');
-        const answer = completion.choices[0].message;
+        const answer = completedConversationAnswer(completion, round, tools, toolCount, seenCallIds);
         if (allowSilence && answer.tool_calls !== undefined && answer.tool_calls !== null && !Array.isArray(answer.tool_calls)) throw new Error('静默工具返回格式无效。');
         if (answer.function_call?.name === 'stay_silent' || answer.tool_calls?.some?.(call => call?.function?.name === 'stay_silent')) {
           const call = answer.tool_calls?.[0];
           let args;
           try { args = JSON.parse(call?.function?.arguments); } catch { /* Invalid arguments are rejected below. */ }
           if (!allowSilence || round >= 3 || completion.choices.length !== 1 || completion.choices[0].finish_reason !== 'tool_calls'
-            || answer.role !== 'assistant' || answer.function_call !== undefined || (answer.content !== undefined && answer.content !== null && (typeof answer.content !== 'string' || answer.content.trim()))
+            || answer.role !== 'assistant' || answer.function_call != null || (answer.content !== undefined && answer.content !== null && (typeof answer.content !== 'string' || answer.content.trim()))
             || !Array.isArray(answer.tool_calls) || answer.tool_calls.length !== 1 || !call || call.type !== 'function'
             || typeof call.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(call.id)
             || (call.index !== undefined && call.index !== 0) || Object.keys(call).some(key => !['index', 'id', 'type', 'function'].includes(key))
@@ -541,7 +575,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       conversationIds: [...conversationIds], userMessageIds: [...userMessageIds], historyMessageIds, replyTo: incoming.id, ...(images.length ? { imageCount: images.length } : {}), ...(expressionIds.length ? { expressionIds } : {}) } };
     if (deferAssistant) {
       const commit = store.prepareAssistantReply(assistant);
-      return { reply, mode, memories, expressionIds, commitDeliveredReply(...args) { checkMemoryAgentSources(); return commit(...args); } };
+      return { reply, mode, memories, expressionIds, commitDeliveredReply(...args) { checkMemoryAgentSources(); if (store.isConversationSourceBlocked(scope, event.id)) throw new Error('本次对话来源已失效，已确认回复不能继续保存。'); return commit(...args); } };
     }
     store.addMessage(assistant);
     return { reply, mode, memories, expressionIds };

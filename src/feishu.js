@@ -1,7 +1,7 @@
 import { normalizeFeishuEvent, normalizeFeishuSettings, defaultFeishuSettings, feishuConversation } from './feishu-message.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
-export function createFeishuChat({ store, chat, transport, onError = () => {}, onOwnerMessage = () => {} }) {
+export function createFeishuChat({ store, chat, transport, onError = () => {}, onOwnerMessage = () => {}, onReplyDelivered = () => {} }) {
   let stopped = false, started = false, running, controller, activeKey = '', binding;
   const sourceEpochs = new Map();
   const settings = () => normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings));
@@ -42,7 +42,7 @@ export function createFeishuChat({ store, chat, transport, onError = () => {}, o
     const configSnapshot = JSON.stringify(config);
     controller = new AbortController(); activeKey = item.key;
     const taskController = controller;
-    let sending = false;
+    let sending = false, confirmedReceipt;
     const check = () => {
       taskController.signal.throwIfAborted();
       const next = settings(), live = transport.status();
@@ -56,12 +56,13 @@ export function createFeishuChat({ store, chat, transport, onError = () => {}, o
       check();
       const account = item.scope === 'owner' && item.actor === 'owner'
         ? store.findAccount('feishu', feishuConversation(event, { store, ...config }).accountId) : null;
-      const result = await chat(item.scope, event.text, item.actor, { signal: taskController.signal, assertActive: check, textOnly: true,
+      const result = await chat(item.scope, event.text, item.actor, { signal: taskController.signal, assertActive: check, textOnly: true, deferAssistant: true,
         ...(account?.personId === 'owner' ? { conversationOrigin: { version: 1, platform: 'feishu', accountId: account.id,
           inboxKey: item.key, botId: event.botId, fingerprint: event.fingerprint,
           conversationId: event.conversation.id, actorId: event.actor.id } } : {}) });
       check();
       if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 4000) throw new Error('FEISHU_REPLY_INVALID');
+      if (typeof result.commitDeliveredReply !== 'function') throw new Error('FEISHU_REPLY_NOT_PREPARED');
       if (!store.saveFeishuReply(item.key, result.reply)) throw new Error('FEISHU_MESSAGE_CANCELED');
       check();
       if (!store.markFeishuSending(item.key)) throw new Error('FEISHU_MESSAGE_CANCELED');
@@ -69,11 +70,26 @@ export function createFeishuChat({ store, chat, transport, onError = () => {}, o
       const receipt = await transport.reply(event.reply, result.reply, { signal: taskController.signal, epoch: connection.epoch, recovered });
       if (receipt?.sent !== true || typeof receipt.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(receipt.messageId)) {
         store.finishFeishuMessage(item.key, 'unknown', 'SEND_UNCONFIRMED');
-      } else store.finishFeishuMessage(item.key, 'sent', '', { version: 1, messageId: receipt.messageId, conversationId: event.conversation.id });
+      } else {
+        confirmedReceipt = { version: 1, messageId: receipt.messageId, conversationId: event.conversation.id };
+        let archived = false, deliveredMessageId;
+        try {
+          check();
+          const saved = result.commitDeliveredReply(result.reply.length, []);
+          if (!saved || saved.role !== 'assistant' || saved.scope !== item.scope || saved.content !== result.reply) throw new Error('FEISHU_ARCHIVE_UNCONFIRMED');
+          archived = true; deliveredMessageId = saved.id;
+        } catch { report('ARCHIVE_FAILED'); }
+        if (archived) try { onReplyDelivered(item.scope, deliveredMessageId); } catch { /* Sampling must not discard an already delivered reply. */ }
+        const saved = store.finishFeishuMessage(item.key, 'sent', archived ? '' : 'ARCHIVE_FAILED', confirmedReceipt);
+        if (saved?.state !== 'sent') report('SENT_STATE_FAILED');
+      }
     } catch {
-      store.finishFeishuMessage(item.key, sending ? 'unknown' : taskController.signal.aborted ? 'canceled' : 'failed',
-        sending ? 'SEND_UNCONFIRMED' : taskController.signal.aborted ? 'CANCELED' : 'CHAT_FAILED');
-      report(sending ? 'SEND_UNCONFIRMED' : 'CHAT_FAILED');
+      if (confirmedReceipt) report('SENT_STATE_FAILED');
+      else {
+        store.finishFeishuMessage(item.key, sending ? 'unknown' : taskController.signal.aborted ? 'canceled' : 'failed',
+          sending ? 'SEND_UNCONFIRMED' : taskController.signal.aborted ? 'CANCELED' : 'CHAT_FAILED');
+        report(sending ? 'SEND_UNCONFIRMED' : 'CHAT_FAILED');
+      }
     } finally {
       taskController.abort();
       if (controller === taskController) { controller = undefined; activeKey = ''; }
