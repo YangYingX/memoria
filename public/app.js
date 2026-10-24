@@ -101,6 +101,7 @@ async function loadState({ fill = false } = {}) {
   renderAutonomyStatus(state.data.autonomyStatus);
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
   renderMoodStatus();
+  renderChatMemoryStatus();
   renderProactiveStatus(state.data.proactiveStatus);
   renderMateStatus();
   renderFollowups();
@@ -420,7 +421,10 @@ function renderAccounts() {
 }
 
 function fillSettings() {
-  const { persona, model, qq, feishu = {}, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, mood = {} } = state.data.settings;
+  const { persona, model, qq, feishu = {}, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, mood = {}, chatMemory = {} } = state.data.settings;
+  $('chat-memory-enabled').checked = chatMemory.enabled !== false;
+  $('chat-memory-interval').value = chatMemory.intervalMinutes ?? 180;
+  $('chat-memory-limit').value = chatMemory.dailyLimit ?? 4;
   $('dsh-reading-limit').value = dshReading.dailyReadLimit ?? 6;
   $('mood-enabled').checked = Boolean(mood.enabled);
   $('mood-interval').value = mood.intervalMinutes ?? 180;
@@ -577,6 +581,20 @@ function renderMoodStatus() {
   $('mood-error').hidden = !status.lastError;
   $('mood-error').textContent = status.lastError || '';
   $('mood-run').disabled = Boolean(status.busy || !config.enabled || !state.data?.dshStatus?.enabled || !state.data?.settings.model.hasApiKey);
+}
+
+function renderChatMemoryStatus() {
+  const config = state.data?.settings.chatMemory || {}, status = state.data?.chatMemoryStatus || {};
+  const outcomes = { evaluating: '正在整理新私聊…', success: '已将原话摘记放上书架', quiet: '这次没有新增摘记', error: '这次未能完成', cancelled: '已让出时间，等待下次整理', interrupted: '上次整理中断，未自动重试' };
+  $('chat-memory-summary').textContent = !config.enabled ? '已暂停。再次开启时，从新的私聊开始整理。'
+    : !state.data?.settings.model.hasApiKey ? '已开启，等待配置模型 API。'
+      : config.dailyLimit === 0 ? '每日上限为 0，暂停新的整理尝试。'
+        : `已开启，每 ${config.intervalMinutes ?? 180} 分钟最多整理一次。${status.nextRunAt ? `下次最早整理：${date(status.nextRunAt)}。` : '等待新的私聊和空闲时间。'}`;
+  const today = status.day === new Date().toISOString().slice(0, 10);
+  $('chat-memory-count').textContent = `今日整理尝试 ${today ? status.attempts || 0 : 0} / ${config.dailyLimit ?? 4} 次（UTC） · 上次新增 ${status.savedCount || 0} 条`;
+  $('chat-memory-outcome').textContent = `${status.busy ? '正在整理新私聊…' : outcomes[status.lastOutcome] || '还没有整理记录'}${status.lastAttemptAt ? ` · 最近尝试：${date(status.lastAttemptAt)}` : ''}`;
+  $('chat-memory-error').hidden = !status.lastError;
+  $('chat-memory-error').textContent = status.lastError || '';
 }
 
 function renderSelfExpressionStatus(status = {}) {
@@ -1083,6 +1101,7 @@ $('settings-form').addEventListener('submit', event => {
       await api('/api/settings', { method: 'PUT', data: {
         dshReading: { dailyReadLimit: Number($('dsh-reading-limit').value) },
         mood: { enabled: $('mood-enabled').checked, intervalMinutes: Number($('mood-interval').value), dailyLimit: Number($('mood-limit').value) },
+        chatMemory: { enabled: $('chat-memory-enabled').checked, intervalMinutes: Number($('chat-memory-interval').value), dailyLimit: Number($('chat-memory-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value), mergeWindowMs: Number($('qq-merge-window').value), groupReplyChance: Number($('qq-group-reply-chance').value), groupReplyCooldownSeconds: Number($('qq-group-reply-cooldown').value), replySplitEnabled: $('qq-reply-split').checked, replyDelayMs: Number($('qq-reply-delay').value) },
