@@ -44,6 +44,16 @@ const modelErrors = {
   DSH_MODEL_FAILED: 'DSH 模型请求未完成，本次任务已停止。',
 };
 
+function publicReflectionSource(value) {
+  if (typeof value !== 'string' || !value) return false;
+  if (biliVideoUrl(value) === value) return true;
+  try {
+    const url = new URL(value);
+    return url.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(url.pathname)
+      && !url.username && !url.password && !url.search && !url.hash && !url.port && url.href === value && url.href === url.origin + url.pathname;
+  } catch { return false; }
+}
+
 export function createDshRuntime({ store, dataDir }) {
   let busy = false, stopped = false, cancelCurrent;
   let drained = Promise.resolve();
@@ -101,7 +111,15 @@ export function createDshRuntime({ store, dataDir }) {
       const memory = createMemoryAccess({ store, scope: reading || modelTask ? 'public' : scope, actor, excludeMessageId });
       if (!['inspect', ...memoryTools, 'read_bili_video', 'browse_bili', 'note_bili_reading', 'evaluate_mood', 'recall_memory', 'compose_proactive', 'search_expressions'].includes(name) || !args || typeof args !== 'object' || Array.isArray(args)
         || (name === 'inspect' && Object.keys(args).length)) throw new Error('此 DSH 入口仅支持状态、书架和已接入的公开阅读工具。');
-      let noteMessages, conversationMood = false;
+      let noteMessages, noteConfiguration, conversationMood = false;
+      const noteVersions = new Map();
+      const noteSourcesCurrent = () => {
+        try {
+          return (!noting || JSON.stringify({ model: store.getSetting('model'), persona: store.getSetting('persona') }) === noteConfiguration)
+            && [...noteVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, ['owner'])?.signature === signature);
+        }
+        catch { return false; }
+      };
       if (searchingExpressions) {
         if (Object.keys(args).some(key => !['query', 'items'].includes(key))) throw new Error('表情检索只接受关键词和当前场合目录。');
         args = { query: expressionSearchQuery(args.query), items: expressionSearchItems(args.items) };
@@ -133,7 +151,7 @@ export function createDshRuntime({ store, dataDir }) {
         const item = args.reading;
         if (scope !== 'owner' || !['owner', 'scheduler'].includes(actor) || Object.keys(args).some(key => key !== 'reading')
           || !item || typeof item !== 'object' || Array.isArray(item)
-          || Object.keys(item).some(key => !['title', 'url', 'excerpt', 'readAt', 'truncated', 'partCount', 'totalSavedChars', 'evidence'].includes(key))
+          || Object.keys(item).some(key => !['title', 'url', 'excerpt', 'readAt', 'truncated', 'partCount', 'totalSavedChars', 'evidence', 'previousNotes'].includes(key))
           || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 500
           || typeof item.url !== 'string' || biliVideoUrl(item.url) !== item.url
           || typeof item.excerpt !== 'string' || !item.excerpt.trim() || item.excerpt.length > 8000
@@ -141,7 +159,31 @@ export function createDshRuntime({ store, dataDir }) {
           || typeof item.truncated !== 'boolean' || !Number.isSafeInteger(item.partCount) || item.partCount < 1 || item.partCount > 50
           || !Number.isSafeInteger(item.totalSavedChars) || item.totalSavedChars < item.excerpt.length || item.totalSavedChars > 1000000
           || item.evidence?.plugin !== 'dsh-bili-humanism' || JSON.stringify(item).length > 16000) throw new Error('DSH 笔记只接受当次公开 B站阅读摘录。');
-        noteMessages = [{ role: 'user', content: JSON.stringify(item) }];
+        const supplied = item.previousNotes === undefined ? [] : item.previousNotes;
+        if (!Array.isArray(supplied) || supplied.length > 3) throw new Error('DSH 笔记旧思考须为最多三条已核验资料。');
+        const canonical = supplied.length ? store.listReadingReflections(['owner'], 10) : [];
+        const previousNotes = supplied.map(previous => {
+          if (!previous || typeof previous !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(previous))
+            || Reflect.ownKeys(previous).length !== 6 || Reflect.ownKeys(previous).some(key => !['memoryId', 'title', 'note', 'sourceRef', 'createdAt', 'truncated'].includes(key))
+            || typeof previous.memoryId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(previous.memoryId) || noteVersions.has(previous.memoryId)
+            || typeof previous.title !== 'string' || !previous.title.trim() || previous.title.length > 200
+            || typeof previous.note !== 'string' || !previous.note.trim() || previous.note.length > 800
+            || !publicReflectionSource(previous.sourceRef) || typeof previous.createdAt !== 'string' || typeof previous.truncated !== 'boolean') {
+            throw new Error('DSH 笔记旧思考未通过来源核对。');
+          }
+          const original = canonical.find(note => note.memoryId === previous.memoryId);
+          const evidence = store.getMemoryVersionEvidence(previous.memoryId, ['owner']), memory = evidence?.memory;
+          if (!original || !memory || memory.scope !== 'owner' || memory.sourceType !== 'reflection' || memory.category !== 'reading-note'
+            || memory.title !== original.title || memory.content !== original.note || memory.sourceRef !== original.sourceRef || memory.createdAt !== original.createdAt
+            || previous.title !== original.title || previous.sourceRef !== original.sourceRef || previous.createdAt !== original.createdAt
+            || previous.note !== original.note.slice(0, 800) || previous.truncated !== (original.note.length > 800)
+            || typeof evidence.signature !== 'string' || !/^[a-f0-9]{64}$/.test(evidence.signature)) throw new Error('DSH 笔记旧思考未通过来源核对。');
+          noteVersions.set(previous.memoryId, evidence.signature);
+          return { title: previous.title, note: previous.note, sourceRef: previous.sourceRef, createdAt: previous.createdAt, truncated: previous.truncated };
+        });
+        const { previousNotes: ignoredNotes, ...readingData } = item;
+        noteMessages = [{ role: 'user', content: JSON.stringify({ ...readingData, ...(Object.hasOwn(item, 'previousNotes') ? { previousNotes } : {}) }) }];
+        noteConfiguration = JSON.stringify({ model: store.getSetting('model'), persona: store.getSetting('persona') });
         args = { messages: noteMessages };
       } else if (browsing) {
         if (Object.keys(args).length || typeof selectVideo !== 'function') throw new Error('B站自主浏览需要栖忆选择候选，不能传入网址或其他参数。');
@@ -233,8 +275,10 @@ export function createDshRuntime({ store, dataDir }) {
                 || Object.keys(message).some(key => !['type', 'id', 'args'].includes(key))
                 || !message.args || Object.keys(message.args).some(key => !['messages', 'maxTokens'].includes(key))
                 || message.args.maxTokens !== (judging ? 300 : 650) || JSON.stringify(message.args.messages) !== JSON.stringify(noteMessages)) return stop('DSH 模型请求不属于本次获准的任务。');
+              if (!noteSourcesCurrent()) return stop('DSH 笔记来源或配置已变化，本次结果已取消。');
               modelRequested = true;
               modelAccess(message.args).then(result => {
+                if (!noteSourcesCurrent()) return stop('DSH 笔记来源或配置已变化，本次结果已取消。');
                 if (feiyu) {
                   try {
                     const proposal = validateMoodDelta(JSON.parse(result.text));
@@ -297,6 +341,7 @@ export function createDshRuntime({ store, dataDir }) {
             taskController.abort();
             clearTimeout(timeout); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
             if (failure || code !== 0 || !received) reject(failure || new Error('DSH 任务未正常完成。'));
+            else if (!noteSourcesCurrent()) reject(new DshTaskError('DSH 笔记来源或配置已变化，本次结果已取消。'));
             else if (recalling && !result.sourcesCurrent()) reject(new DshTaskError(composing ? '主动拟聊的资料已变化。' : '记忆子代理使用的资料已变化，本次结果已取消。'));
             else if (modelTask && (!modelRequested || typeof authorizedNote !== 'string'
               || (feiyu ? !authorizedMood : result?.text !== authorizedNote))) reject(new DshTaskError('DSH 未返回有效的模型结果。'));

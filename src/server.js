@@ -148,9 +148,9 @@ function makeAutonomyJobs() {
   return createAutonomyJobs({ store,
     reflect: async reading => {
       if (biliVideoUrl(reading.url) !== reading.url || reading.evidence?.plugin !== 'dsh-bili-humanism') return reflectReading(store, reading);
-      const { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence } = reading;
+      const { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence, previousNotes } = reading;
       const note = await dshRuntime.execute({ scope: 'owner', actor: 'scheduler', name: 'note_bili_reading',
-        args: { reading: { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence } }, signal: reading.signal });
+        args: { reading: { title, url, excerpt, readAt, truncated, partCount, totalSavedChars, evidence, previousNotes } }, signal: reading.signal });
       return note.text;
     },
     browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, ...options }),

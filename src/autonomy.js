@@ -70,15 +70,19 @@ function conversationInterests(store) {
   return evidence;
 }
 
-function publicReadingNotes(store) {
+function publicReadingNoteRecords(store) {
   return store.listReadingReflections(['owner'], 10).filter(item => {
     try {
       if (biliVideoUrl(item.sourceRef) === item.sourceRef) return true;
       const url = new URL(item.sourceRef);
       return url.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(url.pathname)
-        && !url.username && !url.password && !url.search && !url.hash;
+        && !url.username && !url.password && !url.search && !url.hash && !url.port && url.href === item.sourceRef && url.href === url.origin + url.pathname;
     } catch { return false; }
-  }).slice(0, 3).map(item => ({ id: item.memoryId, title: item.title, note: item.note.slice(0, 800),
+  }).slice(0, 3);
+}
+
+function publicReadingNotes(store) {
+  return publicReadingNoteRecords(store).map(item => ({ id: item.memoryId, title: item.title, note: item.note.slice(0, 800),
     truncated: item.note.length > 800, sourceRef: item.sourceRef, createdAt: item.createdAt }));
 }
 
@@ -274,16 +278,15 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
       if (typeof reflect === 'function' && store.getSetting('model')?.apiKey) {
         if (isBusy()) reflection.lastReflectionOutcome = 'busy';
         else try {
-          // The native Bili note path currently receives only this reading's excerpt.
-          const previousNotes = source === 'bilibili' ? [] : store.listReadingReflections(['owner'], 3).filter(item => {
-            try { const address = new URL(item.sourceRef); return biliVideoUrl(item.sourceRef) === item.sourceRef
-              || (address.origin === 'https://www.xiaoheihe.cn' && /^\/app\/bbs\/link\/\d+$/.test(address.pathname) && !address.search && !address.hash); }
-            catch { return false; }
-          });
-          const reflectionInputs = () => JSON.stringify({ model: store.getSetting('model'), persona: store.getSetting('persona'),
-            reading: { memory: store.getMemory(reading.memory.id), revisions: store.listRevisions(reading.memory.id) },
-            previousNotes: previousNotes.map(item => ({ memory: store.getMemory(item.memoryId), revisions: store.listRevisions(item.memoryId) })) });
+          const previousNotes = publicReadingNoteRecords(store);
+          const reflectionInputs = () => {
+            const versions = [reading.memory.id, ...previousNotes.map(item => item.memoryId)]
+              .map(id => store.getMemoryVersionEvidence(id, ['owner'])?.signature);
+            return versions.some(signature => !signature) ? null
+              : JSON.stringify({ model: store.getSetting('model'), persona: store.getSetting('persona'), versions });
+          };
           const reflectionSnapshot = reflectionInputs();
+          if (!reflectionSnapshot) throw new Error('本次读后思考的来源已不可用。');
           const parts = page.parts || [page.text];
           const note = await reflect({ title, url, excerpt: page.text.slice(0, 8000), readAt: page.readAt,
             truncated: Boolean(page.truncated || page.text.length > 8000 || parts.length > 1),
