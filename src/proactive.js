@@ -434,9 +434,9 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       const messageId = result?.messageId;
       const confirmed = (typeof messageId === 'string' && messageId.length > 0 && messageId.length <= (recipient.platform === 'feishu' ? 128 : 100) && !messageId.includes('\0')) || Number.isSafeInteger(messageId);
       if (confirmed && current()) {
-        store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: message,
+        const saved = store.addMessage({ scope: 'owner', role: 'assistant', actor: 'agent', content: message,
           metadata: { ...assistantMetadata, messageId: String(messageId) } });
-        event(selected, 'success', message, { messageId: String(messageId) });
+        event(selected, 'success', saved.content, { messageId: String(messageId), assistantMessageId: saved.id, platform: recipient.platform || 'qq' });
         update({ lastOutcome: 'success', lastSuccess: stamp(now()), lastError: '' });
         if (selected.attempt) store.transitionFollowup(selected.attempt.id, selected.attempt.revision, 'sent', { now: now() });
       } else if (confirmed) {

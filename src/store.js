@@ -1041,6 +1041,51 @@ export function createStore(dbPath) {
         ...(origin ? { platform: origin.platform, conversationKind: 'dm' } : {}),
         ...qqBatchSourceInfo(user.metadata.qqBatchSources, user.content), ...replySources.get(user.id) });
     }
+    if (permitted.includes('owner')) {
+      const successes = all("SELECT * FROM events WHERE type = 'proactive' AND scope = 'owner' AND actor = 'scheduler' AND json_extract(metadata, '$.outcome') = 'success'").map(eventRow);
+      const bySource = new Map(), byMessage = new Map();
+      for (const event of successes) {
+        for (const key of new Set([event.sourceRef, event.metadata.sourceKey])) {
+          if (typeof key !== 'string') continue;
+          if (!bySource.has(key)) bySource.set(key, []);
+          bySource.get(key).push(event);
+        }
+        if (typeof event.metadata.assistantMessageId === 'string') {
+          if (!byMessage.has(event.metadata.assistantMessageId)) byMessage.set(event.metadata.assistantMessageId, []);
+          byMessage.get(event.metadata.assistantMessageId).push(event);
+        }
+      }
+      const candidates = new Map(), copies = new Map();
+      for (const message of messages) {
+        const metadata = message.metadata;
+        if (message.scope !== 'owner' || message.role !== 'assistant' || message.actor !== 'agent' || metadata.mode !== 'live'
+          || metadata.proactive !== true || Object.hasOwn(metadata, 'replyTo')
+          || !['reading', 'conversation', 'theme', 'agenda'].includes(metadata.kind) || typeof metadata.sourceKey !== 'string'
+          || !/^[a-f0-9]{64}$/.test(metadata.sourceKey) || typeof metadata.messageId !== 'string'
+          || !/^(?:0|-?[1-9]\d{0,19}|[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127})$/.test(metadata.messageId)) continue;
+        const key = JSON.stringify([metadata.sourceKey, metadata.messageId, metadata.kind, message.content]);
+        candidates.set(message.id, key); copies.set(key, (copies.get(key) || 0) + 1);
+      }
+      for (const message of messages) {
+        if (!candidates.has(message.id) || hiddenAssistants.has(message.id)) continue;
+        const metadata = message.metadata, receipt = metadata.messageId;
+        const related = new Map([...(bySource.get(metadata.sourceKey) || []), ...(byMessage.get(message.id) || [])].map(event => [event.id, event]));
+        if (related.size !== 1) continue;
+        const proof = [...related.values()][0], evidence = proof.metadata;
+        if (proof.sourceRef !== metadata.sourceKey || evidence.sourceKey !== metadata.sourceKey || evidence.kind !== metadata.kind
+          || proof.content !== message.content || evidence.messageId !== receipt) continue;
+        let platform;
+        if (Object.hasOwn(evidence, 'assistantMessageId')) {
+          if (evidence.assistantMessageId !== message.id || !['qq', 'feishu'].includes(evidence.platform) || metadata.platform !== evidence.platform
+            || !(evidence.platform === 'qq' ? /^(?:0|-?[1-9]\d{0,19})$/ : /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/).test(receipt)) continue;
+          platform = evidence.platform;
+        } else if (copies.get(candidates.get(message.id)) !== 1) continue;
+        turns.push({ id: message.id, scope: 'owner', actor: 'agent', createdAt: message.createdAt, user: '', assistant: message.content,
+          replyAt: message.createdAt, assistantHidden: false, proactive: true, ...(platform ? { platform, conversationKind: 'dm' } : {}) });
+      }
+      const order = new Map(messages.map((message, index) => [message.id, index]));
+      turns.sort((left, right) => order.get(left.id) - order.get(right.id));
+    }
     return { messages, turns, blockedUsers, hiddenAssistants, replySources };
   }
 

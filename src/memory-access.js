@@ -109,6 +109,14 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
         const turn = store.getConversation(args.id, scopes, excludeMessageId);
         if (!turn) throw new Error('对话不存在、未完成或当前场合不可检索。');
         const channel = turn.platform === 'qq' ? 'QQ 私聊' : turn.platform === 'feishu' ? '飞书私聊' : '';
+        if (turn.proactive === true) {
+          const header = `栖忆历史主动私聊（${turn.createdAt}${channel ? `，来源 ${channel}` : ''}；已取得发送回执，不是用户原话；旧话可能有误）：\n`;
+          const content = header + turn.assistant;
+          if (offset >= content.length) throw new Error('对话正文位置超出范围。');
+          return memoryPage({ id: turn.id, scope: turn.scope, actor: turn.actor, createdAt: turn.createdAt, replyAt: turn.replyAt,
+            assistantHidden: false, proactive: true, content, ...(channel ? { platform: turn.platform, conversationKind: turn.conversationKind } : {}),
+            sections: [{ role: 'assistant', startOffset: header.length, endOffset: content.length }] }, offset, 4000);
+        }
         const userHeader = `用户原话（${turn.createdAt}，发言者 ${turn.actor}${channel ? `，来源 ${channel}` : ''}${turn.qqBatchCount ? `，${turn.qqBatchCount}条QQ消息合并` : ''}）：\n`;
         const assistantHeader = turn.assistantHidden ? '\n\n助手历史回复因引用了已更正或忘记的来源而不提供。\n'
           : `\n\n助手历史回复（${turn.replyAt}，可能有误，不代表用户事实）：\n`;
