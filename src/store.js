@@ -1822,12 +1822,19 @@ export function createStore(dbPath) {
       if (id === excludeMessageId) return null;
       return conversationState(permitted).turns.find(turn => turn.id === id) ?? null;
     },
-    listConversationHistory(scope, limit = 16) {
+    listConversationHistory(scope, limit = 16, messageIds) {
       scope = scopeValue(scope);
       limit = integer(limit, '消息条数', 1, 1000);
+      let selectedIds;
+      if (messageIds !== undefined) {
+        if (!Array.isArray(messageIds) || messageIds.length > 1000) invalid('历史消息须提供最多 1000 个明确的消息 ID。');
+        selectedIds = new Set(Array.from(messageIds, id => identifier(id, '历史消息 ID')));
+        if (selectedIds.size !== messageIds.length) invalid('历史消息 ID 不能重复。');
+      }
       const state = conversationState([scope]);
       return state.messages.filter(message => message.scope === scope && (message.role === 'user'
-        ? !state.blockedUsers.has(message.id) : !state.hiddenAssistants.has(message.id))).slice(0, limit).reverse().map(message => {
+        ? !state.blockedUsers.has(message.id) : !state.hiddenAssistants.has(message.id))
+        && (!selectedIds || selectedIds.has(message.id))).slice(0, limit).reverse().map(message => {
         if (message.role !== 'user' || !Object.hasOwn(message.metadata, 'qqReplyContext')) return message;
         const { qqReplyContext, ...metadata } = message.metadata;
         return { ...message, metadata: { ...metadata, ...state.replySources.get(message.id) } };

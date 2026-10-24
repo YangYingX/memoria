@@ -873,9 +873,12 @@ async function runQQBatch(items, { signal }) {
         allowSilence: ambient, deferAssistant: true });
     assertActive();
     if (ambient && result.silent === true) return;
-    if (typeof result.commitDeliveredReply !== 'function') throw new Error('QQ 回复尚未准备好记录确认结果。');
+    if (typeof result.commitDeliveredReply !== 'function' || typeof result.assertSourcesCurrent !== 'function') throw new Error('QQ 回复尚未准备好记录确认结果。');
+    const assertReplyCurrent = () => { assertActive(); result.assertSourcesCurrent(); };
+    const sendReply = (reply, expressionIds = []) => sendQQ(context.config, context.target, reply, expressionIds, context.origin,
+      { signal, beforeSend: assertReplyCurrent });
     sending = true;
-    await deliverQQReply({ reply: result.reply, expressionIds: result.expressionIds || [], config: context.config, send, signal, assertActive,
+    await deliverQQReply({ reply: result.reply, expressionIds: result.expressionIds || [], config: context.config, send: sendReply, signal, assertActive: assertReplyCurrent,
       onConfirmed(endOffset, receipt) { confirmedReplyId = result.commitDeliveredReply(endOffset, receipt.expressionIds).id; } });
   } catch (error) {
     if (signal.aborted || isQQContextCanceled(error)) return;

@@ -62,10 +62,13 @@ export function createFeishuChat({ store, chat, transport, onError = () => {}, o
           conversationId: event.conversation.id, actorId: event.actor.id } } : {}) });
       check();
       if (typeof result?.reply !== 'string' || !result.reply.trim() || result.reply.length > 4000) throw new Error('FEISHU_REPLY_INVALID');
-      if (typeof result.commitDeliveredReply !== 'function') throw new Error('FEISHU_REPLY_NOT_PREPARED');
+      if (typeof result.commitDeliveredReply !== 'function' || typeof result.assertSourcesCurrent !== 'function') throw new Error('FEISHU_REPLY_NOT_PREPARED');
+      const checkReply = () => { check(); result.assertSourcesCurrent(); };
+      checkReply();
       if (!store.saveFeishuReply(item.key, result.reply)) throw new Error('FEISHU_MESSAGE_CANCELED');
-      check();
+      checkReply();
       if (!store.markFeishuSending(item.key)) throw new Error('FEISHU_MESSAGE_CANCELED');
+      checkReply();
       sending = true;
       const receipt = await transport.reply(event.reply, result.reply, { signal: taskController.signal, epoch: connection.epoch, recovered });
       if (receipt?.sent !== true || typeof receipt.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(receipt.messageId)) {
