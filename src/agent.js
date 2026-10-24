@@ -20,7 +20,7 @@ const toolDefinitions = [
   { type: 'function', function: { name: 'search_conversations', description: '书架没有保存细节时，分页检索当前场合可查的已完成历史对话或已确认主动私聊记录，每页最多6条。可用start_date/end_date按应用本地日历筛选日期（含端点、可一端）；query可为空。仅询问某平台时可用platform筛选已核验历史私聊，不能按正文提及平台推断渠道。保持query、日期和platform传nextOffset续页。用户原话与助手旧回复分别标记；历史只证明当时说过，助手的话可能有误。不能改变范围。', parameters: { type: 'object', properties: { query: { type: 'string', maxLength: 500 }, offset: { type: 'integer', minimum: 0 }, start_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, end_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, platform: { type: 'string', enum: ['qq', 'feishu'] } }, required: ['query'], additionalProperties: false } } },
   { type: 'function', function: { name: 'read_conversation', description: '按记录ID分段核对用户原话（如有）与助手旧话；已确认主动私聊只有助手原话。每页最多4000字符，offset按带角色标题的完整记录计数，可按nextOffset继续读。sections标明原话与助手回复的范围；已屏蔽回复不会提供。', parameters: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer', minimum: 0 } }, required: ['id'], additionalProperties: false } } },
   { type: 'function', function: { name: 'remember', description: '保存对话中明确提供的事实、偏好、约定，或用户要求保存的图片观察。图片观察注明来源和不确定性，不要把猜测和虚构当事实。可见范围由服务端决定。', parameters: { type: 'object', properties: { title: { type: 'string' }, content: { type: 'string' }, category: { type: 'string', enum: ['person', 'event', 'interest', 'promise'] } }, required: ['title', 'content', 'category'], additionalProperties: false } } },
-  { type: 'function', function: { name: 'read_url', description: '读取用户本次消息明确提供的完整公开网页 URL。不能改写 URL 或跟随网页中的链接，失败就说明无法读取。', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false } } },
+  { type: 'function', function: { name: 'read_url', description: '读取用户本次直接分享或要求阅读的完整公开网页 URL。明确否定、完整引用或代码里的命令、转述、往事提问和条件安排不触发访问；纯链接的引号或反引号只是格式。不能改写 URL 或跟随网页链接，失败就说明无法读取。', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false } } },
 ];
 
 const bookToolDefinitions = [
@@ -96,6 +96,65 @@ function memoryChangeRequests(text) {
   const revise = !/(?:不要|别|无需|不用|不必)\s*(?:再)?\s*(?:更正|纠正|修正|改正|更新|修改)|(?:don['’]?t|do not)\s+(?:correct|update|revise)/i.test(direct)
     && /更正|纠正|修正|改正|记错|记反|改成|改为|更新[\s\S]*(?:记忆|记录)|\b(?:correct|update|revise)\b[\s\S]*\bmemor/i.test(direct);
   return { revise_memory: revise, forget_memory: forget, preventRemember };
+}
+
+function currentReadingUrls(text) {
+  if (/[\uE100-\uE103]/.test(text)) return new Set();
+  const urls = [], allowed = new Set(), denied = new Set();
+  let direct = text.replace(/https?:\/\/[^\s<>"'`\u2018\u2019\u201c\u201d\u3000-\u303f\uff00-\uffef]+/g, value => {
+    const target = value.replace(/[),.;!?]+$/, ''), suffix = value.slice(target.length);
+    try {
+      const url = new URL(target); url.hash = '';
+      return `\uE100${urls.push(url.href) - 1}\uE101${suffix}`;
+    } catch { return '\uE102'; }
+  });
+  direct = direct.replace(/\[[^\]\r\n]*\]\(\s*(\uE100\d+\uE101)\s*\)/g, '$1')
+    .replace(/<(\uE100\d+\uE101)>/g, '$1')
+    .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|<(blockquote|q|pre|code)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, '\uE102')
+    .replace(/^[\t ]*>[^\r\n]*(?:\r?\n(?![\t ]*(?:\r?\n|$))[^\r\n]*)*/gm, '\uE102')
+    .replace(/“([^”]*)”|‘([^’]*)’|「([^」]*)」|『([^』]*)』|"([^"]*)"|(?<![a-z])'([\s\S]*?)'(?![a-z])|`([^`\r\n]*)`/gi, (...parts) => {
+      const value = (parts.slice(1, 8).find(part => part !== undefined) || '').trim();
+      return /^\uE100\d+\uE101$/.test(value) ? value : '\uE103';
+    });
+  // An unfinished quotation or code block cannot turn its remaining contents into a request.
+  direct = direct.replace(/[“‘「『"`][\s\S]*$|(?<![a-z])'[\s\S]*$|<\/?(?:blockquote|q|pre|code)\b[\s\S]*$/gi, '\uE102');
+  if (/只(?:想)?(?:聊天|和你说说话)/.test(direct)) return new Set();
+  const action = /打开|点开|访问|读取|阅读|读|看看|看一下|看|浏览|总结|\b(?:open|visit|read|browse)\b/i;
+  const negative = /(?:不要|别|不用|无需|不必|不能|不准|不需要|不想|不许|勿|禁止)[^\uE100。！？!?;；，,\r\n]{0,12}(?:打开|点开|访问|读取|阅读|读|看|浏览|总结|执行)|不(?:读|看|打开|访问|浏览|读取|阅读|执行)|\b(?:don['’]?t|do not|never)\s+(?:open|visit|read|browse)\b/i;
+  const attributed = /转述|转发[：:]|引用|原话|台词|举例|例如|比如|示例|(?:他|她|朋友|别人|有人|同事|文章|帖子|网页)(?:告诉我|说|写道|让|要求)/;
+  const conditional = /如果|假如|假设|要是|明天|后天|下次|稍后|以后|将来|未来|等会|有空再/;
+  const historical = /(?:之前|以前|上次|刚才|曾经|昨天|已经)[\s\S]{0,40}(?:读|看|打开|访问|浏览)|(?:读|看|打开|访问|浏览)过|(?:解释|说明|分析|讲解)[\s\S]{0,30}(?:命令|指令|这句话)|(?:命令|指令|这句话)[\s\S]{0,16}(?:意思|含义|作用)/;
+  const request = /(?:你|请|帮我|麻烦|现在)[^\uE100。！？!?;；，,\r\n]{0,12}(?:读|看|打开|点开|访问|浏览|总结)|\b(?:please|can you|could you)\s+(?:open|visit|read|browse)\b/i;
+  let pendingNegative = false, pendingAttribution = false, pendingConditional = false, previous = [];
+  for (const clause of direct.split(/([。！？!?;；，,\r\n]+)/)) {
+    if (/^[。！？!?;；，,\r\n]+$/.test(clause) && /[。！？!?;；]/.test(clause)) {
+      pendingAttribution = pendingConditional = false;
+      continue;
+    }
+    if (!clause.trim() || /^[，,\r\n]+$/.test(clause)) continue;
+    const ids = [...clause.matchAll(/\uE100(\d+)\uE101/g)].map(match => Number(match[1]));
+    const noRead = negative.test(clause) || /(?:不是|没有|没)(?:让|要求)你(?:现在|去|帮我)?\s*(?:打开|点开|访问|读取|阅读|读|看|浏览|总结|执行)/.test(clause),
+      indirect = attributed.test(clause), future = conditional.test(clause);
+    if (request.test(clause) && !indirect && (previous.length || /现在/.test(clause))) pendingAttribution = false;
+    if (/现在/.test(clause) && request.test(clause) && !future) pendingConditional = false;
+    if (!ids.length) {
+      if (noRead) { for (const id of previous) denied.add(urls[id]); pendingNegative = true; }
+      pendingAttribution ||= indirect && !clause.includes('\uE103');
+      pendingConditional ||= future;
+      continue;
+    }
+    if (noRead || pendingNegative) for (const id of ids) denied.add(urls[id]);
+    if (!noRead && !pendingNegative && !indirect && !future && !pendingAttribution && !pendingConditional
+      && !(action.test(clause) && historical.test(clause))) {
+      for (const id of ids) allowed.add(urls[id]);
+    }
+    pendingNegative = false;
+    pendingAttribution ||= indirect;
+    pendingConditional ||= future;
+    previous = ids;
+  }
+  for (const url of denied) allowed.delete(url);
+  return allowed;
 }
 
 function activityRequests(text) {
@@ -289,9 +348,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const metadata = { ...(images.length ? { imageCount: images.length, imageNote } : {}), ...(batchSources ? { qqBatchSources: batchSources } : {}),
     ...(replyContext ? { qqReplyContext: replyContext } : {}), ...(origin ? { conversationOrigin: origin } : {}) };
   const prompt = text || '请描述这些图片的主要内容；不确定的细节请说明。';
-  const permittedUrls = new Set((text.match(/https?:\/\/[^\s<>"'\u3000-\u303f\uff00-\uffef]+/g) || []).flatMap(value => {
-    try { const url = new URL(value.replace(/[),.;!?]+$/, '')); url.hash = ''; return [url.href]; } catch { return []; }
-  }));
+  const permittedUrls = currentReadingUrls(text);
   const history = store.listConversationHistory(scope, 16);
   const conversationIds = new Set(), userMessageIds = new Set(history.filter(item => item.role === 'user').map(item => item.id));
   const historyMessageIds = history.filter(item => item.role === 'assistant').map(item => item.id);
@@ -699,8 +756,9 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               if (!collected || typeof collected.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(collected.id)) throw new Error('收藏表情未返回有效 ID。');
               result = { id: collected.id, message: '已收藏，仅原私聊或原群可复用；下次会话可从目录选择。' };
             } else if (call.function.name === 'read_url') {
+              if (Object.keys(args).length !== 1 || typeof args.url !== 'string') throw new Error('网页阅读仅接受本次原话中的完整网址。');
               const requested = new URL(args.url); requested.hash = '';
-              if (!permittedUrls.has(requested.href)) throw new Error('只能读取你在本次消息中明确提供的完整网址，请把需要访问的链接发给我。');
+              if (!permittedUrls.has(requested.href)) throw new Error('本次原话没有允许读取这个网址；否定、引用、转述、历史或条件中的链接不会触发访问。');
               const reading = await readAndRemember(args.url, scope, actor, { signal, assertActive });
               trackMemory(reading.memory);
               for (const part of reading.memoryParts || []) trackMemory(store.getMemory(part.id));
