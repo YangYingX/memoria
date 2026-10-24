@@ -915,7 +915,7 @@ export function createStore(dbPath) {
         content.slice(Math.max(0, offset - 1), offset), content.slice(offset + 1200, offset + 1201));
       if (score > bestScore) { bestOffset = offset; bestScore = score; }
     }
-    return content.slice(bestOffset, bestOffset + 1200);
+    return { content: content.slice(bestOffset, bestOffset + 1200), offset: bestOffset };
   }
   function conversationState(permitted) {
     if (!permitted.length) return { messages: [], turns: [], blockedUsers: new Set(), hiddenAssistants: new Set(), replySources: new Map() };
@@ -1853,8 +1853,9 @@ export function createStore(dbPath) {
       const total = matches.length;
       const items = offset < total ? matches.slice(offset, offset + limit).map(turn => {
         const { qqBatchNotice, qqReplyContext, ...summary } = turn;
+        const user = conversationExcerpt(turn.user, tokens), assistant = conversationExcerpt(turn.assistant, tokens);
         return { ...summary, ...(qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}),
-          user: conversationExcerpt(turn.user, tokens), assistant: conversationExcerpt(turn.assistant, tokens),
+          user: user.content, assistant: assistant.content, userExcerptOffset: user.offset, assistantExcerptOffset: assistant.offset, userLength: turn.user.length,
           userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 };
       }) : [];
       return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null,
