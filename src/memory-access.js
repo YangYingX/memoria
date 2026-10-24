@@ -7,13 +7,15 @@ export function allowedScopes(scope) {
 export function companionShelfMemories(store, scope, actor, excludedIds = []) {
   const privateScope = (scope === 'owner' && actor === 'owner')
     || (typeof scope === 'string' && /^person:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope));
-  if (!privateScope || typeof actor !== 'string' || !actor.trim() || actor.length > 160) return [];
-  const excluded = new Set(excludedIds), counts = { person: 0, interest: 0 }, result = [];
+  const group = typeof scope === 'string' && /^group:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope);
+  if ((!privateScope && !group) || typeof actor !== 'string' || !actor.trim() || actor.length > 160) return [];
+  const excluded = new Set(excludedIds), counts = privateScope ? { person: 0, interest: 0, emotion: 0 } : { emotion: 0 }, result = [];
   for (const memory of store.listMemories({ scope })) {
     if (excluded.has(memory.id) || !Object.hasOwn(counts, memory.category) || counts[memory.category] >= 2) continue;
+    if (memory.category === 'emotion' && store.getEmotionMemoryEvidence(memory.id, [scope])?.actor !== actor) continue;
     result.push(memory);
     counts[memory.category]++;
-    if (result.length === 4) break;
+    if (result.length === (privateScope ? 6 : 2)) break;
   }
   return result;
 }
@@ -41,11 +43,14 @@ const conversationImages = source => source?.imageCount ? { imageCount: source.i
 export function withConversationSource(store, memory, scope) {
   const source = store.getMemorySource(memory.id, allowedScopes(scope));
   const parts = store.getReadingParts(memory.id, allowedScopes(scope));
+  const emotion = memory.category === 'emotion' ? store.getEmotionMemoryEvidence(memory.id, allowedScopes(scope)) : null;
   return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt,
     ...historicalConversationSource(store, memory, source),
     ...conversationImages(source),
     ...(source.qqBatchCount ? { qqBatchCount: source.qqBatchCount } : {}),
     ...(source.qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}) } } : {}),
+    ...(emotion ? { emotionExperience: { subject: 'self', emotion: emotion.emotion, label: emotion.label, recordedAt: emotion.recordedAt, conversationId: emotion.conversationId,
+      notice: '这是角色自己的过去心境，不是原话发言者的情绪、稳定性格或关系定论；可用conversationId核对该次完整对话。' } } : {}),
     ...(parts?.length ? { readingParts: parts } : {}) };
 }
 

@@ -68,7 +68,8 @@ const heyboxAccount = createHeyboxAccount({ dataDir, getExpectedAccountId: () =>
   catch { throw new Error('小黑盒专用环境配置无法读取，请核对本机配置后重新确认登录。'); }
 } });
 const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
-const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
+const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }),
+  onReplyDelivered: (scope, messageId) => moodJobs?.observeConversation(scope, messageId) });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '', ownerChatReserve: defaultOwnerChatReserve, dailyRequestLimit: defaultModelDailyRequestLimit },

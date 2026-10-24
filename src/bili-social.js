@@ -1,7 +1,7 @@
-import { createMemoryAccess, memoryPage, withConversationSource } from './memory-access.js';
+import { createMemoryAccess, memoryPage, withConversationSource, companionShelfMemories } from './memory-access.js';
 
 // Platform notices stay in Memoria; the optional plugin runtime only reads and submits actions.
-export function createBiliSocialDiscussion({ store, runtime, getCredentials }) {
+export function createBiliSocialDiscussion({ store, runtime, getCredentials, onReplyDelivered = () => {} }) {
   let recovered = false;
   return async ({ signal }) => {
     signal?.throwIfAborted();
@@ -60,6 +60,9 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials }) {
         trackMemory(memory.id, memory);
         return [memory];
       });
+      for (const memory of companionShelfMemories(store, record.scope, record.actor, memories.map(item => item.id))) {
+        trackMemory(memory.id, memory); memories.push(memory);
+      }
       const memoryContext = memories.map(memory => {
         const page = withConversationSource(store, memoryPage(memory, 0, 1800), record.scope);
         trackMemoryResult(page);
@@ -120,8 +123,9 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials }) {
           if (state !== 'sent' || !text) return true;
           if (saved?.state !== 'sent' || signal?.aborted || !sourcesCurrent()) return false;
           try {
-            store.addMessage({ scope: record.scope, role: 'assistant', actor: 'agent', content: text,
+            const assistant = store.addMessage({ scope: record.scope, role: 'assistant', actor: 'agent', content: text,
               metadata: { ...assistantMetadata(), replyId } });
+            try { onReplyDelivered(record.scope, assistant.id); } catch { /* Sampling must not discard a confirmed reply. */ }
             store.saveMemory({ title: `评论区交流：${record.notice.title || record.notice.content.slice(0, 40)}`.slice(0, 200), scope: record.scope, category: 'event',
               content: `【B站公开评论；已回复并取得平台编号，不代表已通过所有审核】\n对方写道：${record.notice.content}\n来源：${url}`,
               sourceType: 'conversation', sourceRef: record.sourceEventId });

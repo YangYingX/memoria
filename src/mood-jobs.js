@@ -72,19 +72,19 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
 
   function conversation(scope, replyId, time) {
     if (typeof scope !== 'string' || !scopePattern.test(scope)) return null;
-    const items = store.listConversationHistory(scope, 40);
-    const reply = replyId !== undefined ? items.find(item => item.id === replyId) : items.findLast(item => item.role === 'assistant');
+    const evidence = store.getConversationMoodEvidence(scope, replyId);
+    if (!evidence) return null;
+    const { user, reply } = evidence;
     if (!reply || reply.role !== 'assistant' || reply.actor !== 'agent' || reply.scope !== scope || reply.metadata?.mode !== 'live'
       || typeof reply.id !== 'string' || typeof reply.metadata.replyTo !== 'string' || !fresh(reply.createdAt, time)
       || typeof reply.content !== 'string' || !reply.content.trim()) return null;
-    const user = items.find(item => item.id === reply.metadata.replyTo);
     if (!user || user.role !== 'user' || user.scope !== scope || typeof user.actor !== 'string' || !user.actor
       || ![undefined, 'live'].includes(user.metadata?.mode) || !fresh(user.createdAt, time)
-      || Date.parse(user.createdAt) > Date.parse(reply.createdAt) || items.indexOf(user) >= items.indexOf(reply)
+      || Date.parse(user.createdAt) > Date.parse(reply.createdAt)
       || typeof user.content !== 'string' || !user.content.trim()) return null;
     return { kind: 'conversation', scope, at: reply.createdAt, key: key(`conversation:${scope}:${reply.id}`),
       text: conversationText(user), reply: reply.content.slice(0, 1500),
-      fingerprint: JSON.stringify([user, reply]), reference: { scope, replyId: reply.id, createdAt: reply.createdAt } };
+      fingerprint: evidence.fingerprint, reference: { scope, replyId: reply.id, createdAt: reply.createdAt } };
   }
   function observeConversation(scope, replyId) {
     if (stopped) return;
@@ -172,7 +172,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
       const proposal = validateMoodDelta(await evaluate({ scope: selected.scope, kind: selected.kind, text: selected.text,
         ...(selected.reply === undefined ? {} : { reply: selected.reply }), mood: moodSnapshot(store, time), signal: activeController.signal, background }));
       if (!valid()) return finish('cancelled');
-      const result = applyMoodDelta(store, proposal, { now: now(), expectedState });
+      const result = selected.kind === 'conversation' ? store.applyConversationMood({ scope: selected.scope, replyId: selected.reference.replyId,
+        expectedSource: selected.fingerprint, expectedState, proposal, now: now() }) : applyMoodDelta(store, proposal, { now: now(), expectedState });
       return finish(result.applied ? 'success' : result.unchanged ? 'unchanged' : 'low_confidence', result, proposal);
     } catch {
       if (stopped) return { ...status(), busy: false, skipped: 'stopped' };
