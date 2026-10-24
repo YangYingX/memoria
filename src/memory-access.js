@@ -93,6 +93,34 @@ function conversationHeaders(turn) {
 }
 
 // The caller supplies verified Memoria identity. A DSH session or tool argument cannot widen it.
+function emotionHistoryPage(store, scope, actor, args, excludeMessageId) {
+  if (typeof args.query !== 'string' || args.query.length > 500 || args.query.includes('\0')) throw new Error('心境查询须为最多500字符的文字，可留空。');
+  const offset = args.offset === undefined ? 0 : args.offset;
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('心境记录位置无效。');
+  for (const key of ['start_date', 'end_date']) if (Object.hasOwn(args, key)) {
+    const date = args[key], time = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? Date.parse(date + 'T00:00:00.000Z') : NaN;
+    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== date) throw new Error('心境日期须为有效的YYYY-MM-DD。');
+  }
+  if (args.start_date !== undefined && args.end_date !== undefined && args.start_date > args.end_date) throw new Error('心境起始日期不能晚于结束日期。');
+  const calendar = conversationClock(store), query = args.query.trim().normalize('NFKC').toLocaleLowerCase('zh-CN'), matches = [];
+  // Filter the caller's original scope and participant before exposing any history.
+  if (scope !== 'public') for (const memory of store.listMemories({ scope })) {
+    if (memory.category !== 'emotion') continue;
+    const proof = store.getEmotionMemoryEvidence(memory.id, [scope]);
+    if (!proof || proof.actor !== actor || proof.conversationId === excludeMessageId || proof.contextConversationIds?.includes(excludeMessageId)) continue;
+    const day = conversationClock(store, Date.parse(proof.recordedAt)).date;
+    if (args.start_date !== undefined && day < args.start_date || args.end_date !== undefined && day > args.end_date) continue;
+    if (query && proof.emotion !== query && !(proof.label + '\n' + memory.title + '\n' + memory.content).normalize('NFKC').toLocaleLowerCase('zh-CN').includes(query)) continue;
+    matches.push({ id: memory.id, subject: 'self', category: 'emotion', recordedAt: proof.recordedAt, date: day,
+      emotion: proof.emotion, label: proof.label, conversationId: proof.conversationId,
+      ...(proof.contextConversationIds ? { contextConversationIds: proof.contextConversationIds } : {}) });
+  }
+  matches.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || a.id.localeCompare(b.id));
+  const items = matches.slice(offset, offset + 6);
+  return { items, offset, nextOffset: offset + items.length < matches.length ? offset + items.length : null,
+    timeZone: calendar.timeZone, notice: '这些是角色自己与当前发言者在当前场合的已记录历史心境，不是当前状态、对方的情绪、关系结论或完整感受史。记录日期按应用日历解释。索引不含原话；解释缘由或引述时，用read_conversation核对conversationId和必要的前序索引。没有条目不代表从未有过感受。' };
+}
+
 export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' }) {
   if (typeof scope !== 'string' || !/^(owner|public|(?:group|person):[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127})$/.test(scope)
     || typeof actor !== 'string' || !actor.trim() || actor.length > 160 || (scope === 'owner' && actor !== 'owner')) {
@@ -102,12 +130,13 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
   if (typeof excludeMessageId !== 'string' || (excludeMessageId && !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(excludeMessageId))) throw new Error('当前消息标识无效。');
   return Object.freeze({
     execute(name, args) {
-      const definitions = { search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
+      const definitions = { search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
         search_conversations: ['query', 'offset', 'start_date', 'end_date', 'platform'], read_conversation: ['id', 'offset'] };
       const fields = typeof name === 'string' && Object.hasOwn(definitions, name) ? definitions[name] : null;
       if (!fields || !args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !fields.includes(key))) {
         throw new Error('记忆工具或参数无效，不能更改身份、范围或会话。');
       }
+      if (name === 'search_emotions') return emotionHistoryPage(store, scope, actor, args, excludeMessageId);
       if (name === 'search_memory' || name === 'search_conversations') {
         if (typeof args.query !== 'string' || args.query.length > 500) throw new Error('查询无效。');
         if (name === 'search_conversations') {

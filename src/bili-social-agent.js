@@ -1,6 +1,7 @@
 import { requestCompletion } from './model.js';
 
 const definitions = [
+  { name: 'search_emotions', key: 'query', description: '分页回想你自己与当前评论者在本线程的已记录心境，每页最多6条，按记录时间从近到远。query可为空，可用start_date/end_date按应用本地日历筛记录日期、含端点。保持查询与日期按nextOffset续页。索引不是原话或当前状态；解释缘由用read_conversation核对。' },
   { name: 'search_memory', key: 'query', description: '分页搜索本次公开线程及公开书架，每页最多6条；保持query并用nextOffset继续翻查。' },
   { name: 'read_memory', key: 'id', description: '按ID分段核对可见记忆正文，每页最多4000字；按nextOffset继续读取。' },
   { name: 'read_memory_source', key: 'id', description: '按记忆ID分段核对对话原话及发言者，每页最多4000字。来源发言者不一定是内容主体。' },
@@ -11,6 +12,7 @@ const tools = definitions.map(({ name, key, description }) => ({ type: 'function
   name, description, parameters: { type: 'object', properties: {
     [key]: key === 'query' ? { type: 'string', maxLength: 500 } : { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$' },
     offset: { type: 'integer', minimum: 0 },
+    ...(name === 'search_emotions' ? { start_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, end_date: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' } } : {}),
   }, required: [key], additionalProperties: false },
 } }));
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -20,16 +22,22 @@ class BiliDecisionError extends Error {}
 const fail = message => { throw new BiliDecisionError(message); };
 
 function checkedArgs(name, value) {
-  const definition = definitions.find(item => item.name === name);
+  const definition = definitions.find(item => item.name === name), dates = name === 'search_emotions' ? ['start_date', 'end_date'] : [];
   if (!definition || !record(value) || !Object.hasOwn(value, definition.key)
-    || Object.keys(value).some(key => ![definition.key, 'offset'].includes(key))) fail('B站回复模型的记忆工具参数无效，本次不执行。');
+    || Object.keys(value).some(key => ![definition.key, 'offset', ...dates].includes(key))) fail('B站回复模型的记忆工具参数无效，本次不执行。');
   const field = value[definition.key];
   if (typeof field !== 'string' || field.includes('\0') || (definition.key === 'query' ? field.length > 500
     : !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(field))
     || (Object.hasOwn(value, 'offset') && (!Number.isSafeInteger(value.offset) || value.offset < 0))) {
     fail('B站回复模型的记忆工具参数无效，本次不执行。');
   }
-  return { [definition.key]: field, ...(Object.hasOwn(value, 'offset') ? { offset: value.offset } : {}) };
+  for (const key of dates) if (Object.hasOwn(value, key)) {
+    const date = value[key], time = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? Date.parse(date + 'T00:00:00.000Z') : NaN;
+    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== date) fail('B站心境查询日期无效。');
+  }
+  if (value.start_date !== undefined && value.end_date !== undefined && value.start_date > value.end_date) fail('B站心境查询日期范围无效。');
+  return { [definition.key]: field, ...(Object.hasOwn(value, 'offset') ? { offset: value.offset } : {}),
+    ...Object.fromEntries(dates.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) };
 }
 
 // The facade is created by the parent for one verified public thread; the model cannot replace it.
@@ -52,6 +60,7 @@ export async function generateBiliSocialDecision({ store, instructions, context,
     ];
     messages[0].content += '\nrecentMessages只含少量近况，完整的已完成旧交流另有可检索档案。对方询问上次、之前或还记得的内容，而当前资料未提供答案时，先用话题关键词调用search_conversations，再按候选ID调用read_conversation核对用户原话，可用userReadOffset直接定位命中段落；检索之后再决定是否回应或说明资料不足。不要仅凭近期消息没有答案就断定不记得或直接安静。对方明确结束话题或说不用回复时，可以直接返回空actions，无需额外检索。';
     messages[0].content += '\n本轮评论者由biliDiscussion.comment.speaker标识。recentMessages.isCurrentSpeaker由服务端核对账号后给出，true才是当前评论者的旧发言；false是其他人或助手的话。recentMessages的speaker及旧对话的actor也可用于核对。相同昵称可能是不同人，同一标识改昵称仍是原发言者；按标识区分各人的经历和偏好，不把别人的话归给当前评论者。speaker只供内部核对，回复中不展示这些标识，也不据此授予私聊权限。缺少可靠发言者标识的旧资料，不推断属于当前评论者。围绕当前评论自然回应，不介绍内部区分流程。';
+    messages[0].content += '\n回想自己的心境变化时，可search_emotions分页检索与当前评论者在本线程的已记录心境，再按conversationId核对原话和自己的旧回复；记录日期不是当前心情，原话发言者的情绪不等于你自己的感受。索引不是原话或完整感受史，不把记录次数当作情绪频率，不把其他人的相处经历归给当前评论者。';
     const ids = new Set();
     let toolCalls = 0;
     for (let round = 0; round < 4; round++) {

@@ -94,14 +94,14 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         current,
         execute(name, args) {
           if (!current()) invalidSource();
-          const fields = { search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
+          const fields = { search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
             search_conversations: ['query', 'offset'], read_conversation: ['id', 'offset'] };
           if (typeof name !== 'string' || !Object.hasOwn(fields, name) || !args || typeof args !== 'object' || Array.isArray(args)
             || Object.keys(args).some(key => !fields[name].includes(key))) throw new Error('B站记忆工具或参数无效，不能更改范围或回复目标。');
           const result = memoryAccess.execute(name, args);
           if (name === 'search_conversations' || name === 'read_conversation') {
             for (const item of name === 'search_conversations' ? result.items : [result]) trackConversation(item);
-          } else if (name === 'search_memory') {
+          } else if (name === 'search_memory' || name === 'search_emotions') {
             for (const item of result.items) trackMemoryResult(item);
           } else trackMemoryResult(result);
           assistantMetadata();

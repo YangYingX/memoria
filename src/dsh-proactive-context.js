@@ -182,7 +182,7 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
     get memoryVersions() { return [...memories].map(([memoryId, value]) => ({ memoryId, signature: JSON.parse(value).signature })); },
     track(name, args, result) {
       if (result.error) return;
-      if (name === 'search_memory') for (const item of result.items) rememberMemory(item.id);
+      if (name === 'search_memory' || name === 'search_emotions') for (const item of result.items) rememberMemory(item.id);
       else if (name === 'search_conversations' || name === 'read_conversation') for (const item of name === 'search_conversations' ? result.items : [result]) {
         remember(conversations, item.id, conversation(item.id));
         (item.assistantHidden === true ? userMessageIds : conversationIds).add(item.id);

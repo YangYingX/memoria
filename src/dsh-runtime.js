@@ -12,7 +12,7 @@ import { expressionSearchItems, expressionSearchQuery, expressionSearchResult } 
 import { readBiliCredentials } from './bili-credentials.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
-const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation'];
+const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation', 'search_emotions'];
 export const defaultDshReadingSettings = { dailyReadLimit: 6 };
 
 class DshTaskError extends Error {}
@@ -217,6 +217,12 @@ export function createDshRuntime({ store, dataDir }) {
       const feiyu = judging && conversationMood && settings.moodPlugin === 'dsh-feiyu-mood';
       if (!settings.enabled) throw new Error('尚未启用 DSH 插件运行层。');
       signal?.throwIfAborted();
+      if (memoryTools.includes(name)) {
+        assertActive?.();
+        const result = memory.execute(name, args);
+        signal?.throwIfAborted(); assertActive?.();
+        return structuredClone(result);
+      }
       const taskController = new AbortController();
       const modelAccess = createDshModelAccess({ store, signal: taskController.signal, purpose: judging ? 'mood' : 'reading-note' });
       const memoryAgent = recalling ? createMemoryAgentAccess({ store, scope, actor, query: args.query, signal: taskController.signal, excludeMessageId,
