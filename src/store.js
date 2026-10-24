@@ -1315,7 +1315,7 @@ export function createStore(dbPath) {
       if (Reflect.ownKeys(input).length !== 3 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings'].includes(key))) invalid('陪伴偏好更新参数无效。');
       let patch;
       try { patch = normalizeCompanionPreferencePatch(input.patch); }
-      catch { invalid('陪伴偏好仅允许有效的主动开关、表达欲、每日条数和冷却时间。'); }
+      catch { invalid('陪伴偏好仅允许有效的主动开关、表达欲、每日条数、冷却时间和免打扰时长。'); }
       const sourceEventId = identifier(input.sourceEventId, '陪伴偏好来源 ID');
       const expected = jsonValue(record(input.expectedSettings, '原陪伴设置'), '原陪伴设置', 50000);
       return transaction(() => {
@@ -1328,7 +1328,9 @@ export function createStore(dbPath) {
         if (get("SELECT 1 FROM events WHERE type = 'companion_preference' AND source_ref = ?", sourceEventId)
           || !api.claimDelivery(`companion-preference:${sourceEventId}`)) invalid('这条聊天已调整过陪伴偏好，请用新的消息确认。');
         let before, after;
-        const next = { ...current, ...patch };
+        const { quietMinutes, ...preferences } = patch;
+        const next = { ...current, ...preferences, ...(quietMinutes === undefined ? {}
+          : { quietUntil: quietMinutes === 0 ? '' : new Date(Date.parse(now) + quietMinutes * 60000).toISOString() }) };
         try { before = companionPreferenceValues(current); after = companionPreferenceValues(next); }
         catch { invalid('当前主动私聊设置无效，请先在后台修复。'); }
         api.setSetting('proactive', next);

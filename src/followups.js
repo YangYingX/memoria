@@ -1,3 +1,5 @@
+import { normalizeProactiveSettings } from './proactive.js';
+
 export function followupView(store, row) {
   if (!row) return null;
   const memory = store.getMemory(row.memoryId);
@@ -8,10 +10,11 @@ export function followupView(store, row) {
 export function createFollowupActions({ store, getRecipient, cancel, signal, assertActive, clock = Date.now }) {
   const check = () => { signal?.throwIfAborted(); assertActive?.(); };
   function status() {
-    const config = store.getSetting('proactive'), current = getRecipient();
+    const config = normalizeProactiveSettings({}, store.getSetting('proactive', {})), current = getRecipient();
+    const time = Number(clock()), quiet = Boolean(config.quietUntil && time < Date.parse(config.quietUntil));
     return { enabled: config.enabled === true && Boolean(current), timeZone: config.timeZone,
-      now: new Date(clock()).toISOString(), earliestDelaySeconds: 60, maxDays: 366, expiresAfterHours: 24,
-      ready: Boolean(config.desire > 0 && config.dailyLimit > 0 && current && store.getSetting('model')?.apiKey),
+      now: new Date(time).toISOString(), quietUntil: config.quietUntil, quiet, earliestDelaySeconds: 60, maxDays: 366, expiresAfterHours: 24,
+      ready: Boolean(!quiet && config.desire > 0 && config.dailyLimit > 0 && current && store.getSetting('model')?.apiKey),
       startHour: config.startHour, endHour: config.endHour, idleMinutes: config.idleMinutes, cooldownMinutes: config.cooldownMinutes };
   }
   const result = row => ({ ok: Boolean(row), followup: followupView(store, row), ...status() });
