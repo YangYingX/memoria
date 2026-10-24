@@ -11,13 +11,14 @@ export function companionShelfMemories(store, scope, actor, excludedIds = []) {
     || (typeof scope === 'string' && /^person:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope));
   const group = typeof scope === 'string' && /^group:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope);
   if ((!privateScope && !group) || typeof actor !== 'string' || !actor.trim() || actor.length > 160) return [];
-  const excluded = new Set(excludedIds), counts = privateScope ? { person: 0, interest: 0, emotion: 0 } : { emotion: 0 }, result = [];
+  const excluded = new Set(excludedIds), counts = privateScope ? { person: 0, interest: 0, emotion: 0, 'self-view': 0 } : { emotion: 0 }, result = [];
   for (const memory of store.listMemories({ scope })) {
     if (excluded.has(memory.id) || !Object.hasOwn(counts, memory.category) || counts[memory.category] >= 2) continue;
     if (memory.category === 'emotion' && store.getEmotionMemoryEvidence(memory.id, [scope])?.actor !== actor) continue;
+    if (memory.category === 'self-view' && !store.getSelfViewMemoryEvidence(memory.id, [scope])) continue;
     result.push(memory);
     counts[memory.category]++;
-    if (result.length === (privateScope ? 6 : 2)) break;
+    if (result.length === (privateScope ? 8 : 2)) break;
   }
   return result;
 }
@@ -45,6 +46,12 @@ const conversationImages = source => source?.imageCount ? { imageCount: source.i
 export function withConversationSource(store, memory, scope) {
   const source = store.getMemorySource(memory.id, allowedScopes(scope));
   const parts = store.getReadingParts(memory.id, allowedScopes(scope));
+  const selfView = memory.category === 'self-view' ? store.getSelfViewMemoryEvidence(memory.id, allowedScopes(scope)) : null;
+  if (memory.category === 'self-view' && !selfView) {
+    const revisions = store.getMemoryVersionEvidence(memory.id, allowedScopes(scope)) ? store.listRevisions(memory.id) : [];
+    return revisions.length ? { ...memory, assistantExpression: { author: 'revision', notice: '当前正文已被修订，不是核验过的助手旧原话；以当前有效修订为准，不从旧对话恢复原内容，也不直接改写人格。' } }
+      : { ...memory, title: '旧表达来源已失效', content: '这条旧表达目前无法核对，不能据此延续旧观点或重建原文。', sourceInvalid: true };
+  }
   const emotion = memory.category === 'emotion' ? store.getEmotionMemoryEvidence(memory.id, allowedScopes(scope)) : null;
   return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt,
     ...historicalConversationSource(store, memory, source),
@@ -54,6 +61,8 @@ export function withConversationSource(store, memory, scope) {
     ...(emotion ? { emotionExperience: { subject: 'self', emotion: emotion.emotion, label: emotion.label, recordedAt: emotion.recordedAt, conversationId: emotion.conversationId,
       ...(emotion.contextConversationIds ? { contextConversationIds: emotion.contextConversationIds } : {}),
       notice: '这是角色自己的过去心境，不是原话发言者的情绪、稳定性格或关系定论；可用conversationId核对该次完整对话。' } } : {}),
+    ...(selfView ? { assistantExpression: { author: 'assistant', conversationId: selfView.conversationId, replyAt: selfView.replyAt,
+      notice: '这是同轮助手的旧表达，不是原话发言者的偏好；表达可能是转述或扮演，需要时read_conversation核对主体与后续更正，不等于当前观点或永久人格。' } } : {}),
     ...(parts?.length ? { readingParts: parts } : {}) };
 }
 

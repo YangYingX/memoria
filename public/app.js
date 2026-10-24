@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const labels = { chat: '对话实验室', memories: '记忆书架', reading: '网页阅读', books: '书房', expressions: '表情库', identity: '身份与备份', settings: '人格与设置' };
-const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'reading-note': '读后思考', 'book-note': '读书笔记', promise: '约定' };
+const categories = { event: '共同经历', person: '人物', interest: '兴趣', reading: '阅读', 'reading-note': '读后思考', 'book-note': '读书笔记', 'self-view': '自己的旧表达', promise: '约定' };
 const scopes = { owner: '仅创建人', public: '公开记忆', 'group:demo': '演练群聊' };
 const proactiveOutcomes = { quiet: '这次保持安静', decision: '已考虑本次话题', attempt: '已尝试，等待确认', pending: '等待平台确认', success: '已确认发送', unknown: '发送结果未确认', error: '未能完成', cancelled: '已取消', busy: '等空闲时再聊', limit: '今日额度已用完', deciding: '正在考虑开口', missed: '错过的机会已跳过', unavailable: '原聊天渠道暂不可用' };
 const followupStatuses = { pending: '待跟进', paused: '已暂停，需在聊天中恢复', deciding: '正在判断是否关心', attempted: '已尝试发送，等待确认', sent: '已确认发送', unknown: '发送结果未确认，不重发', cancelled: '已取消', expired: '已结束，不再跟进', invalidated: '来源或账号已失效' };

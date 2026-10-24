@@ -128,6 +128,8 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
   function rememberMemory(id) {
     const value = memory(id);
     remember(memories, id, value);
+    const selfView = store.getSelfViewMemoryEvidence(id, ['owner', 'public']);
+    if (selfView) { remember(conversations, selfView.conversationId, conversation(selfView.conversationId)); conversationIds.add(selfView.conversationId); }
     const parts = value.readingEvidence?.parts || [];
     const partIds = new Set([...(value.parts || []).map(part => part.id), ...[...parts, ...parts.flatMap(item => item.parts || [])].map(part => part.memory?.id)]);
     for (const partId of partIds) if (validReference(partId)) remember(memories, partId, memory(partId));
