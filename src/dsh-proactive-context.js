@@ -85,7 +85,7 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
   const conversationIds = new Set(), userMessageIds = new Set([...(messageId ? [messageId] : []), ...history.filter(item => item.role === 'user').map(item => item.id)]);
   const historyMessageIds = history.filter(item => item.role === 'assistant').map(item => item.id);
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
-  const memories = new Map(), conversations = new Map(), memoryIds = new Set();
+  const memories = new Map(), conversations = new Map(), memoryIds = new Set(), ownExpressionVersions = new Map();
   const forbiddenIds = new Set([...(messageId ? [messageId] : []), ...history.map(item => item.id), ...userMessageIds]);
   if (agendaMode) for (const id of [agendaId, originalEvidence.memory.id, originalEvidence.source.id, originalEvidence.followup.recipientAccountId]) forbiddenIds.add(id);
   if (memoryMode) for (const id of [memoryId, originalTheme.source.eventId]) forbiddenIds.add(id);
@@ -156,6 +156,7 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
       return !invalidated && emotionContext.sourcesCurrent() && (memoryMode ? validTheme(currentTheme, Date.now()) : fresh(currentSeed, Date.now()))
         && JSON.stringify({ seed: currentSeed, history: store.listConversationHistory('owner', 6), persona: store.getSetting('persona', {}), moodState: store.getSetting('moodState', null),
           ...(agendaMode ? { evidence: agendaEvidenceForSnapshot(evidence()) } : {}), ...(memoryMode ? { theme: currentTheme } : {}) }) === initial
+        && [...ownExpressionVersions].every(([id,signature])=>store.getOwnExpressionEvidence(id)?.signature===signature)
         && [...memories].every(([id, value]) => JSON.stringify(memory(id)) === value)
         && [...conversations].every(([id, value]) => JSON.stringify(conversation(id)) === value);
     } catch { return false; }
@@ -188,10 +189,19 @@ export function createDshProactiveContext({ store, messageId, agendaId, memoryId
       recentMessages: proactiveRecentMessages(history, originReader) },
     get conversationIds() { return [...conversationIds]; }, get userMessageIds() { return [...userMessageIds]; },
     historyMessageIds, get memoryIds() { return [...memoryIds]; },
+    get ownExpressionVersions() { return [...ownExpressionVersions].map(([expressionId,signature])=>({expressionId,signature})); },
     get memoryVersions() { return [...memories].map(([memoryId, value]) => ({ memoryId, signature: JSON.parse(value).signature })); },
     track(name, args, result) {
       if (result.error) return;
-      if (name === 'search_memory' || name === 'search_emotions') for (const item of result.items) rememberMemory(item.id);
+      if (name === 'search_own_expressions' || name === 'read_own_expression') {
+        for (const item of name === 'search_own_expressions' ? result.items : [result]) {
+          const evidence=store.getOwnExpressionEvidence(item.id);
+          if (!evidence || ownExpressionVersions.has(item.id) && ownExpressionVersions.get(item.id)!==evidence.signature) throw new Error('自己的表达来源已变化。');
+          if (ownExpressionVersions.size>=100 && !ownExpressionVersions.has(item.id)) throw new Error('自己的表达来源超过保存上限。');
+          ownExpressionVersions.set(item.id,evidence.signature);forbiddenIds.add(item.id);
+        }
+      }
+      else if (name === 'search_memory' || name === 'search_emotions') for (const item of result.items) rememberMemory(item.id);
       else if (name === 'search_conversations' || name === 'read_conversation') for (const item of name === 'search_conversations' ? result.items : [result]) {
         remember(conversations, item.id, conversation(item.id));
         (item.assistantHidden === true ? userMessageIds : conversationIds).add(item.id);

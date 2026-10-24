@@ -21,7 +21,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
     try {
       const scopes = [record.scope, 'public'];
       const history = store.listConversationHistory(record.scope, 6).filter(item => item.id !== record.messageId);
-      const memoryVersions = new Map(), conversations = new Map();
+      const memoryVersions = new Map(), conversations = new Map(), ownExpressionVersions = new Map();
       const conversationIds = new Set(), userMessageIds = new Set([record.messageId, ...history.filter(item => item.role === 'user').map(item => item.id)]);
       const historyMessageIds = new Set(history.filter(item => item.role === 'assistant').map(item => item.id));
       let invalidated = false;
@@ -32,10 +32,16 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
       function assistantMetadata() {
         const result = { mode: 'live', platform: 'bilibili', replyTo: record.messageId, sourceNoticeKey: record.key,
           userMessageIds: [...userMessageIds], memoryIds: [...memoryVersions.keys()], conversationIds: [...conversationIds],
+          ...(ownExpressionVersions.size ? { ownExpressionVersions: [...ownExpressionVersions].map(([expressionId,signature])=>({expressionId,signature})) } : {}),
           memoryVersions: [...memoryVersions].map(([memoryId, signature]) => ({ memoryId, signature })), historyMessageIds: [...historyMessageIds] };
-        if (userMessageIds.size + memoryVersions.size + conversationIds.size + historyMessageIds.size > 100
+        if (userMessageIds.size + memoryVersions.size + conversationIds.size + historyMessageIds.size + ownExpressionVersions.size > 100
           || JSON.stringify({ ...result, replyId: '9'.repeat(20) }).length > 16000) invalidSource();
         return result;
+      }
+      function trackOwnExpression(id) {
+        const evidence=store.getOwnExpressionEvidence(id);
+        if (!evidence || ownExpressionVersions.has(id) && ownExpressionVersions.get(id)!==evidence.signature) invalidSource();
+        ownExpressionVersions.set(id,evidence.signature);
       }
       function trackMemory(id, expected) {
         const evidence = store.getMemoryVersionEvidence(id, scopes);
@@ -81,7 +87,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
       function sourcesCurrent() {
         try {
           const current = store.getBiliNotice(record.key);
-          if (invalidated || !emotionContext.sourcesCurrent() || !selfIndex.sourcesCurrent() || !current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)
+          if (invalidated || ![...ownExpressionVersions].every(([id,signature])=>store.getOwnExpressionEvidence(id)?.signature===signature) || !emotionContext.sourcesCurrent() || !selfIndex.sourcesCurrent() || !current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)
             || ![...conversations].every(([id, snapshot]) => JSON.stringify(store.getConversation(id, scopes, record.messageId)) === snapshot)) return false;
           // Only our own delivery state may change while the request is in flight.
           const original = { ...current, state: record.state, updatedAt: record.updatedAt };
@@ -100,12 +106,14 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         current,
         execute(name, args) {
           if (!current()) invalidSource();
-          const fields = { search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
+          const fields = { search_own_expressions: ['query','offset','start_date','end_date'], read_own_expression: ['id','offset'], search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
             search_conversations: ['query', 'offset', 'role'], read_conversation: ['id', 'offset'] };
           if (typeof name !== 'string' || !Object.hasOwn(fields, name) || !args || typeof args !== 'object' || Array.isArray(args)
             || Object.keys(args).some(key => !fields[name].includes(key))) throw new Error('B站记忆工具或参数无效，不能更改范围或回复目标。');
           const result = memoryAccess.execute(name, args);
-          if (name === 'search_conversations' || name === 'read_conversation') {
+          if (name === 'search_own_expressions' || name === 'read_own_expression') {
+            for (const item of name === 'search_own_expressions' ? result.items : [result]) trackOwnExpression(item.id);
+          } else if (name === 'search_conversations' || name === 'read_conversation') {
             for (const item of name === 'search_conversations' ? result.items : [result]) trackConversation(item);
           } else if (name === 'search_memory' || name === 'search_emotions') {
             for (const item of result.items) trackMemoryResult(item);

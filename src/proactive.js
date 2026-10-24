@@ -173,6 +173,11 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       || Object.keys(item).length !== 2 || !Object.hasOwn(item, 'memoryId') || !Object.hasOwn(item, 'signature')
       || !references.memoryIds.includes(item.memoryId) || typeof item.signature !== 'string' || !/^[a-f0-9]{64}$/.test(item.signature))
       || new Set(versions.map(item => item.memoryId)).size !== versions.length) throw new Error('主动拟聊记忆版本索引无效。');
+    const own = decision.ownExpressionVersions || [];
+    if (!Array.isArray(own) || count + own.length > 100 || new Set(own.map(item=>item?.expressionId)).size !== own.length
+      || own.some(item=>!item || Object.keys(item).length!==2 || typeof item.expressionId!=='string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(item.expressionId)
+        || typeof item.signature!=='string' || !/^[a-f0-9]{64}$/.test(item.signature))) throw new Error('自己的表达来源版本无效。');
+    references.ownExpressionVersions=own.map(({expressionId,signature})=>({expressionId,signature}));
     references.memoryVersions = versions.map(({ memoryId, signature }) => ({ memoryId, signature }));
     return references;
   }
@@ -299,7 +304,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     try {
       for (const id of emotionContext.memoryIds) captureMemory(store.getMemory(id));
       let decision, references = { memoryIds: emotionContext.memoryIds, memoryVersions: emotionContext.memoryIds.map(memoryId => ({ memoryId, signature: memoryVersions.get(memoryId) })),
-        conversationIds: emotionContext.conversationIds, historyMessageIds: [], userMessageIds: [] };
+        conversationIds: emotionContext.conversationIds, historyMessageIds: [], userMessageIds: [], ownExpressionVersions: [] };
       let impulse;
       check();
       const readiness = new Map();
@@ -422,6 +427,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       const recordedVersions = memoryIds.map(memoryId => ({ memoryId, signature: memoryVersions.get(memoryId) }));
       if (recordedVersions.some(item => !item.signature)) throw new Error('主动拟聊缺少实际读取的记忆版本。');
       const assistantMetadata = { mode: 'live', proactive: true, kind: selected.kind, memoryIds, memoryVersions: recordedVersions,
+        ...(references.ownExpressionVersions.length ? { ownExpressionVersions: references.ownExpressionVersions } : {}),
         conversationIds, userMessageIds, historyMessageIds, sourceKey: selected.sourceKey, platform: recipient.platform || 'qq' };
       if (JSON.stringify({ ...assistantMetadata, messageId: 'x'.repeat(recipient.platform === 'feishu' ? 128 : 100) }).length > 16000) throw new Error('主动拟聊来源索引超过保存大小上限。');
       const message = text + (selected.url ? `\n\n来源：${selected.url}` : '');

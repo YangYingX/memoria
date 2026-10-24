@@ -12,7 +12,7 @@ import { expressionSearchItems, expressionSearchQuery, expressionSearchResult } 
 import { readBiliCredentials } from './bili-credentials.js';
 
 const hostScript = fileURLToPath(new URL('../scripts/dsh-host.js', import.meta.url));
-const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation', 'search_emotions'];
+const memoryTools = ['search_memory', 'read_memory', 'read_memory_source', 'search_conversations', 'read_conversation', 'search_emotions', 'search_own_expressions', 'read_own_expression'];
 export const defaultDshReadingSettings = { dailyReadLimit: 6 };
 
 class DshTaskError extends Error {}

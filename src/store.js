@@ -988,6 +988,54 @@ export function createStore(dbPath) {
     }
     return { content: content.slice(bestOffset, bestOffset + 1200), offset: bestOffset };
   }
+  // Only fixed Bilibili submission proofs qualify. No caller can nominate a private scope.
+  function rawOwnExpressionEvidence(id) {
+    try {
+      const header = get(`SELECT id, metadata, created_at FROM events WHERE id = ? AND type = 'self_expression'
+        AND scope = 'owner' AND actor = 'scheduler' AND json_extract(metadata, '$.platform') = 'bilibili'
+        AND json_extract(metadata, '$.outcome') = 'success' AND json_extract(metadata, '$.action') IN ('post','reply')`, id);
+      if (!header) return null;
+      const metadata = JSON.parse(header.metadata), action = metadata.action;
+      if (action === 'post' ? metadata.confirmation !== 'dynamic_receipt' : metadata.confirmation !== 'reply_receipt') return null;
+      const event = eventRow(get('SELECT * FROM events WHERE id = ?', id));
+      if (!event.content.trim() || event.content.length > (action === 'post' ? 800 : 200)) return null;
+      let url, sourceMessageId, proof;
+      if (action === 'reply') {
+        const item = biliRecord(biliKey(metadata.targetKey));
+        if (!item || item.state !== 'sent' || item.replyId !== biliDynamicId(metadata.replyId)) return null;
+        url = biliNoticeUrl(item.notice) + (item.notice.resource === 'dynamic' ? '' : '/');
+        if (metadata.targetUrl !== url) return null;
+        const rows = all(`SELECT * FROM messages WHERE scope = ? AND role = 'assistant' AND actor = 'agent'
+          AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.sourceNoticeKey') = ?
+          AND json_extract(metadata, '$.replyId') = ?`, item.scope, item.key, item.replyId).map(messageRow);
+        if (rows.length !== 1) return null;
+        const assistant = rows[0];
+        if (assistant.metadata.mode !== 'live' || assistant.metadata.replyTo !== item.messageId || assistant.content !== event.content
+          || Date.parse(assistant.createdAt) > Date.parse(event.createdAt)) return null;
+        const attempts = all(`SELECT id FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
+          AND source_ref = ? AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.action') = 'reply'
+          AND json_extract(metadata, '$.outcome') = 'attempt' AND json_extract(metadata, '$.noticeKey') = ?`, item.key, item.key);
+        if (attempts.length !== 1) return null;
+        sourceMessageId = assistant.id;
+        proof = [assistant, item.key, item.accountId, item.scope, item.notice, item.sourceEventId, item.messageId, item.replyId, attempts[0].id];
+      } else {
+        url = 'https://t.bilibili.com/' + biliDynamicId(metadata.dynamicId);
+        if (metadata.targetUrl !== url) return null;
+        const memories = all(`SELECT * FROM memories WHERE scope = 'owner' AND category = 'event' AND source_type = 'self-expression'
+          AND source_ref = ? AND deleted_at IS NULL AND updated_at = created_at
+          AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.memory_id = memories.id)
+          AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.memory_id = memories.id)`, id).map(memoryRow)
+          .filter(memory => memory.content === '【B站自主动态；已取得提交回执，审核与可见性未确认】\n' + event.content);
+        if (memories.length !== 1) return null;
+        proof = [memories[0]];
+      }
+      const signature = createHash('sha256').update(JSON.stringify([event, proof])).digest('hex');
+      return { id: event.id, platform: 'bilibili', action, author: 'assistant', recordedAt: event.createdAt,
+        url, content: event.content, title: action === 'post' && typeof metadata.title === 'string' ? metadata.title.slice(0,30) : '',
+        submissionReceiptOnly: true, originalContextIncluded: false, signature, ...(sourceMessageId ? { sourceMessageId } : {}) };
+    } catch { return null; }
+  }
+
   function conversationState(permitted) {
     if (!permitted.length) return { messages: [], turns: [], blockedUsers: new Set(), hiddenAssistants: new Set(), replySources: new Map() };
     const placeholders = permitted.map(() => '?').join(',');
@@ -1058,6 +1106,8 @@ export function createStore(dbPath) {
       CASE WHEN json_type(a.metadata, '$.historyMessageIds') = 'array' THEN json_extract(a.metadata, '$.historyMessageIds') ELSE '[]' END AS history_message_ids,
       CASE WHEN json_type(a.metadata, '$.userMessageIds') = 'array' THEN json_extract(a.metadata, '$.userMessageIds') ELSE '[]' END AS user_message_ids,
       a.scope,
+      CASE WHEN json_type(a.metadata, '$.ownExpressionVersions') = 'array' THEN json_extract(a.metadata, '$.ownExpressionVersions')
+        WHEN json_type(a.metadata, '$.ownExpressionVersions') IS NULL THEN '[]' ELSE 'null' END AS own_expression_versions,
       CASE WHEN json_type(a.metadata, '$.memoryVersions') = 'array' THEN json_extract(a.metadata, '$.memoryVersions')
         WHEN json_type(a.metadata, '$.memoryVersions') IS NULL THEN '[]' ELSE 'null' END AS memory_versions
       , CASE WHEN json_type(a.metadata, '$.bookNoteVersions') = 'array' THEN json_extract(a.metadata, '$.bookNoteVersions')
@@ -1065,10 +1115,28 @@ export function createStore(dbPath) {
       FROM messages a LEFT JOIN messages u ON u.role = 'user' AND u.scope = a.scope
         AND json_type(a.metadata, '$.replyTo') = 'text' AND u.id = json_extract(a.metadata, '$.replyTo')
       WHERE a.role = 'assistant'`);
-    const versionEvidence = new Map();
+    const versionEvidence = new Map(), ownExpressionEvidence = new Map();
     for (const row of dependencies) {
       if (row.user_id) replyUsers.set(row.id, row.user_id);
       if (blockedUsers.has(row.user_id) || JSON.parse(row.user_message_ids).some(id => typeof id === 'string' && blockedUsers.has(id))) hiddenAssistants.add(row.id);
+      const ownVersions = JSON.parse(row.own_expression_versions), seenExpressions = new Set();
+      if (!Array.isArray(ownVersions) || ownVersions.length > 100) hiddenAssistants.add(row.id);
+      else for (const version of ownVersions) {
+        if (!version || typeof version !== 'object' || Array.isArray(version) || Object.keys(version).length !== 2
+          || typeof version.expressionId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(version.expressionId)
+          || typeof version.signature !== 'string' || !/^[a-f0-9]{64}$/.test(version.signature) || seenExpressions.has(version.expressionId)) { hiddenAssistants.add(row.id); continue; }
+        seenExpressions.add(version.expressionId);
+        if (!ownExpressionEvidence.has(version.expressionId)) ownExpressionEvidence.set(version.expressionId, rawOwnExpressionEvidence(version.expressionId));
+        const evidence = ownExpressionEvidence.get(version.expressionId), node = 'expression:' + version.expressionId;
+        if (!evidence) hiddenAssistants.add(node);
+        if (!evidence || evidence.signature !== version.signature) hiddenAssistants.add(row.id);
+        if (!dependents.has(node)) dependents.set(node, new Set());
+        dependents.get(node).add(row.id);
+        if (evidence?.sourceMessageId) {
+          if (!dependents.has(evidence.sourceMessageId)) dependents.set(evidence.sourceMessageId, new Set());
+          dependents.get(evidence.sourceMessageId).add(node);
+        }
+      }
       const memoryIds = JSON.parse(row.memory_ids), versions = row.book_note_versions === null ? [] : JSON.parse(row.book_note_versions);
       const versionIds = new Set(), currentVersions = new Set();
       const memoryVersions = JSON.parse(row.memory_versions);
@@ -1999,6 +2067,35 @@ export function createStore(dbPath) {
       scope = scopeValue(scope);
       limit = integer(limit, '消息条数', 1, 1000);
       return all('SELECT * FROM messages WHERE scope = ? ORDER BY created_at DESC, rowid DESC LIMIT ?', scope, limit).reverse().map(messageRow);
+    },
+    getOwnExpressionEvidence(id) {
+      id = identifier(id, '自己的表达记录 ID');
+      const evidence = rawOwnExpressionEvidence(id);
+      if (!evidence) return null;
+      const state = conversationState(['public']);
+      return state.hiddenAssistants.has('expression:' + id) || evidence.sourceMessageId && state.hiddenAssistants.has(evidence.sourceMessageId)
+        ? null : evidence;
+    },
+    searchOwnExpressionPage(query, limit = 6, offset = 0, dates) {
+      query = text(query, '自己的表达查询', 500, { empty: true });
+      limit = integer(limit, '表达检索条数', 1, 6); offset = integer(offset, '表达检索位置', 0, Number.MAX_SAFE_INTEGER);
+      const filter = conversationDateRange(dates), tokens = queryTokens(query), state = conversationState(['public']), matches = [];
+      const rows = all(`SELECT id, content, created_at FROM events WHERE type = 'self_expression' AND scope = 'owner'
+        AND actor = 'scheduler' AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.outcome') = 'success'
+        AND json_extract(metadata, '$.action') IN ('post','reply') ORDER BY created_at DESC, rowid DESC`);
+      for (const row of rows) {
+        if (filter && !filter.includes(row.created_at) || query && (!tokens.length || !conversationScore(row.content, tokens))) continue;
+        const evidence = rawOwnExpressionEvidence(row.id);
+        if (!evidence || state.hiddenAssistants.has('expression:' + row.id)
+          || evidence.sourceMessageId && state.hiddenAssistants.has(evidence.sourceMessageId)) continue;
+        matches.push(evidence);
+      }
+      const items = matches.slice(offset, offset + limit).map(({ signature, sourceMessageId, content, ...item }) => {
+        let excerpt = content.slice(0,180); if (/[\uD800-\uDBFF]$/.test(excerpt)) excerpt = excerpt.slice(0,-1);
+        return { ...item, excerpt, excerptTruncated: excerpt.length < content.length };
+      });
+      return { items, offset, nextOffset: offset + items.length < matches.length ? offset + items.length : null,
+        ...(filter ? { dateRange: filter.range } : {}) };
     },
     searchConversationPage(query, scopes, limit = 6, offset = 0, excludeMessageId = '', dates) {
       query = text(query, '对话查询', 8000, { empty: true });
