@@ -774,11 +774,30 @@ export function createStore(dbPath) {
     const source = conversationMoodSource(memory.scope, event.sourceRef);
     try {
       const state = normalizeMoodState({ schemaVersion: 1, value: metadata.value, emotion: metadata.emotion, confidence: metadata.confidence, updatedAt: event.createdAt });
-      if (!source || metadata.version !== 1 || state.confidence < 60 || event.createdAt !== memory.createdAt || event.content !== memory.content
+      if (!source || ![1, 2].includes(metadata.version) || state.confidence < 60 || event.createdAt !== memory.createdAt || event.content !== memory.content
         || metadata.sourceEventId !== memory.sourceRef || source.source.id !== memory.sourceRef || source.user.id !== metadata.userMessageId
         || source.reply.id !== metadata.assistantMessageId || !Number.isSafeInteger(metadata.delta) || Math.abs(metadata.delta) > 10
         || createHash('sha256').update(source.fingerprint).digest('hex') !== metadata.sourceFingerprint) return null;
-      return { event, source, state };
+      const context = [], seen = new Set([source.user.id]);
+      if (metadata.version === 1) {
+        if (Object.hasOwn(metadata, 'context')) return null;
+      } else {
+        if (!Array.isArray(metadata.context) || !metadata.context.length || metadata.context.length > 2) return null;
+        let previousAt = -Infinity;
+        for (const reference of metadata.context) {
+          if (!reference || typeof reference !== 'object' || Array.isArray(reference)
+            || Object.keys(reference).length !== 2 || typeof reference.replyId !== 'string'
+            || typeof reference.sourceFingerprint !== 'string') return null;
+          const earlier = conversationMoodSource(memory.scope, reference.replyId);
+          if (!earlier || seen.has(earlier.user.id) || earlier.user.actor !== source.user.actor || ![undefined, 'live'].includes(earlier.user.metadata.mode)
+            || Date.parse(earlier.user.createdAt) < Date.parse(source.user.createdAt) - 30 * 60000
+            || Date.parse(earlier.reply.createdAt) > Date.parse(source.user.createdAt)
+            || Date.parse(earlier.user.createdAt) < previousAt
+            || createHash('sha256').update(earlier.fingerprint).digest('hex') !== reference.sourceFingerprint) return null;
+          seen.add(earlier.user.id); previousAt = Date.parse(earlier.user.createdAt); context.push(earlier);
+        }
+      }
+      return { event, source, state, ...(context.length ? { context } : {}) };
     } catch { return null; }
   }
 
@@ -1473,7 +1492,22 @@ export function createStore(dbPath) {
       const user = source && history.find(item => item.id === source.user.id);
       if (!source || !user
         || scope === 'owner' && source.user.actor === 'owner' && api.getConversationOrigin(source.user.id) === null) return null;
-      return { ...source, user, reply, rawFingerprint: source.fingerprint, fingerprint: JSON.stringify([user, reply, source.source]) };
+      const context = [], seen = new Set([user.id]), before = history.slice(0, history.indexOf(user));
+      for (const earlierReply of [...before].reverse()) {
+        if (earlierReply.role !== 'assistant' || !earlierReply.content.trim()) continue;
+        const earlier = conversationMoodSource(scope, earlierReply.id);
+        const earlierUser = earlier && before.find(item => item.id === earlier.user.id);
+        if (!earlierUser || seen.has(earlierUser.id) || earlierUser.actor !== user.actor || ![undefined, 'live'].includes(earlierUser.metadata.mode)
+          || Date.parse(earlierUser.createdAt) < Date.parse(user.createdAt) - 30 * 60000
+          || Date.parse(earlierReply.createdAt) > Date.parse(user.createdAt)
+          || scope === 'owner' && earlierUser.actor === 'owner' && api.getConversationOrigin(earlierUser.id) === null) continue;
+        seen.add(earlierUser.id);
+        context.unshift({ ...earlier, user: earlierUser, reply: earlierReply, rawFingerprint: earlier.fingerprint });
+        if (context.length === 2) break;
+      }
+      context.sort((a, b) => Date.parse(a.user.createdAt) - Date.parse(b.user.createdAt));
+      return { ...source, user, reply, context, rawFingerprint: source.fingerprint,
+        fingerprint: createHash('sha256').update(JSON.stringify([user, reply, source.source, context.map(item => [item.user, item.reply, item.source])])).digest('hex') };
     },
     applyConversationMood(input) {
       record(input, '交流心境更新');
@@ -1494,7 +1528,9 @@ export function createStore(dbPath) {
         const memory = { id: randomUUID(), ...memoryFields({ scope, title: `相处心境 · ${result.state.label}`, content, category: 'emotion', sourceType: 'conversation', sourceRef: source.source.id }), createdAt: now, updatedAt: now, deletedAt: null };
         insertMemory(memory);
         insertEvent({ id: randomUUID(), ...eventFields({ type: 'emotion_memory', scope, actor: 'scheduler', sourceRef: replyId, content,
-          metadata: { version: 1, memoryId: memory.id, sourceEventId: source.source.id, userMessageId: source.user.id, assistantMessageId: source.reply.id,
+          metadata: { version: source.context.length ? 2 : 1, ...(source.context.length ? { context: source.context.map(item => ({ replyId: item.reply.id,
+            sourceFingerprint: createHash('sha256').update(item.rawFingerprint).digest('hex') })) } : {}),
+            memoryId: memory.id, sourceEventId: source.source.id, userMessageId: source.user.id, assistantMessageId: source.reply.id,
             sourceFingerprint: createHash('sha256').update(source.rawFingerprint).digest('hex'), emotion: result.state.emotion, value: result.state.value,
             delta: input.proposal.delta, confidence: input.proposal.confidence } }), createdAt: now });
         return { ...result, memoryId: memory.id };
@@ -1509,7 +1545,9 @@ export function createStore(dbPath) {
       const proof = emotionMemoryEvidence(memory);
       if (!proof) return null;
       const snapshot = moodSnapshot({ getSetting: () => proof.state }, Date.parse(proof.event.createdAt));
-      return { memory, actor: proof.source.user.actor, conversationId: proof.source.user.id, emotion: snapshot.emotion, label: snapshot.label, recordedAt: proof.event.createdAt };
+      return { memory, actor: proof.source.user.actor, conversationId: proof.source.user.id,
+        ...(proof.context?.length ? { contextConversationIds: proof.context.map(item => item.user.id) } : {}),
+        emotion: snapshot.emotion, label: snapshot.label, recordedAt: proof.event.createdAt };
     },
     getCompanionMemoryEvidence(id) {
       const memory = api.getMemory(identifier(id, '记忆 ID'));

@@ -50,6 +50,7 @@ export function withConversationSource(store, memory, scope) {
     ...(source.qqBatchCount ? { qqBatchCount: source.qqBatchCount } : {}),
     ...(source.qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}) } } : {}),
     ...(emotion ? { emotionExperience: { subject: 'self', emotion: emotion.emotion, label: emotion.label, recordedAt: emotion.recordedAt, conversationId: emotion.conversationId,
+      ...(emotion.contextConversationIds ? { contextConversationIds: emotion.contextConversationIds } : {}),
       notice: '这是角色自己的过去心境，不是原话发言者的情绪、稳定性格或关系定论；可用conversationId核对该次完整对话。' } } : {}),
     ...(parts?.length ? { readingParts: parts } : {}) };
 }
