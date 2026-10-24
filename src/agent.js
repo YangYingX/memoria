@@ -348,12 +348,54 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const validReference = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
   const incoming = store.addMessage({ scope, role: 'user', content: text || `[${imageNote}]`, actor, metadata });
   const event = store.addEvent({ type: 'message', scope, actor, content: text || `[${imageNote}]`, metadata: { ...metadata, messageId: incoming.id } });
+  const requestMessageState = JSON.stringify(incoming), requestEventState = JSON.stringify(event);
+  const requestOrigin = scope === 'owner' && actor === 'owner' ? store.getConversationOrigin(incoming.id) : undefined;
+  const requestOriginState = JSON.stringify(requestOrigin);
   const conversationAccess = createMemoryAccess({ store, scope, actor, excludeMessageId: incoming.id });
   const memories = store.searchMemories(prompt, allowedScopes(scope), 6);
   for (const memory of memories) trackMemory(memory);
   const model = store.getSetting('model');
   const persona = store.getSetting('persona');
   const mode = model.apiKey ? 'live' : 'demo';
+  function memoryChangeReceipt(action, target) {
+    // This fixed acknowledgement uses only this request and the committed action,
+    // never the old model transcript or its now-invalid context dependencies.
+    const audits = () => store.listEvents({ type: 'memory_change', scope, actor, limit: 1000 }).filter(item =>
+      item.sourceRef === target.id && item.metadata.action === action && item.metadata.memoryId === target.id
+      && item.metadata.requestEventId === event.id && item.metadata.requestMessageId === incoming.id);
+    const changes = audits();
+    if (changes.length !== 1) throw new Error('本次记忆操作的确认来源已变化。');
+    const auditState = JSON.stringify(changes[0]);
+    const evidence = action === 'revise' ? store.getMemoryVersionEvidence(target.id, allowedScopes(scope)) : null;
+    const targetState = JSON.stringify(target);
+    if (action === 'revise' ? !evidence || JSON.stringify(evidence.memory) !== targetState : !target.deletedAt) throw new Error('本次记忆操作的结果已变化。');
+    const checkReceipt = () => {
+      signal?.throwIfAborted(); assertActive?.();
+      const currentMessage = store.listMessages(scope, 1000).find(item => item.id === incoming.id);
+      const currentEvent = store.listEvents({ type: 'message', scope, actor, limit: 1000 }).find(item => item.id === event.id);
+      if (JSON.stringify(currentMessage) !== requestMessageState || JSON.stringify(currentEvent) !== requestEventState
+        || store.isConversationSourceBlocked(scope, event.id)
+        || scope === 'owner' && actor === 'owner' && (requestOrigin === null
+          || JSON.stringify(store.getConversationOrigin(incoming.id)) !== requestOriginState)) throw new Error('本次记忆操作的请求来源已变化。');
+      const currentAudits = audits();
+      if (currentAudits.length !== 1 || JSON.stringify(currentAudits[0]) !== auditState) throw new Error('本次记忆操作的确认来源已变化。');
+      if (action === 'revise') {
+        if (store.getMemoryVersionEvidence(target.id, allowedScopes(scope))?.signature !== evidence.signature) throw new Error('本次更正后的记忆已变化。');
+      } else if (JSON.stringify(store.getMemory(target.id)) !== targetState) throw new Error('本次移出书架的结果已变化。');
+    };
+    const receiptReply = action === 'revise' ? '已更正这条记忆，后续以更新后的记录为准。'
+      : '已从当前记忆书架移除这条记忆；原始聊天、经历、修订记录和旧备份仍保留。';
+    const receiptMemories = action === 'revise' ? [target] : [];
+    const assistant = { scope, role: 'assistant', actor: 'agent', content: receiptReply,
+      metadata: { mode, replyTo: incoming.id, memoryIds: receiptMemories.map(item => item.id),
+        ...(evidence ? { memoryVersions: [{ memoryId: target.id, signature: evidence.signature }] } : {}),
+        conversationIds: [], userMessageIds: [], historyMessageIds: [] } };
+    const commit = store.prepareAssistantReply(assistant);
+    const commitDeliveredReply = (...args) => { checkReceipt(); return commit(...args); };
+    checkReceipt();
+    if (!deferAssistant) commitDeliveredReply(receiptReply.length);
+    return { reply: receiptReply, mode, memories: receiptMemories, expressionIds: [], ...(deferAssistant ? { commitDeliveredReply } : {}) };
+  }
   let reply;
   try {
     const followups = createFollowupTools({ scope, actor, text, actions: images.length ? undefined : followupActions,
@@ -613,19 +655,13 @@ export async function runConversation({ store, readAndRemember, scope, message, 
               if (action === 'revise') {
                 if (current.content.length > 4000 || typeof args.content !== 'string' || args.content.length > 4000) throw new Error('聊天更正仅支持不超过4000字的完整条目，较长记忆请在后台编辑。');
                 const updated = store.saveMemory({ ...current, title: omitImagePayload(args.title, images), content: omitImagePayload(args.content, images) }, { auditEvent });
-                trackMemory(updated, { refresh: true });
-                const index = memories.findIndex(memory => memory.id === updated.id);
-                if (index >= 0) memories[index] = updated; else memories.push(updated);
-                result = { updated: true, memory: memoryWithSource(updated) };
+                memoryChanged = true;
+                return memoryChangeReceipt(action, updated);
               } else {
                 if (!store.deleteMemory(current.id, { auditEvent })) throw new Error('记忆未能移出书架。');
-                memoryVersions.delete(current.id);
-                dependencyMemoryIds.delete(current.id);
-                const index = memories.findIndex(memory => memory.id === current.id);
-                if (index >= 0) memories.splice(index, 1);
-                result = { forgotten: true, id: current.id, notice: '仅从当前书架移除，原始聊天、经历、修订及旧备份仍保留。' };
+                memoryChanged = true;
+                return memoryChangeReceipt(action, store.getMemory(current.id));
               }
-              memoryChanged = true;
             } else if (call.function.name === 'remember') {
               if (changeRequests.preventRemember || changeRequests.forget_memory || memoryChanged) throw new Error('本条涉及已有记忆的管理，不会另存记忆副本；更正需先核对原条目，未定位时请澄清。');
               if (!['person', 'event', 'interest', 'promise'].includes(args.category)) throw new Error('记忆分类无效。');
@@ -675,7 +711,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
                 totalLength: content.length, nextOffset: content.length > 12000 ? 12000 : null,
                 ...(reading.memoryParts ? { readingParts: reading.memoryParts } : {}), ...(reading.page.evidence ? { evidence: reading.page.evidence } : {}) };
             } else throw new Error('不支持此工具。');
-          } catch (error) { result = { error: error.message }; }
+          } catch (error) { if (memoryChanged) throw error; result = { error: error.message }; }
           checkMemoryAgentSources();
           messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
         }
