@@ -51,6 +51,7 @@ export async function generateBiliSocialDecision({ store, instructions, context,
       { role: 'user', content: JSON.stringify(context) },
     ];
     messages[0].content += '\nrecentMessages只含少量近况，完整的已完成旧交流另有可检索档案。对方询问上次、之前或还记得的内容，而当前资料未提供答案时，先用话题关键词调用search_conversations，再按候选ID调用read_conversation核对用户原话；检索之后再决定是否回应或说明资料不足。不要仅凭近期消息没有答案就断定不记得或直接安静。对方明确结束话题或说不用回复时，可以直接返回空actions，无需额外检索。';
+    messages[0].content += '\n本轮评论者由biliDiscussion.comment.speaker标识。recentMessages.isCurrentSpeaker由服务端核对账号后给出，true才是当前评论者的旧发言；false是其他人或助手的话。recentMessages的speaker及旧对话的actor也可用于核对。相同昵称可能是不同人，同一标识改昵称仍是原发言者；按标识区分各人的经历和偏好，不把别人的话归给当前评论者。speaker只供内部核对，回复中不展示这些标识，也不据此授予私聊权限。缺少可靠发言者标识的旧资料，不推断属于当前评论者。围绕当前评论自然回应，不介绍内部区分流程。';
     const ids = new Set();
     let toolCalls = 0;
     for (let round = 0; round < 4; round++) {

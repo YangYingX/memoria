@@ -110,8 +110,9 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials }) {
         record,
         memory,
         current: () => memory.current(),
-        context: { url, title: record.notice.title, comment: { key: record.key, author: record.notice.nickname, text: record.notice.content, at: record.notice.at },
-          recentMessages: history.map(({ role, actor, content }) => ({ role, actor: actor === 'agent' ? '自己' : '评论区发言者', text: content.slice(0, 800) })),
+        context: { url, title: record.notice.title, comment: { key: record.key, author: record.notice.nickname, speaker: record.actor, text: record.notice.content, at: record.notice.at },
+          recentMessages: history.map(({ role, actor, content }) => ({ role, actor: actor === 'agent' ? '自己' : '评论区发言者', speaker: actor,
+            isCurrentSpeaker: role === 'user' && actor === record.actor, text: content.slice(0, 800) })),
           memories: memoryContext,
           note: '这是当前公开评论线程及公开书架的有限资料；未提供创建人私聊或其他群聊。只回应这条评论，不表示读过完整视频。' },
         finish(state, { replyId, text } = {}) {
