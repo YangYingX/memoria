@@ -69,7 +69,7 @@ export function applyMoodDelta(store, proposal, { now = Date.now(), expectedStat
   }
   const current = snapshot(normalizeMoodState(raw), now);
   if (change.confidence < 60) return { applied: false, state: current };
-  if (change.delta === 0 && (change.emotion === current.emotion || change.emotion === 'calm')) {
+  if (change.delta === 0 && change.emotion === current.emotion) {
     return { applied: false, unchanged: true, state: current };
   }
   const state = normalizeMoodState({ schemaVersion: 1, value: Math.max(0, Math.min(100, current.value + change.delta)),
