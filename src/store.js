@@ -9,7 +9,7 @@ import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js
 import { normalizeQQReplyContext } from './qq-message.js';
 import { normalizeConversationOrigin } from './conversation-origin.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
-import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
+import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliCommentKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
 import { defaultProactiveSettings } from './proactive.js';
@@ -1940,11 +1940,28 @@ export function createStore(dbPath) {
           claimBili('decision', key, now);
           return { inserted: false, record: null, skipped: 'invalidated' };
         }
+        const targetKey = biliCommentKey(accountId, notice);
+        const source = get(`SELECT source_ref AS key FROM events WHERE type = 'message'
+          AND json_extract(metadata, '$.biliNotice.accountId') = ?
+          AND json_extract(metadata, '$.biliNotice.notice.aid') = ?
+          AND json_extract(metadata, '$.biliNotice.notice.rpid') = ? ORDER BY rowid LIMIT 1`, accountId, notice.aid, notice.rpid);
+        if (source) {
+          claimBili('target', targetKey, now);
+          const original = biliRecord(source.key);
+          if (!original) return { inserted: false, record: null, skipped: 'invalidated' };
+          if (['mid', 'aid', 'bvid', 'content', 'rpid', 'root'].some(field => original.notice[field] !== notice[field])) {
+            claimBili('decision', original.key, now);
+            return { inserted: false, record: appendBiliState(original, original.state === 'sending' ? 'unknown' : 'invalidated', now), skipped: 'changed' };
+          }
+          return { inserted: false, record: original, skipped: 'duplicate_comment' };
+        }
+        if (biliClaimed('target', targetKey)) return { inserted: false, record: null, skipped: 'invalidated' };
         if (!currentBili({ key, accountId, notice }, time)) return { inserted: false, record: null, skipped: 'stale_or_self' };
         if (biliSources(accountId).map(item => biliRecord(item.key)).filter(item => item && !BILI_REPLY_TERMINAL.includes(item.state) && currentBili(item, time)).length >= 20) {
           return { inserted: false, record: null, skipped: 'queue_full' };
         }
         const scope = biliNoticeScope(accountId, notice), actor = biliNoticeActor(notice), messageId = randomUUID();
+        claimBili('target', targetKey, now);
         insertMessage({ id: messageId, ...messageFields({ scope, actor, role: 'user', content: notice.content, metadata: { biliNoticeKey: key } }), createdAt: now });
         insertEvent({ id: randomUUID(), ...eventFields({ type: 'message', scope, actor, content: notice.content, sourceRef: key,
           metadata: { messageId, biliNotice: { key, accountId, notice, hash } } }), createdAt: now });

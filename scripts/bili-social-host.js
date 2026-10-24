@@ -60,10 +60,16 @@ async function main(input) {
   controller.signal.throwIfAborted();
   client = new McpClient({ command: input.pythonPath,
     args: ['-I', '-B', fileURLToPath(new URL('./bili-social-mcp.py', import.meta.url)), script], cwd: workspace,
-    env: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', BILI_MCP_TOOLS: 'bili_received_replies,bili_reply',
+    env: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', BILI_MCP_TOOLS: 'bili_received_replies,bili_received_at_and_likes,bili_reply',
       MEMORIA_BILI_BROKER_PORT: String(server.address().port), MEMORIA_BILI_BROKER_TOKEN: token } });
-  const resultPromise = client.call(input.operation === 'inbox' ? 'bili_received_replies' : 'bili_reply', input.operation === 'inbox' ? {} : {
-    bvid: input.notice.bvid, text: input.text, rpid: Number(input.notice.rpid), root: Number(input.notice.root) }, { timeoutMs: 110000 });
+  const resultPromise = (async () => {
+    if (input.operation !== 'inbox') return client.call('bili_reply', {
+      bvid: input.notice.bvid, text: input.text, rpid: Number(input.notice.rpid), root: Number(input.notice.root) }, { timeoutMs: 110000 });
+    const replies = await client.call('bili_received_replies', {}, { timeoutMs: 110000 });
+    const mentions = await client.call('bili_received_at_and_likes', {}, { timeoutMs: 110000 });
+    if (replies?.error || !Array.isArray(replies?.items) || mentions?.at_error || !Array.isArray(mentions?.items)) throw new Error('INBOX_FAILED');
+    return { items: [...replies.items, ...mentions.items] };
+  })();
   python = client.proc;
   const result = await Promise.race([resultPromise, new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('CANCELLED')), { once: true }))]);
   controller.signal.throwIfAborted();

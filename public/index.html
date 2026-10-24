@@ -178,12 +178,12 @@
                 <div class="field-row"><label>小黑盒每天公开表达上限<input id="self-expression-heybox-daily-limit" type="number" min="0" max="100" required></label><label>发帖分区<input id="self-expression-heybox-topic" maxlength="40" required placeholder="分区的准确名称"></label></div>
                 <p class="caption">每次机会最多选择一项公开表达，也可以保持安静。评论与回复默认关闭，开启后只针对已读公开帖子及可重新核对的主评论；不批量跟帖。失败和结果未确认也计次，不自动重发。</p>
               </div>
-              <div class="self-expression-platform-settings"><h3>B站</h3><p class="caption">使用栖忆专用 B站账号与独立社交宿主，账号登录在下方“DSH 插件运行层”中设置。安装方法见部署说明的“B站视频评论通知回复”。当前仅处理别人对视频评论的回复通知，不接入 @、私信、动态或主动新评论。</p>
+              <div class="self-expression-platform-settings"><h3>B站</h3><p class="caption">使用栖忆专用 B站账号与独立社交宿主，账号登录在下方“DSH 插件运行层”中设置。安装方法见部署说明的“B站视频评论通知回复”。支持视频评论的回复通知和 @ 提及，不接入私信、动态或主动新评论。</p>
                 <label class="check-label"><input id="self-expression-bilibili-enabled" type="checkbox">允许在 B站自主表达</label>
-                <label class="check-label"><input id="self-expression-bilibili-reply" type="checkbox">回复视频评论通知</label>
+                <label class="check-label"><input id="self-expression-bilibili-reply" type="checkbox">回复视频评论通知（含 @）</label>
                 <label>B站每天通知回复上限<input id="self-expression-bilibili-daily-limit" type="number" min="0" max="100" required></label>
                 <p id="self-expression-bilibili-summary" class="caption">正在读取本机接入状态…</p>
-                <p class="caption">默认关闭，与其他平台共用表达欲、时段、间隔和全平台每日额度。每次机会核对最多 20 条通知，仅考虑七天内的可核验回复，也可以保持安静。同一通知在判断后不重试；提交回执不保证审核通过或已公开可见。</p>
+                <p class="caption">默认关闭，与其他平台共用表达欲、时段、间隔和全平台每日额度。每次机会核对最多 20 条通知，仅考虑七天内可核验的回复或 @，也可以保持安静。同一评论只处理一次，判断后不重试；提交回执不保证审核通过或已公开可见。</p>
               </div>
             </div></section>
             <section id="book-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">08</span><h2>读书节奏</h2><p class="muted">把长篇阅读分成日常的小片刻，读到哪里就记到哪里。</p></div><div class="settings-fields">

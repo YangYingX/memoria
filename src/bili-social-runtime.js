@@ -5,13 +5,13 @@ import { join, dirname, resolve, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeBiliCredentials } from './bili-credentials.js';
-import { biliSocialId, normalizeNotice } from './bili-social-notice.js';
+import { biliSocialId, normalizeNotice, biliMentionFeed } from './bili-social-notice.js';
 
 export const biliSocialPins = Object.freeze({ version: '0.7.7', commit: 'bbe41848137cdfa334bf04ebe7d5d29830390923',
   archive: 'd9d86e16e9fca9ddf34c65f4e56a817de014f98bd8a9665ee608d9148401cf2a',
   client: '7f4c02f597322a69b997666172a74317d3dff3aaac8bb1353b6f97d2e94038b6',
   server: '06d077b95fd12b26802545c4dc690fff81a651c86f53c57c911f22516ee6dd51' });
-const capabilities = Object.freeze({ replies: true, mentions: false });
+const capabilities = Object.freeze({ replies: true, mentions: true });
 const hostScript = fileURLToPath(new URL('../scripts/bili-social-host.js', import.meta.url));
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const fields = (value, allowed) => object(value) && Object.keys(value).every(key => allowed.includes(key));
@@ -128,7 +128,10 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         || Object.values(params).some(value => typeof value !== 'string') || Object.values(data).some(value => typeof value !== 'string')) throw failure('FAILED');
       if (request.method === 'GET') {
         if (Object.keys(data).length) throw failure('FAILED');
-        if (operation === 'inbox' && url.pathname === '/x/msgfeed/reply' && !Object.keys(params).length) return fetchJson(url.href);
+        if (operation === 'inbox' && ['/x/msgfeed/reply', '/x/msgfeed/at', '/x/msgfeed/like'].includes(url.pathname) && !Object.keys(params).length) {
+          const result = await fetchJson(url.href);
+          return url.pathname === '/x/msgfeed/at' ? { ...result, body: biliMentionFeed(result.body) } : result;
+        }
         if (operation === 'reply' && url.pathname === '/x/web-interface/nav' && !Object.keys(params).length) {
           const result = await fetchJson(url.href);
           if (result.body.code !== 0 || result.body.data?.isLogin !== true || String(result.body.data?.mid) !== secret.accountId) throw failure('ACCOUNT_CHANGED');
@@ -215,12 +218,15 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       active();
       if (operation === 'inbox') {
         if (!object(result) || !Array.isArray(result.items) || result.items.length > 1000 || result.error) throw failure('FAILED');
-        const notices = [];
+        const notices = [], comments = new Set();
         for (const item of result.items) {
           try { const notice = normalizeNotice(item); const age = Date.now() - Date.parse(notice.at);
-            if (age >= 0 && age <= 7 * 86400000 && notice.mid !== secret.accountId) notices.push(notice); } catch {}
+            const key = `${notice.aid}:${notice.rpid}`;
+            if (age >= 0 && age <= 7 * 86400000 && notice.mid !== secret.accountId && !comments.has(key)) {
+              comments.add(key); notices.push(notice);
+            } } catch {}
         }
-        return { accountId: secret.accountId, notices: notices.slice(0, 20), capabilities: { ...capabilities } };
+        return { accountId: secret.accountId, notices: notices.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 20), capabilities: { ...capabilities } };
       }
       let receipt;
       try { if (result?.success === true) receipt = biliSocialId(result.rpid_str ?? result.rpid); } catch {}

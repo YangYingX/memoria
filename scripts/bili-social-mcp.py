@@ -88,7 +88,7 @@ def main():
     request_settings.set_enable_bili_ticket(False)
     request_settings.set_wbi_retry_times(1)
     request_log.set_on(False)
-    os.environ["BILI_MCP_TOOLS"] = "bili_received_replies,bili_reply"
+    os.environ["BILI_MCP_TOOLS"] = "bili_received_replies,bili_received_at_and_likes,bili_reply"
     runpy.run_path(str(script), run_name="__main__")
 
 
