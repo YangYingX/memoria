@@ -3,11 +3,22 @@ import { defaultBookSettings } from './book-jobs.js';
 import { defaultExpressionSettings } from './self-expression.js';
 
 const KEYS = ['autonomy', 'books', 'selfExpression'];
-const SWITCHES = [...KEYS, 'bilibiliReplies'];
+const SWITCHES = [...KEYS, 'bilibiliReplies', 'bilibiliPosts'];
 export const expressionControlFields = { expressionDesire: 'desire', expressionDailyLimit: 'dailyLimit', expressionCooldownMinutes: 'cooldownMinutes' };
 export function biliReplySwitch(enabled, current = {}) {
-  return { enabled: enabled || current.enabled === true && current.post === true, reply: enabled,
-    ...(enabled && current.enabled !== true && current.post === true ? { post: false } : {}) };
+  return biliExpressionSwitch({ bilibiliReplies: enabled }, current);
+}
+export function biliExpressionSwitch(patch, current = {}) {
+  const next = {};
+  for (const [control, action] of [['bilibiliReplies', 'reply'], ['bilibiliPosts', 'post']]) {
+    if (Object.hasOwn(patch, control)) next[action] = patch[control];
+  }
+  const enabling = next.reply === true || next.post === true;
+  next.enabled = enabling || current.enabled === true && (('reply' in next ? next.reply : current.reply) === true || ('post' in next ? next.post : current.post) === true);
+  if (enabling && current.enabled !== true) for (const action of ['reply', 'post']) {
+    if (!Object.hasOwn(next, action) && current[action] === true) next[action] = false;
+  }
+  return next;
 }
 const RANGES = { expressionDesire: [0, 100], expressionDailyLimit: [0, 100], expressionCooldownMinutes: [60, 1440] };
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
@@ -18,7 +29,7 @@ export function normalizeAutonomyControlPatch(value) {
   const keys = Reflect.ownKeys(value);
   if (!keys.length || keys.length > SWITCHES.length + Object.keys(RANGES).length || keys.some(key => SWITCHES.includes(key)
     ? typeof value[key] !== 'boolean' : !Object.hasOwn(RANGES, key) || !Number.isSafeInteger(value[key]) || value[key] < RANGES[key][0] || value[key] > RANGES[key][1])) {
-    throw new Error('仅可调整三个总开关、B站通知回复开关、公开表达欲（0–100）、全平台每日公开发布上限（0–100）或间隔（60–1440分钟）。');
+    throw new Error('仅可调整三个总开关、B站通知回复与文字动态开关、公开表达欲（0–100）、全平台每日公开发布上限（0–100）或间隔（60–1440分钟）。');
   }
   return Object.fromEntries([...SWITCHES, ...Object.keys(RANGES)].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
 }
@@ -30,6 +41,7 @@ export function autonomyControlValues(settings) {
   if (!record(bilibili) || ['enabled', 'reply', 'post'].some(key => Object.hasOwn(bilibili, key) && typeof bilibili[key] !== 'boolean')) throw new Error('当前B站回复设置无效，请在后台核对。');
   return normalizeAutonomyControlPatch({ ...Object.fromEntries(KEYS.map(key => [key, settings[key].enabled])),
     bilibiliReplies: bilibili.enabled === true && bilibili.reply === true,
+    bilibiliPosts: bilibili.enabled === true && bilibili.post === true,
     ...Object.fromEntries(Object.entries(expressionControlFields).map(([key, field]) => [key, settings.selfExpression[field] ?? defaultExpressionSettings[field]])) });
 }
 
@@ -49,10 +61,10 @@ export function createAutonomyControlActions({ store, cancel = () => {}, signal,
       patch = normalizeAutonomyControlPatch(patch);
       const current = status(), changed = KEYS.filter(key => Object.hasOwn(patch, key) && current[key] !== patch[key]);
       if (!changed.includes('selfExpression') && Object.keys(expressionControlFields).some(key => Object.hasOwn(patch, key) && current[key] !== patch[key])) changed.push('selfExpression');
-      if (!changed.includes('selfExpression') && Object.hasOwn(patch, 'bilibiliReplies')) {
+      if (!changed.includes('selfExpression') && ['bilibiliReplies', 'bilibiliPosts'].some(key => Object.hasOwn(patch, key))) {
         const bilibili = settings().selfExpression.platforms?.bilibili ?? defaultExpressionSettings.platforms.bilibili;
-        const next = biliReplySwitch(patch.bilibiliReplies, bilibili);
-        if (bilibili.enabled !== next.enabled || bilibili.reply !== next.reply) changed.push('selfExpression');
+        const next = { ...bilibili, ...biliExpressionSwitch(patch, bilibili) };
+        if (['enabled', 'reply', 'post'].some(key => bilibili[key] !== next[key])) changed.push('selfExpression');
       }
       check();
       store.updateAutonomyControls({ patch, sourceEventId, expectedSettings, expectedText });

@@ -13,7 +13,7 @@ import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, 
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
 import { defaultProactiveSettings } from './proactive.js';
-import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControlFields, biliReplySwitch } from './autonomy-controls.js';
+import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControlFields, biliExpressionSwitch } from './autonomy-controls.js';
 import { defaultAutonomySettings } from './autonomy.js';
 import { defaultBookSettings } from './book-jobs.js';
 import { defaultExpressionSettings } from './self-expression.js';
@@ -1366,7 +1366,7 @@ export function createStore(dbPath) {
       if (Reflect.ownKeys(input).length !== 4 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings', 'expectedText'].includes(key))) invalid('自主活动偏好更新参数无效。');
       let patch;
       try { patch = normalizeAutonomyControlPatch(input.patch); }
-      catch { invalid('仅可调整三个总开关、B站通知回复开关及有效的公开表达欲、全平台每日公开发布上限和间隔。'); }
+      catch { invalid('仅可调整三个总开关、B站通知回复与文字动态开关及有效的公开表达欲、全平台每日公开发布上限和间隔。'); }
       const sourceEventId = identifier(input.sourceEventId, '自主活动偏好来源 ID');
       if (typeof input.expectedText !== 'string' || !input.expectedText.trim() || input.expectedText.length > 8000) invalid('自主活动偏好须核对本轮直接文字。');
       const keys = ['autonomy', 'books', 'selfExpression'];
@@ -1393,9 +1393,9 @@ export function createStore(dbPath) {
           if (key === 'selfExpression') for (const [control, field] of Object.entries(expressionControlFields)) {
             if (Object.hasOwn(patch, control)) next[field] = patch[control];
           }
-          if (key === 'selfExpression' && Object.hasOwn(patch, 'bilibiliReplies')) {
+          if (key === 'selfExpression' && ['bilibiliReplies', 'bilibiliPosts'].some(control => Object.hasOwn(patch, control))) {
             next.platforms = { ...next.platforms, bilibili: { ...defaultExpressionSettings.platforms.bilibili, ...next.platforms?.bilibili,
-              ...biliReplySwitch(patch.bilibiliReplies, next.platforms?.bilibili) } };
+              ...biliExpressionSwitch(patch, next.platforms?.bilibili) } };
           }
           if (JSON.stringify(next) !== JSON.stringify(current[key])) api.setSetting(key, next);
         }
