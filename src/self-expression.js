@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { moodSnapshot, MOOD_EXPRESSION_GUIDANCE } from './mood.js';
+import { modelBudget } from './model.js';
 
 const DAY_MS = 86400000;
 const ACTIONS = ['post', 'signature', 'avatar', 'comment', 'reply'];
@@ -13,7 +14,7 @@ export const defaultExpressionSettings = {
   startHour: 9, endHour: 23, timeZone: 'Asia/Shanghai', avatarIntervalDays: 7,
   platforms: { qq: { enabled: true, post: true, signature: true, avatar: true, dailyLimit: 80, qzoneVisibility: 4 },
     heybox: { enabled: false, post: true, comment: false, reply: false, signature: false, avatar: false, dailyLimit: 80, topic: '盒友杂谈' },
-    bilibili: { enabled: false, post: false, comment: false, reply: false, signature: false, avatar: false, dailyLimit: 80 } },
+    bilibili: { enabled: false, post: false, comment: false, reply: false, signature: false, avatar: false, dailyLimit: 80, inboxIntervalMinutes: 3 } },
 };
 export const SELF_EXPRESSION_INSTRUCTIONS = `你在决定是否进行公开的自主表达，可以选择安静并返回空 actions。
 ${MOOD_EXPRESSION_GUIDANCE}
@@ -58,6 +59,7 @@ export function normalizeExpressionSettings(input = {}, previous = {}, platforms
     for (const [key, value] of Object.entries(fallback)) next[key] = Object.hasOwn(change, key) ? change[key] : previous?.platforms?.[id]?.[key] ?? value;
     for (const key of ['enabled', 'post', 'signature', 'avatar', ...platform.actions]) if (typeof next[key] !== 'boolean') throw new Error('平台与动作开关须为布尔值。');
     if (!Number.isInteger(next.dailyLimit) || next.dailyLimit < 0 || next.dailyLimit > 100) throw new Error('平台每日发布上限须为 0 至 100。');
+    if (id === 'bilibili' && (!Number.isInteger(next.inboxIntervalMinutes) || next.inboxIntervalMinutes < 1 || next.inboxIntervalMinutes > 60)) throw new Error('B站通知检查间隔须为 1–60 分钟的整数。');
     if (id === 'qq' && ![1, 4, 64].includes(next.qzoneVisibility)) throw new Error('QQ 空间可见范围须为所有人、好友或仅自己。');
     if (id === 'heybox') {
       if (typeof next.topic !== 'string' || !next.topic.trim() || next.topic.trim().length > 40 || /[\x00-\x1f\x7f]/.test(next.topic)) throw new Error('小黑盒分区须为 1–40 字的准确名称。');
@@ -145,7 +147,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     const signature = JSON.stringify(config);
     if (!state.dayId || !Number.isFinite(Date.parse(state.dayEndAt)) || time >= Date.parse(state.dayEndAt)) {
       state = { ...state, ...dayBounds(time, config.timeZone), dayId: randomUUID(), decisionAttempts: 0,
-        opportunityAttempts: 0, postAttempts: 0, platformAttempts: {}, daySlots: [], configSignature: '' };
+        opportunityAttempts: 0, postAttempts: 0, biliReplyDecisionAttempts: 0, platformAttempts: {}, daySlots: [], configSignature: '' };
       state.daySlots = slots(config, state, Date.parse(state.dayStartAt));
     } else if (state.configSignature !== signature) {
       // Preserve the original day boundary and counters when settings or timezone change.
@@ -159,8 +161,9 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     if (JSON.stringify(state) !== stored) save(state);
     return state;
   }
-  function allowedActions(config, state, time) {
+  function allowedActions(config, state, time, onlyPlatform = '') {
     return Object.entries(platforms).flatMap(([id, platform]) => {
+      if (onlyPlatform && id !== onlyPlatform) return [];
       const permitted = config.platforms[id], attempts = state.platformAttempts[id] || {};
       if (!permitted.enabled || !canUsePlatform(id)) return [];
       const publicUnconfirmed = PUBLIC_ACTIONS.some(action => {
@@ -223,34 +226,48 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     return result;
   }
 
-  async function run({ force = false } = {}) {
+  async function run({ force = false, repliesOnly = false } = {}) {
+    if (typeof repliesOnly !== 'boolean') throw new Error('通知检查任务来源无效。');
     if (stopped) return { ...status(), skipped: 'stopped' };
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
     const config = settings(), time = now();
     if (!config.enabled || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
-    let state = plan(config, time);
-    if (state.decisionAttempts >= decisionLimit(config)) return { ...status(), skipped: 'daily_limit' };
-    if (!force) {
-      const missed = state.daySlots.filter(value => Date.parse(value) < time - 10 * 60000).length;
-      if (missed) {
-        state.daySlots.splice(0, missed); state.opportunityAttempts += missed;
-        state.nextRunAt = state.daySlots[0] || ''; state.lastOutcome = 'missed';
-        save(state); event('decision', 'missed', '错过的自主表达机会已跳过，不补发。', { count: missed });
-      }
+    if (repliesOnly && modelBudget(store).sharedRemaining === 0) return { ...status(), skipped: 'model_limit' };
+    let state = plan(config, time), allowed;
+    if (repliesOnly) {
       const hour = hourAt(time, config);
       if (hour < config.startHour || hour >= config.endHour) return { ...status(), skipped: 'outside_hours' };
-      if (!state.daySlots.length || Date.parse(state.daySlots[0]) > time) return { ...status(), skipped: 'not_due' };
-      if (time - (Date.parse(state.lastOpportunityAt) || 0) < config.cooldownMinutes * 60000) return { ...status(), skipped: 'cooldown' };
+      if (typeof getBiliDiscussion !== 'function') return { ...status(), skipped: 'unavailable' };
+      allowed = allowedActions(config, state, time, 'bilibili').map(platform => ({ ...platform, actions: platform.actions.filter(action => action === 'reply') })).filter(platform => platform.actions.length);
+      if (!allowed.length || config.desire === 0) return { ...status(), skipped: allowed.length ? 'quiet' : 'limit' };
+      const last = Date.parse(state.biliReplyLastOpportunityAt);
+      if (Number.isFinite(last) && time - last < config.platforms.bilibili.inboxIntervalMinutes * 60000) return { ...status(), skipped: 'not_due' };
+      state.biliReplyLastOpportunityAt = stamp(time);
+    } else {
+      if (state.decisionAttempts >= decisionLimit(config)) return { ...status(), skipped: 'daily_limit' };
+      if (!force) {
+        const missed = state.daySlots.filter(value => Date.parse(value) < time - 10 * 60000).length;
+        if (missed) {
+          state.daySlots.splice(0, missed); state.opportunityAttempts += missed;
+          state.nextRunAt = state.daySlots[0] || ''; state.lastOutcome = 'missed';
+          save(state); event('decision', 'missed', '错过的自主表达机会已跳过，不补发。', { count: missed });
+        }
+        const hour = hourAt(time, config);
+        if (hour < config.startHour || hour >= config.endHour) return { ...status(), skipped: 'outside_hours' };
+        if (!state.daySlots.length || Date.parse(state.daySlots[0]) > time) return { ...status(), skipped: 'not_due' };
+        if (time - (Date.parse(state.lastOpportunityAt) || 0) < config.cooldownMinutes * 60000) return { ...status(), skipped: 'cooldown' };
+      }
+      state.daySlots.shift(); state.opportunityAttempts += 1; state.lastOpportunityAt = stamp(time);
+      state.nextRunAt = state.daySlots[0] || ''; state.lastError = '';
+      allowed = allowedActions(config, state, time).map(platform => ({ ...platform, actions: platform.actions.filter(action => force || platform.id !== 'bilibili' || action !== 'reply') })).filter(platform => platform.actions.length);
     }
-    state.daySlots.shift(); state.opportunityAttempts += 1; state.lastOpportunityAt = stamp(time);
-    state.nextRunAt = state.daySlots[0] || ''; state.lastError = '';
-    let allowed = allowedActions(config, state, time);
     if (!allowed.length || config.desire === 0 || draw() >= config.desire / 100) {
+      if (repliesOnly) { state.biliReplyLastOutcome = 'quiet'; save(state); return { ...status(), skipped: 'quiet' }; }
       state.lastOutcome = allowed.length ? 'quiet' : 'limit'; save(state);
       event('decision', state.lastOutcome, allowed.length ? '这次选择安静，没有调用模型或发布内容。' : '当前没有仍可执行的自主表达动作。');
       return { ...status(), skipped: state.lastOutcome };
     }
-    state.lastOutcome = 'checking';
+    if (repliesOnly) state.biliReplyLastOutcome = 'checking'; else state.lastOutcome = 'checking';
     save(state); busy = true;
     const activeController = controller = new AbortController();
     let bili, biliQuiet = false;
@@ -270,7 +287,8 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     const current = () => sameState() && !activeController.signal.aborted && now() >= Date.parse(state.dayStartAt)
       && now() < Date.parse(state.dayEndAt) && JSON.stringify(settings()) === state.configSignature && sourcesCurrent();
     const check = () => { if (!current()) throw new Error('自主表达已取消。'); };
-    const update = patch => { if (sameState()) state = save({ ...store.getSetting('selfExpressionStatus', {}), ...patch }); };
+    const update = patch => { if (sameState()) state = save({ ...store.getSetting('selfExpressionStatus', {}), ...patch,
+      ...(repliesOnly && Object.hasOwn(patch, 'lastOutcome') ? { biliReplyLastOutcome: patch.lastOutcome } : {}) }); };
     const ready = async platform => {
       let result = false;
       try { result = await isPlatformReady(platform, { signal: activeController.signal }) === true; }
@@ -295,7 +313,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
       }
       allowed = available;
       if (!allowed.length) {
-        update({ lastOutcome: biliAvailable ? 'quiet' : 'unavailable' });
+        update(repliesOnly ? { biliReplyLastOutcome: biliAvailable ? 'empty' : 'unavailable' } : { lastOutcome: biliAvailable ? 'quiet' : 'unavailable' });
         return { ...status(), busy: false, skipped: biliAvailable ? 'no_discussion' : 'unavailable' };
       }
       const avatars = {};
@@ -357,8 +375,9 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
       });
       if (isBusy()) { update({ lastOutcome: 'busy' }); return { ...status(), busy: false, skipped: 'busy' }; }
       check();
-      update({ decisionAttempts: state.decisionAttempts + 1, lastAttempt: stamp(now()), lastOutcome: 'deciding' });
-      if (state.decisionAttempts >= decisionLimit(config)) update({ nextRunAt: '' });
+      update({ ...(repliesOnly ? { biliReplyDecisionAttempts: (state.biliReplyDecisionAttempts || 0) + 1 } : { decisionAttempts: state.decisionAttempts + 1 }),
+        lastAttempt: stamp(now()), lastOutcome: 'deciding' });
+      if (!repliesOnly && state.decisionAttempts >= decisionLimit(config)) update({ nextRunAt: '' });
       const mood = moodSnapshot(store, now());
       const decision = validateDecision(await generate({ persona: store.getSetting('persona', {}), previousMood: mood.label, mood,
         readings, readingNotes, previousPosts, discussion, ...(bili ? { biliDiscussion: bili.context, memoryAccess: bili.memory } : {}), avatars, platforms: allowed, instructions: SELF_EXPRESSION_INSTRUCTIONS, signal: activeController.signal }), allowed, avatars, discussion, bili);
@@ -372,7 +391,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
         const isBili = action.platform === 'bilibili' && action.type === 'reply';
         const target = isBili ? { targetUrl: bili.context.url, targetKey: bili.record.key }
           : action.payload ? { targetUrl: action.payload.url, targetKey: action.payload.replyTo?.key || '' } : {};
-        if (!allowedActions(config, state, now()).some(platform => platform.id === action.platform && platform.actions.includes(action.type))) {
+        if (!allowedActions(config, state, now(), repliesOnly ? 'bilibili' : '').some(platform => platform.id === action.platform && platform.actions.includes(action.type))) {
           event(action.type, 'skipped', '本轮的剩余表达额度不足，已跳过此动作。', { platform: action.platform, ...target }); continue;
         }
         if (!(await ready(action.platform))) { update({ lastOutcome: 'unavailable' }); continue; }
@@ -474,7 +493,8 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     }
   }
   async function tick() { try { return await run(); } catch { return status(); } }
+  async function tickReplies() { try { return await run({ repliesOnly: true }); } catch { return status(); } }
   function cancel() { controller?.abort(); }
   function stop() { stopped = true; cancel(); }
-  return { status, tick, run, cancel, stop };
+  return { status, tick, tickReplies, run, cancel, stop };
 }

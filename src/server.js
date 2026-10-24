@@ -1345,6 +1345,7 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 30000;
 server.headersTimeout = 10000;
 const timer = setInterval(() => {
+  selfExpressionJobs.tickReplies().catch(error => console.error('Bilibili reply scheduler:', error.message));
   scheduledReading().catch(error => console.error('Reading scheduler:', error.message));
   autonomyJobs.tick().catch(error => console.error('Autonomy scheduler:', error.message));
   selfExpressionJobs.tick().catch(error => console.error('Expression scheduler:', error.message));
