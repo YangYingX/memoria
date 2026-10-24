@@ -141,9 +141,9 @@
             </div></section>
             <section id="mood-settings" class="panel padded settings-section"><div class="settings-section-intro"><h2>心情与节奏</h2><p class="muted">让最近的经历留下心境，也留一些自然回稳的时间。</p></div><div class="settings-fields">
               <label class="check-label"><input id="mood-enabled" type="checkbox">启用间歇心情评估</label>
-              <div class="field-row"><label>自动评估间隔（分钟）<input id="mood-interval" type="number" min="60" max="1440" required></label><label>每天最多尝试（次）<input id="mood-limit" type="number" min="0" max="12" required></label></div>
-              <p class="caption">需要已配置的 DSH 和模型 API。默认关闭，开启后每 180 分钟最多评估一次、每天最多 4 次，按 UTC 日期计数；没有新对话或新阅读便保持安静。每次最多一次模型请求、300 输出 tokens，与聊天共用模型总额度，失败也计次。</p>
-              <p class="caption">对话、自主表达和主动私聊共用同一份心境。评估只生成有限数值与固定情绪；私人原因不进入群聊或公开表达。心境值向 70 自然回稳，数值偏离的半衰期为 3 小时；状态随加密备份迁移。</p>
+              <div class="field-row"><label>自动评估间隔（分钟）<input id="mood-interval" type="number" min="5" max="1440" required></label><label>每天最多尝试（次）<input id="mood-limit" type="number" min="0" max="96" required></label></div>
+              <p class="caption">需要已配置的 DSH 和模型 API。默认关闭，开启后每 15 分钟最多评估一次、每天最多 48 次，按 UTC 日期计数；优先根据已完成的聊天更新，没有新对话或新阅读便保持安静。每次最多一次模型请求、300 输出 tokens，与聊天共用模型总额度，失败也计次。</p>
+              <p class="caption">对话、自主表达和主动私聊共用同一份心境。支持开心、好奇、担心、低落、生气和平静；没有明显变化时保留当前心境并自然回稳，私人原因不进入群聊或公开表达。心境值向 70 自然回稳，数值偏离的半衰期为 3 小时；状态随加密备份迁移。</p>
             </div></section>
             <section id="drawing-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">06</span><h2>绘图服务（待接入）</h2><p class="muted">先留好配置入口，绘图能力后续再调试。</p></div><div class="settings-fields">
               <p class="notice drawing-status" role="status">预留配置，不会发起请求或产生绘图费用。</p>

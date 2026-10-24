@@ -5,8 +5,8 @@ import { normalizeMoodSettings, defaultMoodSettings, moodSnapshot, validateMoodD
 const DAY_MS = 86400000;
 const INPUT_KEYS_LIMIT = 50;
 const scopePattern = /^(owner|(?:group|person):[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127})$/;
-const outcomes = new Set(['evaluating', 'success', 'low_confidence', 'error', 'cancelled', 'interrupted']);
-const messages = { success: '本次心情评估已应用。', low_confidence: '本次评估置信度不足，心情保持不变。',
+const outcomes = new Set(['evaluating', 'success', 'unchanged', 'low_confidence', 'error', 'cancelled', 'interrupted']);
+const messages = { success: '本次心情评估已应用。', unchanged: '本次没有新的明显变化，心境继续自然回稳。', low_confidence: '本次评估置信度不足，心情保持不变。',
   error: '本次心情评估未完成，不自动重试该输入。', cancelled: '本次心情评估已取消，结果未应用。',
   interrupted: '上次心情评估未完成，不自动重试该输入。' };
 const date = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : '';
@@ -121,9 +121,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
   }
   function select(time, current) {
     const eligible = item => !current.lastInputKeys.includes(item.key) && (!current.lastInputAt || Date.parse(item.at) >= Date.parse(current.lastInputAt));
-    return [pendingConversation(time), reading(time, undefined, eligible)].filter(Boolean)
-      .filter(eligible)
-      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
+    const pending = pendingConversation(time);
+    return pending && eligible(pending) ? pending : reading(time, undefined, eligible);
   }
 
   async function run({ force = false, background = false } = {}) {
@@ -174,7 +173,7 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
         ...(selected.reply === undefined ? {} : { reply: selected.reply }), mood: moodSnapshot(store, time), signal: activeController.signal, background }));
       if (!valid()) return finish('cancelled');
       const result = applyMoodDelta(store, proposal, { now: now(), expectedState });
-      return finish(result.applied ? 'success' : 'low_confidence', result, proposal);
+      return finish(result.applied ? 'success' : result.unchanged ? 'unchanged' : 'low_confidence', result, proposal);
     } catch {
       if (stopped) return { ...status(), busy: false, skipped: 'stopped' };
       return finish(valid() ? 'error' : 'cancelled');

@@ -1,8 +1,9 @@
-export const defaultMoodSettings = { enabled: false, intervalMinutes: 180, dailyLimit: 4 };
+export const defaultMoodSettings = { enabled: false, intervalMinutes: 15, dailyLimit: 48 };
+export const MOOD_EXPRESSION_GUIDANCE = '保持当前人格较稳定的说话习惯、兴趣和判断，心情是在这个人格上的变化。可以因眼前的互动自然高兴、好奇、担心、低落或生气，也可以表达不满、不同意见和自己的边界，不必事事迎合。生气时可以直接、简短地说明感受，不辱骂、不报复，也不以冷落、威胁离开或要求对方证明感情来施压。当前互动的明显情绪可以立即自然回应，不必等下一次后台评估；背景心境只提供延续感，不把每句回复都演成一种固定情绪。不编造导致心情的经历，不把另一场合的私人原因带进当前聊天或公开表达，不机械播报情绪数值。';
 
 const settingsKeys = Object.keys(defaultMoodSettings);
 const stateKeys = ['schemaVersion', 'value', 'emotion', 'confidence', 'updatedAt'];
-const labels = { calm: '平静', happy: '开心', curious: '好奇', worried: '担心', sad: '低落' };
+const labels = { calm: '平静', happy: '开心', curious: '好奇', worried: '担心', sad: '低落', angry: '生气' };
 const baseline = { schemaVersion: 1, value: 70, emotion: 'calm', confidence: 100, updatedAt: null };
 const HALF_LIFE_MS = 3 * 60 * 60 * 1000;
 
@@ -18,8 +19,8 @@ const emotion = value => typeof value === 'string' && Object.hasOwn(labels, valu
 export function normalizeMoodSettings(input = {}, previous = {}) {
   if (!fields(input, settingsKeys) || !fields(previous, settingsKeys)) invalid('心情设置只接受启用状态、评估间隔和每日上限。');
   const next = { ...defaultMoodSettings, ...previous, ...input };
-  if (typeof next.enabled !== 'boolean' || !integer(next.intervalMinutes, 60, 1440) || !integer(next.dailyLimit, 0, 12)) {
-    invalid('心情评估间隔须为60–1440分钟，每日上限须为0–12，启用状态须为布尔值。');
+  if (typeof next.enabled !== 'boolean' || !integer(next.intervalMinutes, 5, 1440) || !integer(next.dailyLimit, 0, 96)) {
+    invalid('心情评估间隔须为5–1440分钟，每日上限须为0–96，启用状态须为布尔值。');
   }
   return next;
 }
@@ -67,6 +68,9 @@ export function applyMoodDelta(store, proposal, { now = Date.now(), expectedStat
   }
   const current = snapshot(normalizeMoodState(raw), now);
   if (change.confidence < 60) return { applied: false, state: current };
+  if (change.delta === 0 && (change.emotion === current.emotion || change.emotion === 'calm')) {
+    return { applied: false, unchanged: true, state: current };
+  }
   const state = normalizeMoodState({ schemaVersion: 1, value: Math.max(0, Math.min(100, current.value + change.delta)),
     emotion: change.emotion, confidence: change.confidence, updatedAt: new Date(now).toISOString() });
   store.setSetting('moodState', state);

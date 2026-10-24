@@ -431,8 +431,8 @@ function fillSettings() {
   $('chat-memory-limit').value = chatMemory.dailyLimit ?? 4;
   $('dsh-reading-limit').value = dshReading.dailyReadLimit ?? 6;
   $('mood-enabled').checked = Boolean(mood.enabled);
-  $('mood-interval').value = mood.intervalMinutes ?? 180;
-  $('mood-limit').value = mood.dailyLimit ?? 4;
+  $('mood-interval').value = mood.intervalMinutes ?? 15;
+  $('mood-limit').value = mood.dailyLimit ?? 48;
   $('persona-name').value = persona.name;
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
@@ -962,7 +962,7 @@ $('refresh-mood').addEventListener('click', () => action($('refresh-mood'), () =
 $('mood-run').addEventListener('click', () => action($('mood-run'), async () => {
   const result = await api('/api/mood/run', { method: 'POST', data: {} });
   await Promise.all([loadState(), loadEvents()]);
-  const notices = { disabled: '请先保存并启用心情评估。', busy: '她正在处理其他事情，稍后再评估。', daily_limit: '今日评估次数已用完。', no_new_input: '没有新的可评估资料。', no_input: '没有新的可评估资料。', cancelled: '本次评估已取消。', low_confidence: '这次判断把握不足，保留原状态。' };
+  const notices = { disabled: '请先保存并启用心情评估。', busy: '她正在处理其他事情，稍后再评估。', daily_limit: '今日评估次数已用完。', no_new_input: '没有新的可评估资料。', no_input: '没有新的可评估资料。', cancelled: '本次评估已取消。', low_confidence: '这次判断把握不足，保留原状态。', unchanged: '没有新的明显变化，心境继续自然回稳。' };
   toast(notices[result.status?.skipped || result.status?.lastOutcome] || result.status?.lastError || '评估已结束，状态见上方。');
 }));
 $('mate-reset').addEventListener('click', () => action($('mate-reset'), async () => {
