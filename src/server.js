@@ -23,7 +23,7 @@ import { parseBookFile, BOOK_FILE_MAX_BYTES } from './book-files.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 import { createProactiveRecipientResolver } from './proactive-recipient.js';
 import { composeProactive } from './proactive-compose.js';
-import { bindOwnerHeybox } from './identity.js';
+import { bindOwnerHeybox, bindOwnerBilibili } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
 import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
 import { createDshRuntime, defaultDshReadingSettings, normalizeDshReadingSettings } from './dsh-runtime.js';
@@ -129,6 +129,18 @@ function bindHeyboxOwner(userId) {
   chatMemoryJobs?.cancel();
   selfExpressionJobs.cancel();
   const account = bindOwnerHeybox(store, userId, agentAccountId);
+  cancelQQ();
+  return account;
+}
+
+function bindBilibiliOwner(userId) {
+  let agentAccountId = '';
+  try { agentAccountId = readBiliCredentials({ dataDir })?.accountId || ''; }
+  catch { throw new Error('B站专用账号配置无法读取，暂未保存身份绑定。'); }
+  const account = bindOwnerBilibili(store, userId, agentAccountId);
+  proactiveJobs?.cancel();
+  chatMemoryJobs?.cancel();
+  selfExpressionJobs.cancel();
   cancelQQ();
   return account;
 }
@@ -961,6 +973,18 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     if (context) await sendQQ(config, target, reply, [], origin, { beforeSend: context.assertActive });
     return;
   }
+  const bilibiliBinding = message.match(/^绑定(?:B站|哔哩哔哩)\s+(.+)$/iu);
+  if (bilibiliBinding && !imageUrls.length && !bookFile && event.message_type === 'private' && account?.personId === 'owner') {
+    qqChatBatch.seal(conversation);
+    let reply;
+    try {
+      const bound = bindBilibiliOwner(bilibiliBinding[1]);
+      reply = `已记住你的 B站 UID：${bound.userId}，并关联到创建人身份。这是你本人提供的账号标识，未验证 B站登录；栖忆的执行账号单独保存。`;
+    } catch (error) { reply = error.message; }
+    context = captureQQContext({ store, config, userId, getEpoch: () => qqEpoch });
+    if (context) await sendQQ(config, target, reply, [], origin, { beforeSend: context.assertActive });
+    return;
+  }
   if (bookFile) {
     qqChatBatch.seal(conversation);
     if (scope !== 'owner' || account?.personId !== 'owner') return;
@@ -1241,6 +1265,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (path === '/api/bindings/feishu/code' && req.method === 'POST') return json(res, 200, feishuChat.createBinding());
       if (path === '/api/bindings/heybox' && req.method === 'POST') return json(res, 201, { account: bindHeyboxOwner(input.userId) });
+      if (path === '/api/bindings/bilibili' && req.method === 'POST') {
+        if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, 'userId')) throw new Error('B站身份登记只接受本人的数字 UID。');
+        return json(res, 201, { account: bindBilibiliOwner(input.userId) });
+      }
       if (path.startsWith('/api/bindings/') && req.method === 'DELETE') { proactiveJobs.cancel(); chatMemoryJobs.cancel(); feishuChat.cancel(); selfExpressionJobs.cancel(); cancelQQ(); store.removeAccount(decodeURIComponent(path.split('/').at(-1))); return json(res, 200, { ok: true }); }
       if (path === '/api/backups/export' && req.method === 'POST') {
         if (activeMutation || qqBusy() || autonomyJobs.status().busy || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || moodJobs.status().busy || chatMemoryJobs.status().busy) return json(res, 409, { error: '请等待当前任务完成再备份。' });

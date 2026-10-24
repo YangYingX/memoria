@@ -997,6 +997,14 @@ $('heybox-binding-form').addEventListener('submit', event => {
     await loadState(); toast('已记住创建人的小黑盒账号。');
   });
 });
+$('bilibili-binding-form').addEventListener('submit', event => {
+  event.preventDefault();
+  action(event.currentTarget, async () => {
+    await api('/api/bindings/bilibili', { method: 'POST', data: { userId: $('bilibili-owner-id').value.trim() } });
+    $('bilibili-owner-id').value = '';
+    await loadState(); toast('已记住创建人的 B站账号。');
+  });
+});
 $('binding-code').addEventListener('click', () => action($('binding-code'), async () => {
   const binding = await api('/api/bindings/code', { method: 'POST', data: {} });
   $('binding-command').textContent = binding.command;
