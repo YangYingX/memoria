@@ -311,9 +311,11 @@ export function createDshRuntime({ store, dataDir }) {
           const agentRequestIds = new Set();
           let killTimer;
           const inactive = () => Boolean(failure || taskController.signal.aborted);
-          const stop = message => {
+          const stop = (message, readingCode) => {
             if (failure) return;
-            failure ||= new DshTaskError(message); taskController.abort(); child.kill();
+            failure ||= new DshTaskError(message);
+            if (reading && Object.hasOwn(readingErrors, readingCode)) failure.code = readingCode;
+            taskController.abort(); child.kill();
             killTimer ||= setTimeout(() => child.kill('SIGKILL'), 2000);
             killTimer.unref();
           };
@@ -433,7 +435,7 @@ export function createDshRuntime({ store, dataDir }) {
               } else result = message.result;
               received = true;
             } else if (message.type === 'failure') stop(modelFailureMessage || (reading && typeof message.code === 'string' && Object.hasOwn(readingErrors, message.code)
-              ? readingErrors[message.code] : 'DSH 核对未完成，请检查固定版本依赖与本机配置。'));
+              ? readingErrors[message.code] : 'DSH 核对未完成，请检查固定版本依赖与本机配置。'), message.code);
             else stop('DSH 返回了不支持的消息。');
           });
           child.on('close', code => {

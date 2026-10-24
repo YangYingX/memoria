@@ -172,6 +172,13 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
     const check = () => { if (!current()) throw new Error('自主活动已取消。'); };
     const source = requestedSource ?? config.sources[Math.floor(draw() * config.sources.length)];
     let url = SOURCE_URLS[source], title = '', selected = false, readingSaved = false;
+    function rememberUnreadableVideos(values) {
+      if (source !== 'bilibili' || !Array.isArray(values) || values.length > 2) return;
+      for (const value of values) try {
+        if (typeof value !== 'string' || biliVideoUrl(value) !== value) continue;
+        state.failures = [...state.failures.filter(item => item.url !== value), { url: value, retryAt: new Date(now() + DAY_MS).toISOString() }].slice(-50);
+      } catch { /* Invalid source hints cannot enter the failure cooldown. */ }
+    }
     function event(outcome, content, metadata = {}) {
       store.addEvent({ type: outcome === 'error' ? 'error' : 'autonomy', scope: 'owner', actor: 'scheduler',
         content, sourceRef: url, metadata: { source, outcome, title, ...metadata } });
@@ -182,6 +189,7 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
         if (typeof browseVideos !== 'function') throw new Error('尚未接入B站自主阅读。');
         page = await browseVideos({ interests: config.interests, failedUrls: state.failures.map(item => item.url), signal: activeController.signal, background });
         check();
+        rememberUnreadableVideos(page?.unreadableUrls);
         if (page?.skipped === 'no_unread_videos') {
           event('skipped', '本次浏览未找到尚未阅读且可读取文字资料的视频。', { reason: 'no_unread_videos' });
           save({ ...state, lastOutcome: 'skipped', lastUrl: url, lastTitle: '', lastError: '' });
@@ -312,6 +320,7 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
       save({ ...state, lastOutcome: 'success', lastSuccess: new Date(now()).toISOString(), lastUrl: url, lastTitle: title, lastError: '', ...reflection });
       return { ...status(), busy: false };
     } catch (error) {
+      rememberUnreadableVideos(error?.unreadableUrls);
       if (source === 'bilibili') try {
         if (typeof error?.sourceUrl === 'string' && biliVideoUrl(error.sourceUrl) === error.sourceUrl) { url = error.sourceUrl; selected = true; }
       } catch { /* Invalid source hints cannot enter the failure cooldown. */ }
