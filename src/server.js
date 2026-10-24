@@ -240,6 +240,11 @@ function makeSelfExpressionJobs() {
     },
     perform: async (platform, action, payload, { signal, beforeSend }) => {
       if (platform === 'bilibili') {
+        if (action === 'post') {
+          const result = await biliSocialRuntime.post({ text: payload.text, signal, beforeSend });
+          return result.outcome === 'sent' ? { confirmed: true, confirmation: 'dynamic_receipt', dynamicId: result.receipt.dynamicId }
+            : result.outcome === 'unknown' ? { unknown: true } : { ok: false };
+        }
         const notice = store.getBiliNotice(payload.noticeKey);
         if (action !== 'reply' || !notice || notice.state !== 'processing') throw new Error('B站回复来源无法核对。');
         return biliSocialRuntime.reply({ notice: notice.notice, text: payload.text, signal, beforeSend });

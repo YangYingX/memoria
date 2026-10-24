@@ -60,11 +60,19 @@ def main():
 
     class MemoriaClient(HTTPXClient):
         async def request(self, method="", url="", params=None, data=None, files=None, **_):
-            if files or not isinstance(params or {}, dict) or not isinstance(data or {}, dict):
+            if files or not isinstance(params or {}, dict):
+                raise PermissionError("NETWORK_DISABLED")
+            json_body = isinstance(data, str)
+            if json_body:
+                if method != "POST" or url != "https://api.bilibili.com/x/dynamic/feed/create/dyn" or len(data) > 10000:
+                    raise PermissionError("NETWORK_DISABLED")
+                data = json.loads(data)
+            if not isinstance(data or {}, dict):
                 raise PermissionError("NETWORK_DISABLED")
             payload = {"method": method, "url": url,
                        "params": {str(k): str(v) for k, v in (params or {}).items()},
-                       "data": {str(k): str(v) for k, v in (data or {}).items()}}
+                       "data": data if json_body else {str(k): str(v) for k, v in (data or {}).items()},
+                       **({"json": True} if json_body else {})}
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             if len(raw) > 16384:
                 raise ValueError("REQUEST_TOO_LARGE")
@@ -88,7 +96,7 @@ def main():
     request_settings.set_enable_bili_ticket(False)
     request_settings.set_wbi_retry_times(1)
     request_log.set_on(False)
-    os.environ["BILI_MCP_TOOLS"] = "bili_received_replies,bili_received_at_and_likes,bili_reply"
+    os.environ["BILI_MCP_TOOLS"] = "bili_received_replies,bili_received_at_and_likes,bili_reply,bili_send_dynamic"
     runpy.run_path(str(script), run_name="__main__")
 
 

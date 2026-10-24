@@ -13,7 +13,7 @@ import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, 
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
 import { defaultProactiveSettings } from './proactive.js';
-import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControlFields } from './autonomy-controls.js';
+import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControlFields, biliReplySwitch } from './autonomy-controls.js';
 import { defaultAutonomySettings } from './autonomy.js';
 import { defaultBookSettings } from './book-jobs.js';
 import { defaultExpressionSettings } from './self-expression.js';
@@ -1395,7 +1395,7 @@ export function createStore(dbPath) {
           }
           if (key === 'selfExpression' && Object.hasOwn(patch, 'bilibiliReplies')) {
             next.platforms = { ...next.platforms, bilibili: { ...defaultExpressionSettings.platforms.bilibili, ...next.platforms?.bilibili,
-              enabled: patch.bilibiliReplies, reply: patch.bilibiliReplies } };
+              ...biliReplySwitch(patch.bilibiliReplies, next.platforms?.bilibili) } };
           }
           if (JSON.stringify(next) !== JSON.stringify(current[key])) api.setSetting(key, next);
         }

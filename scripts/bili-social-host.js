@@ -31,7 +31,7 @@ const start = new Promise((accept, reject) => {
 
 async function main(input) {
   if (Number(process.versions.node.split('.')[0]) !== 24 || !fields(input, ['type', 'operation', 'hostDirectory', 'pythonPath', 'workspace', 'notice', 'text'])
-    || !['inbox', 'reply'].includes(input.operation)) throw new Error('INVALID_START');
+    || !['inbox', 'reply', 'post'].includes(input.operation)) throw new Error('INVALID_START');
   const workspace = realpathSync(input.workspace);
   if (workspace !== realpathSync(process.cwd()) || lstatSync(input.workspace).isSymbolicLink()) throw new Error('INVALID_WORKSPACE');
   const packagePath = join(realpathSync(input.hostDirectory), 'node_modules', 'dsh-bili-subagent');
@@ -48,7 +48,7 @@ async function main(input) {
       let size = 0; const chunks = [];
       for await (const chunk of request) { size += chunk.length; if (size > 16384) throw new Error(); chunks.push(chunk); }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      if (!fields(value, ['method', 'url', 'params', 'data'])) throw new Error();
+      if (!fields(value, ['method', 'url', 'params', 'data', 'json'])) throw new Error();
       const id = ++sequence;
       if (id > 16) throw new Error();
       const result = await new Promise((accept, reject) => { pending.set(id, { accept, reject });
@@ -60,9 +60,10 @@ async function main(input) {
   controller.signal.throwIfAborted();
   client = new McpClient({ command: input.pythonPath,
     args: ['-I', '-B', fileURLToPath(new URL('./bili-social-mcp.py', import.meta.url)), script], cwd: workspace,
-    env: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', BILI_MCP_TOOLS: 'bili_received_replies,bili_received_at_and_likes,bili_reply',
+    env: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', BILI_MCP_TOOLS: 'bili_received_replies,bili_received_at_and_likes,bili_reply,bili_send_dynamic',
       MEMORIA_BILI_BROKER_PORT: String(server.address().port), MEMORIA_BILI_BROKER_TOKEN: token } });
   const resultPromise = (async () => {
+    if (input.operation === 'post') return client.call('bili_send_dynamic', { text: input.text }, { timeoutMs: 110000 });
     if (input.operation !== 'inbox') return client.call('bili_reply', {
       bvid: input.notice.bvid, text: input.text, rpid: Number(input.notice.rpid), root: Number(input.notice.root) }, { timeoutMs: 110000 });
     const replies = await client.call('bili_received_replies', {}, { timeoutMs: 110000 });

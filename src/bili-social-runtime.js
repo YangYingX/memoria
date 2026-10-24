@@ -4,6 +4,7 @@ import { existsSync, readFileSync, writeFileSync, realpathSync, lstatSync, statS
 import { join, dirname, resolve, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { normalizeBiliCredentials } from './bili-credentials.js';
 import { biliSocialId, normalizeNotice, biliMentionFeed } from './bili-social-notice.js';
 
@@ -11,7 +12,7 @@ export const biliSocialPins = Object.freeze({ version: '0.7.7', commit: 'bbe4184
   archive: 'd9d86e16e9fca9ddf34c65f4e56a817de014f98bd8a9665ee608d9148401cf2a',
   client: '7f4c02f597322a69b997666172a74317d3dff3aaac8bb1353b6f97d2e94038b6',
   server: '06d077b95fd12b26802545c4dc690fff81a651c86f53c57c911f22516ee6dd51' });
-const capabilities = Object.freeze({ replies: true, mentions: true });
+const capabilities = Object.freeze({ replies: true, mentions: true, dynamicPosts: true });
 const hostScript = fileURLToPath(new URL('../scripts/bili-social-host.js', import.meta.url));
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const fields = (value, allowed) => object(value) && Object.keys(value).every(key => allowed.includes(key));
@@ -21,6 +22,10 @@ const messages = { CONFIG_INVALID: '请检查本机 B站社交运行环境配置
   SOURCE_CHANGED: 'B站原评论已变化、不可见或无法核对，本次不回复。', CANCELLED: 'B站社交任务已取消。', BUSY: '已有 B站社交任务运行。',
   FAILED: 'B站社交任务未完成，未自动重试。' };
 function failure(code) { const error = new Error(messages[code] || messages.FAILED); error.code = code; return error; }
+function dynamicId(value) {
+  if (typeof value !== 'string' || !/^[1-9]\d{0,19}$/.test(value)) throw failure('FAILED');
+  return value;
+}
 
 export function createBiliSocialRuntime({ dataDir, getCredentials }) {
   const directory = resolve(dataDir), pausePath = join(directory, 'bili-social-pause.json');
@@ -65,9 +70,11 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     if (!settings.enabled) throw failure('CONFIG_INVALID');
     if (paused()) throw failure('PLATFORM_PAUSED');
     const secret = credentials(getCredentials());
-    if (operation === 'reply') {
-      notice = normalizeNotice(notice);
-      if (typeof text !== 'string' || !text.trim() || text.length > 600 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text) || typeof beforeSend !== 'function') throw failure('FAILED');
+    if (['reply', 'post'].includes(operation)) {
+      if (operation === 'reply') notice = normalizeNotice(notice);
+      if (typeof text !== 'string' || !text.trim() || text.length > (operation === 'post' ? 800 : 600)
+        || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text) || typeof beforeSend !== 'function') throw failure('FAILED');
+      if (operation === 'post') text = text.trim();
     }
     const controller = new AbortController();
     let finish;
@@ -78,12 +85,12 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     let workspace, child, posted = false, postRequested = false, postReceipt = null, requests = 0;
     const active = () => { if (controller.signal.aborted || stopped) throw failure('CANCELLED'); };
     const cookie = `SESSDATA=${secret.sessdata}; bili_jct=${secret.biliJct}${secret.buvid3 ? `; buvid3=${secret.buvid3}` : ''}`;
-    async function fetchJson(url, options = {}) {
+    async function fetchJson(url, options = {}, json = false) {
       active(); if (paused()) throw failure('PLATFORM_PAUSED');
       if (++requests > 16) throw failure('FAILED');
       const response = await fetch(url, { ...options, redirect: 'manual', credentials: 'omit',
         headers: { 'User-Agent': 'memoria-bili-social/1', Referer: 'https://www.bilibili.com/', Cookie: cookie,
-          ...(options.method === 'POST' ? { 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://www.bilibili.com' } : {}) },
+          ...(options.method === 'POST' ? { 'Content-Type': json ? 'application/json' : 'application/x-www-form-urlencoded', Origin: 'https://www.bilibili.com' } : {}) },
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
       if ([412, 429, 401].includes(response.status)) { await response.body?.cancel().catch(() => {}); pause(); throw failure('PLATFORM_PAUSED'); }
       if (response.redirected || (response.status >= 300 && response.status < 400)) throw failure('FAILED');
@@ -122,17 +129,19 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     }
     async function broker(request) {
       active();
-      if (!fields(request, ['method', 'url', 'params', 'data']) || typeof request.url !== 'string' || !object(request.params) || !object(request.data)) throw failure('FAILED');
+      if (!fields(request, ['method', 'url', 'params', 'data', 'json']) || (Object.hasOwn(request, 'json') && request.json !== true)
+        || typeof request.url !== 'string' || !object(request.params) || !object(request.data)) throw failure('FAILED');
       const url = new URL(request.url), params = request.params, data = request.data;
       if (url.origin !== 'https://api.bilibili.com' || url.search || url.hash || url.username || url.password
-        || Object.values(params).some(value => typeof value !== 'string') || Object.values(data).some(value => typeof value !== 'string')) throw failure('FAILED');
+        || Object.values(params).some(value => typeof value !== 'string')
+        || (request.json !== true && Object.values(data).some(value => typeof value !== 'string'))) throw failure('FAILED');
       if (request.method === 'GET') {
-        if (Object.keys(data).length) throw failure('FAILED');
+        if (Object.keys(data).length || request.json === true) throw failure('FAILED');
         if (operation === 'inbox' && ['/x/msgfeed/reply', '/x/msgfeed/at', '/x/msgfeed/like'].includes(url.pathname) && !Object.keys(params).length) {
           const result = await fetchJson(url.href);
           return url.pathname === '/x/msgfeed/at' ? { ...result, body: biliMentionFeed(result.body) } : result;
         }
-        if (operation === 'reply' && url.pathname === '/x/web-interface/nav' && !Object.keys(params).length) {
+        if (['reply', 'post'].includes(operation) && url.pathname === '/x/web-interface/nav' && !Object.keys(params).length) {
           const result = await fetchJson(url.href);
           if (result.body.code !== 0 || result.body.data?.isLogin !== true || String(result.body.data?.mid) !== secret.accountId) throw failure('ACCOUNT_CHANGED');
           return result;
@@ -146,26 +155,34 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         }
         throw failure('FAILED');
       }
-      const expected = { oid: notice?.aid, type: '1', message: text, plat: '1', statistics: "{'appId': 100, 'platform': 5}", gaia_source: 'main_web',
-        root: notice?.root === '0' ? notice.rpid : notice?.root, parent: notice?.rpid, csrf: secret.biliJct, csrf_token: secret.biliJct };
       const signingKeys = ['dm_img_list', 'dm_img_str', 'dm_cover_img_str', 'dm_img_inter', 'wts', 'web_location', 'w_rid'];
-      if (operation !== 'reply' || request.method !== 'POST' || url.pathname !== '/x/v2/reply/add' || postRequested
-        || Object.keys(params).length !== signingKeys.length || Object.keys(params).some(key => !signingKeys.includes(key))
+      const keys = operation === 'post' ? [...signingKeys, 'csrf'] : signingKeys;
+      if (!['reply', 'post'].includes(operation) || request.method !== 'POST' || postRequested
+        || Object.keys(params).length !== keys.length || Object.keys(params).some(key => !keys.includes(key))
         || params.dm_img_list !== '[]' || params.dm_img_inter !== '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}'
         || !/^[A-K]{2}$/.test(params.dm_img_str) || !/^[A-K]{2}$/.test(params.dm_cover_img_str)
         || params.web_location !== '1550101' || !/^[1-9]\d{9}$/.test(params.wts) || Math.abs(Number(params.wts) * 1000 - Date.now()) > 300000
-        || !/^[0-9a-f]{32}$/.test(params.w_rid)
-        || Object.keys(data).length !== Object.keys(expected).length || Object.entries(expected).some(([key, value]) => data[key] !== value)) throw failure('FAILED');
+        || !/^[0-9a-f]{32}$/.test(params.w_rid)) throw failure('FAILED');
+      if (operation === 'post') {
+        const expected = { dyn_req: { content: { contents: [{ biz_id: '', type: 1, raw_text: text }] }, scene: 1,
+          meta: { app_meta: { from: 'create.dynamic.web', mobi_app: 'web' } }, attach_card: null }, csrf: secret.biliJct, csrf_token: secret.biliJct };
+        if (url.pathname !== '/x/dynamic/feed/create/dyn' || request.json !== true || params.csrf !== secret.biliJct || !isDeepStrictEqual(data, expected)) throw failure('FAILED');
+      } else {
+        const expected = { oid: notice.aid, type: '1', message: text, plat: '1', statistics: "{'appId': 100, 'platform': 5}", gaia_source: 'main_web',
+          root: notice.root === '0' ? notice.rpid : notice.root, parent: notice.rpid, csrf: secret.biliJct, csrf_token: secret.biliJct };
+        if (url.pathname !== '/x/v2/reply/add' || request.json === true || !isDeepStrictEqual(data, expected)) throw failure('FAILED');
+      }
       postRequested = true;
-      await verifyAccount(); await verifySource(); active();
+      await verifyAccount(); if (operation === 'reply') await verifySource(); active();
       if (await beforeSend() === false) throw failure('CANCELLED');
       active();
       if (JSON.stringify(credentials(await getCredentials())) !== JSON.stringify(secret) || JSON.stringify(config()) !== JSON.stringify(settings)) throw failure('ACCOUNT_CHANGED');
       posted = true;
       url.search = new URLSearchParams(params).toString();
-      const result = await fetchJson(url.href, { method: 'POST', body: new URLSearchParams(data).toString() });
+      const result = await fetchJson(url.href, { method: 'POST', body: operation === 'post' ? JSON.stringify(data) : new URLSearchParams(data).toString() }, operation === 'post');
       if (result.body.code === 0) {
-        try { postReceipt = biliSocialId(result.body.data?.rpid_str ?? result.body.data?.rpid); } catch {}
+        try { postReceipt = operation === 'post' ? dynamicId(result.body.data?.dyn_id_str ?? result.body.data?.dyn_id)
+          : biliSocialId(result.body.data?.rpid_str ?? result.body.data?.rpid); } catch {}
       }
       return result;
     }
@@ -196,7 +213,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         const aborted = () => rejected(failure('CANCELLED'));
         controller.signal.addEventListener('abort', aborted, { once: true });
         child.once('spawn', () => child.send({ type: 'start', operation, workspace, hostDirectory: settings.hostDirectory, pythonPath: settings.pythonPath,
-          ...(operation === 'reply' ? { notice, text } : {}) }));
+          ...(operation === 'reply' ? { notice, text } : operation === 'post' ? { text } : {}) }));
         child.on('error', () => rejected(failure('FAILED')));
         child.stderr.on('data', chunk => { stderr += chunk.length; if (stderr > 65536) rejected(failure('FAILED')); });
         child.on('message', message => {
@@ -229,11 +246,12 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         return { accountId: secret.accountId, notices: notices.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 20), capabilities: { ...capabilities } };
       }
       let receipt;
-      try { if (result?.success === true) receipt = biliSocialId(result.rpid_str ?? result.rpid); } catch {}
-      return receipt && receipt === postReceipt && posted ? { outcome: 'sent', receipt: { rpid: receipt } }
+      try { if (result?.success === true) receipt = operation === 'post' ? dynamicId(result.data?.dyn_id_str ?? result.data?.dyn_id)
+        : biliSocialId(result.rpid_str ?? result.rpid); } catch {}
+      return receipt && receipt === postReceipt && posted ? { outcome: 'sent', receipt: operation === 'post' ? { dynamicId: receipt } : { rpid: receipt } }
         : { outcome: posted ? 'unknown' : 'failed', code: 'UNCONFIRMED' };
     } catch (error) {
-      if (operation === 'reply') return { outcome: posted ? 'unknown' : 'failed', code: messages[error?.code] ? error.code : 'FAILED' };
+      if (['reply', 'post'].includes(operation)) return { outcome: posted ? 'unknown' : 'failed', code: messages[error?.code] ? error.code : 'FAILED' };
       throw messages[error?.code] ? error : failure('FAILED');
     } finally {
       clearTimeout(timeout); signal?.removeEventListener('abort', abort); controller.abort();
@@ -252,6 +270,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     },
     inbox: options => run('inbox', options),
     reply: options => run('reply', options),
+    post: options => run('post', options),
     stop() { stopped = true; cancelCurrent?.(); return drained; },
   };
 }
