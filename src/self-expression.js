@@ -398,7 +398,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
               } } : {}) });
           if (isBili) {
             outcome = !biliReserved ? { outcome: 'unavailable', at: attemptedAt, message: '未通过B站发送前核对，本次未提交。' }
-              : result?.outcome === 'sent' && typeof result.receipt?.rpid === 'string' && /^[1-9]\d{0,15}$/.test(result.receipt.rpid)
+              : result?.outcome === 'sent' && typeof result.receipt?.rpid === 'string' && (bili.record.notice.resource === 'dynamic' ? /^[1-9]\d{0,19}$/ : /^[1-9]\d{0,15}$/).test(result.receipt.rpid)
                 ? { outcome: 'success', at: attemptedAt, confirmation: 'reply_receipt', replyId: result.receipt.rpid }
                 : { outcome: result?.outcome === 'failed' ? 'error' : 'unknown', at: attemptedAt, message: 'B站未确认本次回复成功，不自动重发。' };
           } else if (result?.unknown === true) {

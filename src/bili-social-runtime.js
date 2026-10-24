@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeBiliCredentials } from './bili-credentials.js';
-import { biliSocialId, normalizeNotice, biliMentionFeed } from './bili-social-notice.js';
+import { biliSocialId, normalizeNotice, biliMentionFeed, biliDynamicId, biliDynamicFeed, biliCommentKey, parseBiliJson } from './bili-social-notice.js';
 
 export const biliSocialPins = Object.freeze({ version: '0.7.7', commit: 'bbe41848137cdfa334bf04ebe7d5d29830390923',
   archive: 'd9d86e16e9fca9ddf34c65f4e56a817de014f98bd8a9665ee608d9148401cf2a',
   client: '7f4c02f597322a69b997666172a74317d3dff3aaac8bb1353b6f97d2e94038b6',
   server: '06d077b95fd12b26802545c4dc690fff81a651c86f53c57c911f22516ee6dd51' });
-const capabilities = Object.freeze({ replies: true, mentions: true, dynamicPosts: true });
+const capabilities = Object.freeze({ replies: true, mentions: true, dynamicPosts: true, dynamicReplies: true });
 const hostScript = fileURLToPath(new URL('../scripts/bili-social-host.js', import.meta.url));
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const fields = (value, allowed) => object(value) && Object.keys(value).every(key => allowed.includes(key));
@@ -82,6 +82,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     const abort = () => controller.abort();
     cancelCurrent = abort; signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
     const timeout = setTimeout(abort, 120000);
+    const dynamicNotices = [];
     let workspace, child, posted = false, postRequested = false, postReceipt = null, requests = 0;
     const active = () => { if (controller.signal.aborted || stopped) throw failure('CANCELLED'); };
     const cookie = `SESSDATA=${secret.sessdata}; bili_jct=${secret.biliJct}${secret.buvid3 ? `; buvid3=${secret.buvid3}` : ''}`;
@@ -96,7 +97,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       if (response.redirected || (response.status >= 300 && response.status < 400)) throw failure('FAILED');
       const parts = []; let size = 0;
       for await (const part of response.body) { size += part.length; if (size > 1024 * 1024) throw failure('FAILED'); parts.push(part); }
-      const body = JSON.parse(Buffer.concat(parts).toString('utf8'));
+      const body = parseBiliJson(Buffer.concat(parts).toString('utf8'));
       if ([-412, -352, -799, -509, -10403, -101, -105, 12015].includes(Number(body?.code))) { pause(); throw failure('PLATFORM_PAUSED'); }
       active();
       if (!response.ok || !object(body)) throw failure('FAILED');
@@ -111,7 +112,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     async function verifySource() {
       const root = notice.root === '0' ? notice.rpid : notice.root;
       for (let page = 1; page <= 6; page++) {
-        const { body } = await fetchJson(`https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${notice.aid}&root=${root}&pn=${page}&ps=20`);
+        const { body } = await fetchJson(`https://api.bilibili.com/x/v2/reply/reply?type=${notice.resource === 'dynamic' ? notice.commentType : 1}&oid=${notice.resource === 'dynamic' ? notice.oid : notice.aid}&root=${root}&pn=${page}&ps=20`);
         if (body.code !== 0 || !object(body.data) || (body.data.replies != null && !Array.isArray(body.data.replies))) throw failure('SOURCE_CHANGED');
         const replies = body.data.replies || [];
         const candidates = [...replies, ...(object(body.data.root) ? [body.data.root] : [])];
@@ -119,7 +120,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         if (target) {
           if (String(target.member?.mid ?? target.mid) !== notice.mid || (target.mid != null && String(target.mid) !== notice.mid)
             || typeof target.content?.message !== 'string' || target.content.message.trim() !== notice.content
-            || (target.oid != null && String(target.oid) !== notice.aid)
+            || (target.oid != null && String(target.oid) !== (notice.resource === 'dynamic' ? notice.oid : notice.aid))
             || (notice.rpid === root ? !['0', root].includes(String(target.root_str ?? target.root ?? '0')) : String(target.root_str ?? target.root) !== root)) throw failure('SOURCE_CHANGED');
           return;
         }
@@ -139,6 +140,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         if (Object.keys(data).length || request.json === true) throw failure('FAILED');
         if (operation === 'inbox' && ['/x/msgfeed/reply', '/x/msgfeed/at', '/x/msgfeed/like'].includes(url.pathname) && !Object.keys(params).length) {
           const result = await fetchJson(url.href);
+          if (['/x/msgfeed/reply', '/x/msgfeed/at'].includes(url.pathname)) dynamicNotices.push(...biliDynamicFeed(url.pathname.endsWith('/at') ? 'at' : 'reply', result.body));
           return url.pathname === '/x/msgfeed/at' ? { ...result, body: biliMentionFeed(result.body) } : result;
         }
         if (['reply', 'post'].includes(operation) && url.pathname === '/x/web-interface/nav' && !Object.keys(params).length) {
@@ -168,12 +170,22 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
           meta: { app_meta: { from: 'create.dynamic.web', mobi_app: 'web' } }, attach_card: null }, csrf: secret.biliJct, csrf_token: secret.biliJct };
         if (url.pathname !== '/x/dynamic/feed/create/dyn' || request.json !== true || params.csrf !== secret.biliJct || !isDeepStrictEqual(data, expected)) throw failure('FAILED');
       } else {
-        const expected = { oid: notice.aid, type: '1', message: text, plat: '1', statistics: "{'appId': 100, 'platform': 5}", gaia_source: 'main_web',
+        const expected = { oid: notice.resource === 'dynamic' ? notice.oid : notice.aid, type: notice.resource === 'dynamic' ? String(notice.commentType) : '1', message: text, plat: '1', statistics: "{'appId': 100, 'platform': 5}", gaia_source: 'main_web',
           root: notice.root === '0' ? notice.rpid : notice.root, parent: notice.rpid, csrf: secret.biliJct, csrf_token: secret.biliJct };
         if (url.pathname !== '/x/v2/reply/add' || request.json === true || !isDeepStrictEqual(data, expected)) throw failure('FAILED');
       }
       postRequested = true;
-      await verifyAccount(); if (operation === 'reply') await verifySource(); active();
+      await verifyAccount();
+      if (operation === 'reply') {
+        if (notice.resource === 'dynamic') {
+          const { body } = await fetchJson('https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=' + notice.dynamicId);
+          const item = body.data?.item;
+          if (body.code !== 0 || !object(item) || item.visible === false || String(item.id_str) !== notice.dynamicId
+            || Number(item.basic?.comment_type) !== notice.commentType || String(item.basic?.comment_id_str) !== notice.oid) throw failure('SOURCE_CHANGED');
+        }
+        await verifySource();
+      }
+      active();
       if (await beforeSend() === false) throw failure('CANCELLED');
       active();
       if (JSON.stringify(credentials(await getCredentials())) !== JSON.stringify(secret) || JSON.stringify(config()) !== JSON.stringify(settings)) throw failure('ACCOUNT_CHANGED');
@@ -182,7 +194,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       const result = await fetchJson(url.href, { method: 'POST', body: operation === 'post' ? JSON.stringify(data) : new URLSearchParams(data).toString() }, operation === 'post');
       if (result.body.code === 0) {
         try { postReceipt = operation === 'post' ? dynamicId(result.body.data?.dyn_id_str ?? result.body.data?.dyn_id)
-          : biliSocialId(result.body.data?.rpid_str ?? result.body.data?.rpid); } catch {}
+          : (notice?.resource === 'dynamic' ? biliDynamicId : biliSocialId)(result.body.data?.rpid_str ?? result.body.data?.rpid); } catch {}
       }
       return result;
     }
@@ -236,9 +248,9 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       if (operation === 'inbox') {
         if (!object(result) || !Array.isArray(result.items) || result.items.length > 1000 || result.error) throw failure('FAILED');
         const notices = [], comments = new Set();
-        for (const item of result.items) {
+        for (const item of [...result.items, ...dynamicNotices]) {
           try { const notice = normalizeNotice(item); const age = Date.now() - Date.parse(notice.at);
-            const key = `${notice.aid}:${notice.rpid}`;
+            const key = biliCommentKey(secret.accountId, notice);
             if (age >= 0 && age <= 7 * 86400000 && notice.mid !== secret.accountId && !comments.has(key)) {
               comments.add(key); notices.push(notice);
             } } catch {}
@@ -247,7 +259,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       }
       let receipt;
       try { if (result?.success === true) receipt = operation === 'post' ? dynamicId(result.data?.dyn_id_str ?? result.data?.dyn_id)
-        : biliSocialId(result.rpid_str ?? result.rpid); } catch {}
+        : (notice?.resource === 'dynamic' ? biliDynamicId : biliSocialId)(result.rpid_str ?? result.rpid); } catch {}
       return receipt && receipt === postReceipt && posted ? { outcome: 'sent', receipt: operation === 'post' ? { dynamicId: receipt } : { rpid: receipt } }
         : { outcome: posted ? 'unknown' : 'failed', code: 'UNCONFIRMED' };
     } catch (error) {

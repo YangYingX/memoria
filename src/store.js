@@ -9,7 +9,7 @@ import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js
 import { normalizeQQReplyContext } from './qq-message.js';
 import { normalizeConversationOrigin } from './conversation-origin.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
-import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, biliNoticeKey, biliCommentKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
+import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, biliDynamicId, biliNoticeUrl, normalizeNotice, biliNoticeKey, biliCommentKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
 import { defaultProactiveSettings } from './proactive.js';
@@ -203,9 +203,9 @@ function eventFields(input) {
   if (type === 'bili_reply') {
     if (Object.keys(metadata).some(key => !['key', 'sourceEventId', 'state', 'replyId'].includes(key)) || !BILI_REPLY_STATES.includes(metadata.state)
       || metadata.state === 'received' || metadata.key !== input.sourceRef || input.actor !== 'scheduler'
-      || !/^group:bilibili:[1-9]\d*:[1-9]\d*:[1-9]\d*$/.test(input.scope)) invalid('B站回复状态事件无效。');
+      || !/^group:bilibili:[1-9]\d*:(?:[1-9]\d*:[1-9]\d*|dynamic:(?:11|17):[1-9]\d{0,19}:[1-9]\d{0,19})$/.test(input.scope)) invalid('B站回复状态事件无效。');
     biliKey(metadata.key); identifier(metadata.sourceEventId, 'B站回复来源 ID');
-    if (metadata.state === 'sent') metadata.replyId = biliSocialId(metadata.replyId);
+    if (metadata.state === 'sent') metadata.replyId = biliDynamicId(metadata.replyId);
     else if (metadata.replyId !== undefined) invalid('未确认的B站回复不能保存成功标识。');
   }
   return {
@@ -2109,7 +2109,11 @@ export function createStore(dbPath) {
           return { inserted: false, record: null, skipped: 'invalidated' };
         }
         const targetKey = biliCommentKey(accountId, notice);
-        const source = get(`SELECT source_ref AS key FROM events WHERE type = 'message'
+        const source = notice.resource === 'dynamic' ? get(`SELECT source_ref AS key FROM events WHERE type = 'message'
+          AND json_extract(metadata, '$.biliNotice.accountId') = ? AND json_extract(metadata, '$.biliNotice.notice.resource') = 'dynamic'
+          AND json_extract(metadata, '$.biliNotice.notice.commentType') = ? AND json_extract(metadata, '$.biliNotice.notice.oid') = ?
+          AND json_extract(metadata, '$.biliNotice.notice.rpid') = ? ORDER BY rowid LIMIT 1`, accountId, notice.commentType, notice.oid, notice.rpid)
+          : get(`SELECT source_ref AS key FROM events WHERE type = 'message'
           AND json_extract(metadata, '$.biliNotice.accountId') = ?
           AND json_extract(metadata, '$.biliNotice.notice.aid') = ?
           AND json_extract(metadata, '$.biliNotice.notice.rpid') = ? ORDER BY rowid LIMIT 1`, accountId, notice.aid, notice.rpid);
@@ -2117,7 +2121,7 @@ export function createStore(dbPath) {
           claimBili('target', targetKey, now);
           const original = biliRecord(source.key);
           if (!original) return { inserted: false, record: null, skipped: 'invalidated' };
-          if (['mid', 'aid', 'bvid', 'content', 'rpid', 'root'].some(field => original.notice[field] !== notice[field])) {
+          if ((notice.resource === 'dynamic' ? ['mid', 'resource', 'dynamicId', 'oid', 'commentType', 'content', 'rpid', 'root'] : ['mid', 'aid', 'bvid', 'content', 'rpid', 'root']).some(field => original.notice[field] !== notice[field])) {
             claimBili('decision', original.key, now);
             return { inserted: false, record: appendBiliState(original, original.state === 'sending' ? 'unknown' : 'invalidated', now), skipped: 'changed' };
           }
@@ -2169,7 +2173,7 @@ export function createStore(dbPath) {
         const unconfirmed = ['post', 'comment', 'reply'].some(action => ['pending', 'unknown', 'error'].includes(budget.outcomes?.bilibili?.[action]?.outcome)
           && Date.parse(budget.outcomes.bilibili[action].at) >= Date.parse(budget.dayStartAt));
         if (attempts >= limit || publicAttempts >= platformLimit || unconfirmed || !claimBili('send', key, now)) return null;
-        const target = { targetKey: key, targetUrl: `https://www.bilibili.com/video/${item.notice.bvid}` };
+        const target = { targetKey: key, targetUrl: biliNoticeUrl(item.notice) };
         api.setSetting('selfExpressionStatus', { ...budget, postAttempts: attempts + 1,
           platformAttempts: { ...budget.platformAttempts, bilibili: { ...counts, reply: (counts.reply || 0) + 1 } },
           outcomes: { ...budget.outcomes, bilibili: { ...budget.outcomes?.bilibili, reply: { outcome: 'pending', at: now, ...target } } }, lastOutcome: 'pending' });
@@ -2182,7 +2186,7 @@ export function createStore(dbPath) {
       key = biliKey(key); record(options, 'B站回复结果');
       if (!BILI_REPLY_TERMINAL.includes(state) || Object.keys(options).some(key => !['replyId', 'now'].includes(key))) invalid('B站回复结束状态无效。');
       const now = followupClock(options.now === undefined ? Date.now() : options.now);
-      const replyId = state === 'sent' ? biliSocialId(options.replyId) : undefined;
+      const replyId = state === 'sent' ? biliDynamicId(options.replyId) : undefined;
       if (state !== 'sent' && options.replyId !== undefined) invalid('未确认发送不能记录B站回复标识。');
       return transaction(() => {
         const item = biliRecord(key);

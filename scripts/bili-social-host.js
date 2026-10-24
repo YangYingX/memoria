@@ -61,9 +61,11 @@ async function main(input) {
   client = new McpClient({ command: input.pythonPath,
     args: ['-I', '-B', fileURLToPath(new URL('./bili-social-mcp.py', import.meta.url)), script], cwd: workspace,
     env: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', BILI_MCP_TOOLS: 'bili_received_replies,bili_received_at_and_likes,bili_reply,bili_send_dynamic',
-      MEMORIA_BILI_BROKER_PORT: String(server.address().port), MEMORIA_BILI_BROKER_TOKEN: token } });
+      MEMORIA_BILI_BROKER_PORT: String(server.address().port), MEMORIA_BILI_BROKER_TOKEN: token, MEMORIA_BILI_DYNAMIC_REPLY: input.notice?.resource === 'dynamic' ? '1' : '0' } });
   const resultPromise = (async () => {
     if (input.operation === 'post') return client.call('bili_send_dynamic', { text: input.text }, { timeoutMs: 110000 });
+    if (input.operation === 'reply' && input.notice?.resource === 'dynamic') return client.call('memoria_reply_dynamic', {
+      oid: input.notice.oid, resource_type: input.notice.commentType, text: input.text, rpid: input.notice.rpid, root: input.notice.root }, { timeoutMs: 110000 });
     if (input.operation !== 'inbox') return client.call('bili_reply', {
       bvid: input.notice.bvid, text: input.text, rpid: Number(input.notice.rpid), root: Number(input.notice.root) }, { timeoutMs: 110000 });
     const replies = await client.call('bili_received_replies', {}, { timeoutMs: 110000 });

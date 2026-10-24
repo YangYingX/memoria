@@ -1,3 +1,4 @@
+import { biliNoticeUrl } from './bili-social-notice.js';
 import { createMemoryAccess, memoryPage, withConversationSource, companionShelfMemories } from './memory-access.js';
 
 // Platform notices stay in Memoria; the optional plugin runtime only reads and submits actions.
@@ -33,7 +34,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
           userMessageIds: [...userMessageIds], memoryIds: [...memoryVersions.keys()], conversationIds: [...conversationIds],
           memoryVersions: [...memoryVersions].map(([memoryId, signature]) => ({ memoryId, signature })), historyMessageIds: [...historyMessageIds] };
         if (userMessageIds.size + memoryVersions.size + conversationIds.size + historyMessageIds.size > 100
-          || JSON.stringify({ ...result, replyId: '9'.repeat(16) }).length > 16000) invalidSource();
+          || JSON.stringify({ ...result, replyId: '9'.repeat(20) }).length > 16000) invalidSource();
         return result;
       }
       function trackMemory(id, expected) {
@@ -73,7 +74,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
       });
       assistantMetadata();
       const snapshot = JSON.stringify({ record, history, memories });
-      const url = `https://www.bilibili.com/video/${record.notice.bvid}/`;
+      const url = biliNoticeUrl(record.notice) + (record.notice.resource === 'dynamic' ? '' : '/');
       function sourcesCurrent() {
         try {
           const current = store.getBiliNotice(record.key);
@@ -120,7 +121,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
             isCurrentSpeaker: role === 'user' && actor === record.actor, text: content.slice(0, 800) })),
           ...(selfIndex.items.length ? { selfConversationIndex: selfIndex.items } : {}),
           memories: memoryContext,
-          note: '这是当前公开评论线程及公开书架的有限资料；未提供创建人私聊或其他群聊。只回应这条评论，不表示读过完整视频。' },
+          note: '这是当前公开评论线程及公开书架的有限资料；未提供创建人私聊或其他群聊。只回应这条评论。' + (record.notice.resource === 'dynamic' ? '本轮通知未提供动态全文或图片；可按当前权限核对已保存公开资料，不补齐未知内容。' : '不表示读过完整视频。') },
         finish(state, { replyId, text } = {}) {
           const saved = store.finishBiliReply(record.key, state, replyId ? { replyId } : {});
           if (state !== 'sent' || !text) return true;

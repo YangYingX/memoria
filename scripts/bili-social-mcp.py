@@ -97,7 +97,22 @@ def main():
     request_settings.set_wbi_retry_times(1)
     request_log.set_on(False)
     os.environ["BILI_MCP_TOOLS"] = "bili_received_replies,bili_received_at_and_likes,bili_reply,bili_send_dynamic"
-    runpy.run_path(str(script), run_name="__main__")
+    namespace = runpy.run_path(str(script), run_name="memoria_bili_server")
+    if os.environ.get("MEMORIA_BILI_DYNAMIC_REPLY") == "1":
+        from bilibili_api import comment
+        import re
+
+        @namespace["mcp"].tool(name="memoria_reply_dynamic")
+        async def memoria_reply_dynamic(oid: str, resource_type: int, text: str, rpid: str, root: str) -> str:
+            if resource_type not in (11, 17) or not all(re.fullmatch(r"[1-9]\d{0,19}", value) for value in (oid, rpid)):
+                raise ValueError("INVALID_DYNAMIC_REPLY")
+            if not re.fullmatch(r"(?:0|[1-9]\d{0,19})", root) or not text.strip() or len(text) > 600:
+                raise ValueError("INVALID_DYNAMIC_REPLY")
+            result = await comment.send_comment(text=text, oid=int(oid), type_=comment.CommentResourceType(resource_type),
+                root=int(rpid if root == "0" else root), parent=int(rpid), credential=namespace["get_cred"]())
+            receipt = result.get("rpid_str") or result.get("rpid")
+            return json.dumps({"success": True, "rpid": str(receipt)}, ensure_ascii=False)
+    namespace["mcp"].run(transport="stdio")
 
 
 if __name__ == "__main__":
