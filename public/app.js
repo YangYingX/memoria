@@ -1058,6 +1058,19 @@ $('dsh-test').addEventListener('click', () => action($('dsh-test'), async () => 
     output.textContent = `运行层已响应。DSH ${result.versions.dsh} · B站阅读插件 ${result.versions.humanism}\n已加载栖忆只读书架工具；未调用模型、访问平台或发布内容。${result.proactive?.packageVerified ? '\n主动搭话原包已通过固定版本与文件校验；本次检测未执行拟聊回合。' : ''}${result.mood?.packageVerified ? '\n心情原包已通过固定版本与文件校验；本次检测未执行心情评估。' : ''}`;
   } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
+function showBiliLoginResult(result) {
+  const output = $('bili-import-result');
+  output.hidden = false; output.classList.remove('error');
+  const readReady = result?.readReady === undefined ? result?.configured : result.readReady;
+  if (readReady !== true) {
+    output.classList.add('error'); output.textContent = '未确认B站登录状态已保存，请刷新状态或重新导入。';
+    throw new Error(output.textContent);
+  }
+  output.textContent = result.socialReady === true
+    ? 'B站登录已保存：阅读与社交凭据已齐备。这里只确认本机保存情况，不代表登录仍有效或评论回复已开启。'
+    : '已保存B站阅读登录，社交凭据尚未齐备，暂不能用于评论回复。请重新登录专用账号，或将Chrome登录桥重载至1.1.0后重新导入。';
+  toast(output.textContent);
+}
 $('bili-login').addEventListener('click', () => action($('bili-login'), async () => {
   await api('/api/bili/login', { method: 'POST', data: {} });
   await loadState(); toast('专用浏览器已打开，请手动登录后保存状态。');
@@ -1075,8 +1088,12 @@ $('heybox-login-confirm').addEventListener('click', () => action($('heybox-login
   } finally { await loadState(); }
 }).finally(() => { $('heybox-login-confirm').disabled = !state.data?.heyboxAccountStatus?.browserOpen; }));
 $('bili-login-confirm').addEventListener('click', () => action($('bili-login-confirm'), async () => {
-  await api('/api/bili/login/confirm', { method: 'POST', data: {} });
-  await loadState(); toast('B站专用账号登录状态已保存到本机。');
+  const output = $('bili-import-result');
+  output.hidden = false; output.classList.remove('error'); output.textContent = '正在确认B站专用账号登录…';
+  try {
+    const result = await api('/api/bili/login/confirm', { method: 'POST', data: {} });
+    await loadState(); showBiliLoginResult(result);
+  } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
 $('bili-login-import').addEventListener('click', () => action($('bili-login-import'), async () => {
   const output = $('bili-import-result');
@@ -1098,10 +1115,9 @@ $('bili-login-import').addEventListener('click', () => action($('bili-login-impo
         });
       } catch { clearTimeout(timer); reject(new Error('Chrome 登录桥未能连接，请检查扩展后重试。')); }
     });
-    await api('/api/bili/login/import', { method: 'POST', data: credentials });
+    const result = await api('/api/bili/login/import', { method: 'POST', data: credentials });
     await loadState();
-    output.textContent = '已从当前 Chrome 保存 B站专用登录状态。';
-    toast(output.textContent);
+    showBiliLoginResult(result);
   } catch (error) { output.classList.add('error'); output.textContent = error.message; throw error; }
 }));
 $('settings-form').addEventListener('submit', event => {

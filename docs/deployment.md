@@ -511,7 +511,7 @@ Linux 可分别填写 `/opt/node24/bin/node` 和 `/var/lib/persona-agent/dsh-hos
 1. 在已登录 B站的那个 Chrome 资料中打开 `chrome://extensions`，启用开发者模式，选择“加载已解压的扩展程序”，加载本项目的 `extensions/bili-login-bridge` 目录。
 2. 用同一个 Chrome 打开 `http://127.0.0.1:3210` 并登录创建人后台。在“人格与设置 → DSH 插件运行层”点击“从当前 Chrome 导入 B站登录”。看到已保存提示后即可移除扩展。
 
-登录桥 1.1.0 只在点击时读取 `www.bilibili.com` 下的 `SESSDATA`、`DedeUserID`、`bili_jct` 和可用的 `buvid3`，经已登录的本机后台保存；不读取浏览历史或其他网站，不执行自动同步，导入过程不向模型或其他服务传送登录状态。升级项目后，已装扩展须在 `chrome://extensions` 重新加载，确认版本 1.1.0，再点一次导入。旧文件仍可用于只读；社交回复需要有效 `bili_jct`，不能只看“已保存”。扩展只接受来自上述本机地址的请求，其他端口、远程地址和内置浏览器不能使用此导入按钮。退出 Chrome 的 B站登录后，本机副本不一定立即失效，请在 B站账号管理中撤销不再使用的会话。这里不读取 Google 登录、不复制或解密 Chrome 资料目录。[Chrome 扩展加载说明](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-an-unpacked-extension)
+登录桥 1.1.0 只在点击时读取 `www.bilibili.com` 下的 `SESSDATA`、`DedeUserID`、`bili_jct` 和可用的 `buvid3`，经已登录的本机后台保存；不读取浏览历史或其他网站，不执行自动同步，导入过程不向模型或其他服务传送登录状态。升级项目后，已装扩展须在 `chrome://extensions` 重新加载，确认版本 1.1.0，再点一次导入。旧文件仍可用于只读；社交回复需要有效 `bili_jct`，保存或导入后，提示会区分阅读凭据与社交凭据是否齐备；仅保存阅读登录时，不能用于评论回复。即使社交凭据齐备，也不代表平台认证仍有效或回复开关已启用。扩展只接受来自上述本机地址的请求，其他端口、远程地址和内置浏览器不能使用此导入按钮。退出 Chrome 的 B站登录后，本机副本不一定立即失效，请在 B站账号管理中撤销不再使用的会话。这里不读取 Google 登录、不复制或解密 Chrome 资料目录。[Chrome 扩展加载说明](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-an-unpacked-extension)
 
 专用浏览器资料留在数据目录的 `bili-browser/`；本机执行凭据保存到 `bili-credentials.json`，不进入 GitHub、结构化备份、模型消息或字幕域请求。视频读取通道只取得所需的只读字段，只向固定 B站只读 API 携带 SESSDATA，不因此获得评论或其他写入功能；视频评论通知回复需另配[独立社交通道](#b站视频评论通知回复)。后台分别显示只读与社交凭据是否齐备，仅表示本机保存情况，不证明平台认证仍有效；失效后可重新登录。登录不会自动解除已有风险暂停。
 
