@@ -454,14 +454,16 @@ const bookActions = {
     return store.listMemories({ scope: 'owner' }).filter(memory => memory.sourceType === 'book' && memory.category === 'book-note' && memory.sourceRef.startsWith(`book:${id}:`)).slice(0, 5)
       .map(memory => ({ id: memory.id, title: memory.title, excerpt: memory.content.slice(0, 700), sourceRef: memory.sourceRef }));
   },
-  read: async id => {
+  read: async (id, options = {}) => {
+    options.signal?.throwIfAborted(); options.assertActive?.();
     const book = store.getBook(id);
     if (!book) throw new Error('书籍不存在或已移出书房。');
     if (book.currentOffset >= book.text.length) return { ok: false, skipped: 'finished', reason: '这份已导入正文已经读完；分页作品不代表整本书读完。' };
     if (bookConversation) throw new Error('已有聊天读书任务进行中。');
     bookConversation = true;
     try {
-      const status = await bookJobs.run({ force: true, bookId: id });
+      const status = await bookJobs.runForeground({ bookId: id, signal: options.signal, assertActive: options.assertActive });
+      options.signal?.throwIfAborted(); options.assertActive?.();
       const ok = status.lastOutcome === 'success' && !status.skipped;
       return { ok, ...(status.skipped ? { skipped: status.skipped } : {}), bookId: id, bookTitle: book.title,
         ...(ok ? { startOffset: status.lastStartOffset, endOffset: status.lastEndOffset, note: bookActions.notes(id)[0] }
@@ -614,7 +616,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
       const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
         ...(dshRuntime.status().enabled ? { memoryAgent: async (query, excludeMessageId) => ({ ok: true,
           ...await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal }) }) } : {}),
-        ...(scope === 'owner' && actor === 'owner' ? { bookActions, activityActions,
+        ...(scope === 'owner' && actor === 'owner' ? { bookActions: { ...bookActions, read: id => bookActions.read(id, { signal: options.signal, assertActive: options.assertActive }) }, activityActions,
           autonomyControlActions: createAutonomyControlActions({ store, cancel: keys => {
             for (const key of keys) {
               if (key === 'autonomy') autonomyJobs.cancel();

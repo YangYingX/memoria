@@ -42,12 +42,12 @@ function chunkEnd(text, start, length) {
 }
 
 export function createBookJobs({ store, summarize, isBusy = () => false, clock = Date.now, random = Math.random }) {
-  let busy = false, stopped = false, controller;
+  let busy = false, stopped = false, controller, activeRun, foregroundPending;
   let lastState = store.getSetting('bookStatus', {});
   const now = () => Number(clock());
   const draw = () => Math.min(0.999999999, Math.max(0, Number(random()) || 0));
   const settings = () => normalizeBookSettings({}, store.getSetting('books', {}));
-  const status = () => ({ ...(stopped ? lastState : store.getSetting('bookStatus', {})), busy });
+  const status = () => ({ ...(stopped ? lastState : store.getSetting('bookStatus', {})), busy: busy || Boolean(foregroundPending) });
   const save = state => { if (!stopped) { store.setSetting('bookStatus', state); lastState = state; } return state; };
 
   function slots(config, state, from) {
@@ -77,8 +77,9 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
     return state;
   }
 
-  async function run({ force = false, bookId } = {}) {
+  async function execute({ force = false, bookId, signal, assertActive } = {}) {
     if (stopped) return { ...status(), skipped: 'stopped' };
+    signal?.throwIfAborted(); assertActive?.();
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
     const config = settings(), time = now();
     if ((!config.enabled && !force) || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
@@ -106,13 +107,20 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
     const excerpt = book.text.slice(startOffset, endOffset);
     const previousNotes = store.listBookReadingNotes(book.id, startOffset);
     const notesSignature = JSON.stringify(previousNotes);
+    signal?.throwIfAborted(); assertActive?.();
     state.daySlots.shift(); state.attempts += 1; state.nextRunAt = state.daySlots[0] || '';
     state.lastAttempt = new Date(time).toISOString(); state.lastOutcome = 'reading'; state.lastError = '';
     state.lastBookId = book.id; state.lastTitle = book.title; state.lastStartOffset = startOffset; state.lastEndOffset = endOffset;
     save(state); busy = true;
     const activeController = controller = new AbortController();
+    let finish;
+    const running = activeRun = { forced: Boolean(force), controller: activeController, finished: new Promise(resolve => { finish = resolve; }) };
+    const abort = () => activeController.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     const sameDay = () => !stopped && store.getSetting('bookStatus', {}).dayId === state.dayId;
     const current = () => {
+      try { signal?.throwIfAborted(); assertActive?.(); } catch { return false; }
       if (!sameDay() || activeController.signal.aborted || now() < Date.parse(state.dayStartAt) || now() >= Date.parse(state.dayEndAt)
         || JSON.stringify(settings()) !== state.configSignature) return false;
       const latest = store.getBook(book.id);
@@ -139,10 +147,56 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
       const message = String(error.message || '读书未完成。').replace(/\0/g, '').slice(0, 300);
       save({ ...state, lastOutcome: 'error', lastError: message });
       throw new Error(message);
-    } finally { busy = false; if (controller === activeController) controller = null; }
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      busy = false;
+      if (controller === activeController) controller = null;
+      if (activeRun === running) activeRun = null;
+      finish();
+    }
+  }
+  async function run(options = {}) {
+    if (foregroundPending) return { ...status(), skipped: 'busy' };
+    return execute(options);
+  }
+  async function runForeground({ bookId, signal, assertActive } = {}) {
+    if (stopped) return { ...status(), skipped: 'stopped' };
+    signal?.throwIfAborted(); assertActive?.();
+    if (foregroundPending) return { ...status(), skipped: 'busy' };
+    const pending = foregroundPending = new AbortController();
+    const abort = () => pending.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const checkActive = () => { signal?.throwIfAborted(); pending.signal.throwIfAborted(); assertActive?.(); };
+    async function handoff() {
+      checkActive();
+      const previous = activeRun;
+      if (previous) {
+        if (previous.forced || isBusy()) return { ...status(), skipped: 'busy' };
+        const config = settings(), state = store.getSetting('bookStatus', {}), time = now();
+        if (time >= Date.parse(state.dayStartAt) && time < Date.parse(state.dayEndAt)
+          && state.attempts >= Math.min(state.target, config.dailyLimit)) return { ...status(), skipped: 'daily_limit' };
+        previous.controller.abort();
+        let timer;
+        try {
+          const finished = await Promise.race([previous.finished.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 2000); })]);
+          checkActive();
+          if (!finished) return { ...status(), skipped: 'busy' };
+        } finally { clearTimeout(timer); }
+      }
+      if (stopped) return { ...status(), skipped: 'stopped' };
+      checkActive();
+      return execute({ force: true, bookId, signal: pending.signal, assertActive: checkActive });
+    }
+    let result;
+    try { result = await handoff(); }
+    finally {
+      signal?.removeEventListener('abort', abort);
+      if (foregroundPending === pending) foregroundPending = null;
+    }
+    return { ...result, busy };
   }
   async function tick() { try { return await run(); } catch { return status(); } }
-  function cancel() { controller?.abort(); }
+  function cancel() { controller?.abort(); foregroundPending?.abort(); }
   function stop() { stopped = true; cancel(); }
-  return { status, tick, run, cancel, stop };
+  return { status, tick, run, runForeground, cancel, stop };
 }
