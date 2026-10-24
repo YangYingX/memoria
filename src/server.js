@@ -21,6 +21,7 @@ import { defaultBookSettings, normalizeBookSettings, createBookJobs } from './bo
 import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 import { createProactiveRecipientResolver } from './proactive-recipient.js';
+import { composeProactive } from './proactive-compose.js';
 import { bindOwnerHeybox } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
 import { activitySnapshot, communityReadingResult, inspectRecentPost } from './activity.js';
@@ -327,15 +328,40 @@ function makeProactiveJobs() {
   };
   const compose = async (args, recipient, signal) => {
     signal?.throwIfAborted();
+    const engine = dshRuntime.status();
+    if (engine.error) throw new Error(engine.error);
+    const configuration = () => JSON.stringify({ model: store.getSetting('model'), persona: store.getSetting('persona'),
+      proactive: store.getSetting('proactive'), channel: store.getSetting(recipient.platform || 'qq'),
+      account: store.listAccounts().find(item => item.id === recipient.accountId),
+      ...(recipient.platform === 'feishu' ? { connection: (() => {
+        const state = feishuRuntime.status();
+        return { connected: state.connected, proactiveReady: state.proactiveReady, epoch: state.epoch,
+          botId: state.botId, fingerprint: state.fingerprint };
+      })() } : {}),
+      dsh: existsSync(join(dataDir, 'dsh-runtime.json'))
+        ? createHash('sha256').update(readFileSync(join(dataDir, 'dsh-runtime.json'))).digest('hex') : null });
+    const initial = configuration();
+    const assertActive = () => {
+      signal?.throwIfAborted();
+      const current = dshRuntime.status();
+      if (closing || current.error || current.enabled !== engine.enabled || configuration() !== initial) throw new Error('主动私聊的配置或原聊天身份已变化，本次任务已取消。');
+    };
+    assertActive();
     reserveProactiveChat(recipient);
-    const result = await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args, signal,
-      priority: 'background', onYield: () => proactiveJobs.cancel() });
+    const result = engine.enabled
+      ? await dshRuntime.execute({ scope: 'owner', actor: 'owner', name: 'compose_proactive', args, signal, assertActive,
+        priority: 'background', onYield: () => proactiveJobs.cancel() })
+      : await composeProactive({ store, ...args, signal, assertActive });
+    assertActive();
     let proposal;
     try { proposal = JSON.parse(result.text); }
     catch { throw new Error('原生主动私聊未返回有效决定。'); }
     return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
       historyMessageIds: result.historyMessageIds, userMessageIds: result.userMessageIds,
-      memoryVersions: result.memoryVersions, sourcesCurrent: result.sourcesCurrent };
+      memoryVersions: result.memoryVersions, sourcesCurrent() {
+        try { assertActive(); return result.sourcesCurrent() === true; }
+        catch { return false; }
+      } };
   };
   return createProactiveJobs({ store, getRecipient: getProactiveRecipient,
     canGenerate: recipient => recipient.platform === 'feishu' ? feishuChat.status().chat.remaining > 0 : qqChatBudget.status().remaining > 0,
@@ -361,7 +387,7 @@ function makeProactiveJobs() {
     },
     canAssessCompanion: () => { const status = mateRuntime.status(); return status.enabled || Boolean(status.error); },
     assessCompanion,
-    canGenerateConversation: () => dshRuntime.status().enabled,
+    canGenerateConversation: () => { const status = dshRuntime.status(); return status.enabled || !status.error; },
     generateConversation: ({ messageId, impulse, recipient, signal }) => compose({ messageId, ...(impulse ? { impulse } : {}) }, recipient, signal),
     generateTheme: ({ memoryId, impulse, recipient, signal }) => compose({ memoryId, ...(impulse ? { impulse } : {}) }, recipient, signal),
     generateAgenda: ({ agendaId, recipient, signal }) => compose({ agendaId }, recipient, signal),
