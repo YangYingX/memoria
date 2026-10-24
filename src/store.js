@@ -1332,11 +1332,12 @@ export function createStore(dbPath) {
     },
     updateProactivePreferences(input) {
       record(input, '陪伴偏好更新');
-      if (Reflect.ownKeys(input).length !== 3 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings'].includes(key))) invalid('陪伴偏好更新参数无效。');
+      if (Reflect.ownKeys(input).length !== 4 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings', 'expectedText'].includes(key))) invalid('陪伴偏好更新参数无效。');
       let patch;
       try { patch = normalizeCompanionPreferencePatch(input.patch); }
-      catch { invalid('陪伴偏好仅允许有效的主动开关、表达欲、每日条数、冷却时间和免打扰时长。'); }
+      catch { invalid('陪伴偏好仅允许有效的主动开关、表达欲、每日条数、冷却时间、同日整点时段和免打扰时长。'); }
       const sourceEventId = identifier(input.sourceEventId, '陪伴偏好来源 ID');
+      if (typeof input.expectedText !== 'string' || !input.expectedText.trim() || input.expectedText.length > 8000) invalid('陪伴偏好须核对本轮直接文字。');
       const expected = jsonValue(record(input.expectedSettings, '原陪伴设置'), '原陪伴设置', 50000);
       return transaction(() => {
         const current = api.getSetting('proactive', defaultProactiveSettings);
@@ -1344,7 +1345,8 @@ export function createStore(dbPath) {
         const sourceRow = get('SELECT * FROM events WHERE id = ?', sourceEventId), source = sourceRow ? eventRow(sourceRow) : null;
         const message = source && typeof source.metadata.messageId === 'string' ? get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId) : null;
         const now = new Date().toISOString();
-        if (!validFollowupSource(source, message) || source.createdAt > now || currentConversationOrigin(source, message) === null) invalid('陪伴偏好须来自创建人当前有效的聊天原话。');
+        if (!validFollowupSource(source, message) || source.content !== input.expectedText || message.content !== input.expectedText
+          || source.createdAt > now || message.created_at > now || currentConversationOrigin(source, message) === null) invalid('陪伴偏好须来自创建人当前有效的聊天原话。');
         if (get("SELECT 1 FROM events WHERE type = 'companion_preference' AND source_ref = ?", sourceEventId)
           || !api.claimDelivery(`companion-preference:${sourceEventId}`)) invalid('这条聊天已调整过陪伴偏好，请用新的消息确认。');
         let before, after;
