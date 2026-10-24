@@ -13,6 +13,10 @@ import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, normalizeNotice, 
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
 import { defaultProactiveSettings } from './proactive.js';
+import { normalizeAutonomyControlPatch } from './autonomy-controls.js';
+import { defaultAutonomySettings } from './autonomy.js';
+import { defaultBookSettings } from './book-jobs.js';
+import { defaultExpressionSettings } from './self-expression.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -1285,6 +1289,35 @@ export function createStore(dbPath) {
         api.setSetting('proactive', next);
         insertEvent({ id: randomUUID(), ...eventFields({ type: 'companion_preference', scope: 'owner', actor: 'owner',
           sourceRef: sourceEventId, content: '已根据创建人当前聊天调整主动陪伴偏好。', metadata: { patch, before, after } }), createdAt: now });
+        return after;
+      });
+    },
+    updateAutonomyControls(input) {
+      record(input, '自主活动开关更新');
+      if (Reflect.ownKeys(input).length !== 3 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings'].includes(key))) invalid('自主活动开关更新参数无效。');
+      let patch;
+      try { patch = normalizeAutonomyControlPatch(input.patch); }
+      catch { invalid('仅可调整自主浏览、读书和公开表达三个布尔开关。'); }
+      const sourceEventId = identifier(input.sourceEventId, '自主活动开关来源 ID');
+      const keys = ['autonomy', 'books', 'selfExpression'];
+      const expected = jsonValue(record(input.expectedSettings, '原自主活动设置'), '原自主活动设置', 50000);
+      if (Object.keys(expected).length !== keys.length || Object.keys(expected).some(key => !keys.includes(key))) invalid('原自主活动设置须包含完整的三项配置。');
+      return transaction(() => {
+        const current = { autonomy: api.getSetting('autonomy', defaultAutonomySettings), books: api.getSetting('books', defaultBookSettings),
+          selfExpression: api.getSetting('selfExpression', defaultExpressionSettings) };
+        if (JSON.stringify(current) !== JSON.stringify(expected)) invalid('自主活动设置已变化，请重新确认当前开关。');
+        if (keys.some(key => !current[key] || typeof current[key] !== 'object' || Array.isArray(current[key]) || typeof current[key].enabled !== 'boolean')) invalid('当前自主活动开关设置无效，请在后台核对。');
+        const sourceRow = get('SELECT * FROM events WHERE id = ?', sourceEventId), source = sourceRow ? eventRow(sourceRow) : null;
+        const message = source && typeof source.metadata.messageId === 'string' ? get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId) : null;
+        const now = new Date().toISOString();
+        if (!validFollowupSource(source, message) || source.createdAt > now || message.created_at > now || currentConversationOrigin(source, message) === null) invalid('自主活动开关须来自创建人当前有效的聊天原话。');
+        if (get("SELECT 1 FROM events WHERE type = 'autonomy_control' AND source_ref = ?", sourceEventId)
+          || !api.claimDelivery(`autonomy-control:${sourceEventId}`)) invalid('这条聊天已调整过自主活动开关，请用新的消息确认。');
+        const before = Object.fromEntries(keys.map(key => [key, current[key].enabled]));
+        const after = { ...before, ...patch };
+        for (const key of keys) if (Object.hasOwn(patch, key) && before[key] !== patch[key]) api.setSetting(key, { ...current[key], enabled: patch[key] });
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'autonomy_control', scope: 'owner', actor: 'owner', sourceRef: sourceEventId,
+          content: '已根据创建人当前聊天调整自主浏览、读书或公开表达总开关。', metadata: { patch, before, after } }), createdAt: now });
         return after;
       });
     },
