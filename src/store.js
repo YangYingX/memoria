@@ -1588,7 +1588,7 @@ export function createStore(dbPath) {
       const snapshot = moodSnapshot({ getSetting: () => proof.state }, Date.parse(proof.event.createdAt));
       return { memory, actor: proof.source.user.actor, conversationId: proof.source.user.id,
         ...(proof.context?.length ? { contextConversationIds: proof.context.map(item => item.user.id) } : {}),
-        emotion: snapshot.emotion, label: snapshot.label, recordedAt: proof.event.createdAt };
+        emotion: snapshot.emotion, label: snapshot.label, value: proof.state.value, confidence: proof.state.confidence, recordedAt: proof.event.createdAt };
     },
     getCompanionMemoryEvidence(id) {
       const memory = api.getMemory(identifier(id, '记忆 ID'));

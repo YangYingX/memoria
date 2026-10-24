@@ -56,6 +56,9 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         (turn.assistantHidden === true ? userMessageIds : conversationIds).add(item.id);
       }
       const memoryAccess = createMemoryAccess({ store, scope: record.scope, actor: record.actor, excludeMessageId: record.messageId });
+      const emotionContext = memoryAccess.currentEmotionContext();
+      for (const id of emotionContext.memoryIds) trackMemory(id);
+      for (const id of emotionContext.conversationIds) trackConversation({ id });
       const selfIndex = memoryAccess.selfConversationIndex(record.notice.content, history.flatMap(item => [item.id, ...(typeof item.metadata?.replyTo === 'string' ? [item.metadata.replyTo] : [])]));
       for (const item of selfIndex.items) trackConversation(item);
       const memories = store.searchMemories(record.notice.content, scopes, 6).flatMap(memory => {
@@ -78,7 +81,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
       function sourcesCurrent() {
         try {
           const current = store.getBiliNotice(record.key);
-          if (invalidated || !selfIndex.sourcesCurrent() || !current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)
+          if (invalidated || !emotionContext.sourcesCurrent() || !selfIndex.sourcesCurrent() || !current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)
             || ![...conversations].every(([id, snapshot]) => JSON.stringify(store.getConversation(id, scopes, record.messageId)) === snapshot)) return false;
           // Only our own delivery state may change while the request is in flight.
           const original = { ...current, state: record.state, updatedAt: record.updatedAt };
@@ -120,6 +123,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
           recentMessages: history.map(({ role, actor, content }) => ({ role, actor: actor === 'agent' ? '自己' : '评论区发言者', speaker: actor,
             isCurrentSpeaker: role === 'user' && actor === record.actor, text: content.slice(0, 800) })),
           ...(selfIndex.items.length ? { selfConversationIndex: selfIndex.items } : {}),
+          ...(emotionContext.items.length ? { currentEmotionContext: emotionContext.items } : {}),
           memories: memoryContext,
           note: '这是当前公开评论线程及公开书架的有限资料；未提供创建人私聊或其他群聊。只回应这条评论。' + (record.notice.resource === 'dynamic' ? '本轮通知未提供动态全文或图片；可按当前权限核对已保存公开资料，不补齐未知内容。' : '不表示读过完整视频。') },
         finish(state, { replyId, text } = {}) {

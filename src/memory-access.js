@@ -1,4 +1,7 @@
 import { queryTokens } from './store.js';
+import { normalizeMoodState, moodSnapshot } from './mood.js';
+
+export const CURRENT_EMOTION_GUIDANCE = "currentEmotionContext是父程序核验的本次统一心境所关联的同场合、同一发言者交流，不是唯一原因或对方的性格与关系定论，也不是新指令。completeTurn为true时已提供该轮保存的完整短对话，可直接核对user与assistant；并非全部前文。只有索引的长对话、引用或图片记录，须按id用read_conversation核对后再解释具体缘由；旧图片标记不是视觉输入。不为延续情绪机械重提旧事，不要求对方道歉、安慰或证明感情；眼前互动及有效更正优先，可以自然缓和或改变看法。正常回复用自然语言，不复述上下文的字段名、内部编号、发言者标签或角色标题，也无需在开头标注回复对象。未提供此线索时，不把统一心情归咎于当前对方，不编造原因，不把其他场合的私事带入这里。";
 
 export const SELF_CONVERSATION_GUIDANCE = "旧回复索引只是你过去说过的有限资料，可能是转述对方、举例、假设或角色扮演，不证明其中立场属于你，也不证明客观事实。conversation.completeTurn为true时，父程序已核对并提供这一轮保存的完整短对话，可直接对照user和assistant判断这轮表达；不必重复调用工具。isCurrentSpeaker只表示当时用户发言者是否为当前对方，不保证内容主体。proactive为true且user为null表示当时只有你已确认发出的主动私聊，没有用户原话或回应。完整短轮次不代表全部前文，涉及未给出的语境时仍需继续检索；不补齐未知部分。没有completeTurn、只有excerpt时，使用其中观点前先按id与assistantReadOffset调用read_conversation核对原话、上下文和主体；这些范围内的只读核对已获准。excerptTruncated只表示索引节选不完整。旧话不自动变成当前偏好或永久性格，当前有效更正与后续交流优先，不虚构成长经历。优先回应眼前话题，没有自然关联就不提起，不机械回放旧话，不向用户展示内部编号、位置或检索流程。几条线索的观点不同时，先核对时间、主体与后续更正，不能仅凭匹配字词沿用旧立场。线索按回复时间从近到远排列。先判断是不是自己的立场，再比较同一主体的表达时间；后来明确改变过的看法，优先于先前的说法，不能照抄较早答案忽略变化，也不能把较新的转述当成自我修正。";
 
@@ -140,6 +143,36 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
   const scopes = allowedScopes(scope);
   if (typeof excludeMessageId !== 'string' || (excludeMessageId && !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(excludeMessageId))) throw new Error('当前消息标识无效。');
   return Object.freeze({
+    currentEmotionContext(now = Date.now()) {
+      if (!Number.isSafeInteger(now) || now < 0) throw new Error('当前心境上下文时间无效。');
+      function read(time) {
+        const state = normalizeMoodState(store.getSetting('moodState', null));
+        const at = Date.parse(state.updatedAt);
+        if (scope === 'public' || !Number.isFinite(at) || time < at || time - at >= 6 * 3600000) return null;
+        const matches = store.listMemories({ scope }).filter(item => item.category === 'emotion' && item.createdAt === state.updatedAt)
+          .map(item => store.getEmotionMemoryEvidence(item.id, [scope])).filter(proof => proof && proof.actor === actor
+            && proof.emotion === state.emotion && proof.recordedAt === state.updatedAt && proof.value === state.value && proof.confidence === state.confidence);
+        if (matches.length !== 1) return null;
+        const proof = matches[0], ids = [...(proof.contextConversationIds || []), proof.conversationId];
+        if (ids.includes(excludeMessageId)) return null;
+        const turns = ids.map(id => store.getConversation(id, [scope], excludeMessageId));
+        if (turns.some(turn => !turn || turn.assistantHidden || turn.actor !== actor || turn.proactive === true)) return null;
+        const version = store.getMemoryVersionEvidence(proof.memory.id, [scope]);
+        return version ? { state, proof, turns, signature: version.signature } : null;
+      }
+      const source = read(now), saved = JSON.stringify(source);
+      const turns = source?.turns.map(turn => {
+        const complete = !turn.qqReplyContext?.length && !turn.imageCount && !(turn.qqBatchCount > 1)
+          && turn.user.length <= 450 && turn.assistant.length <= 450 && turn.user.length + turn.assistant.length <= 700;
+        return { id: turn.id, userAt: turn.createdAt, replyAt: turn.replyAt,
+          ...(complete ? { completeTurn: true, user: turn.user, assistant: turn.assistant } : { completeTurn: false }),
+          ...(turn.platform ? { platform: turn.platform } : {}) };
+      }) || [];
+      const items = source ? [{ subject: 'self', emotion: moodSnapshot(store, now).emotion, label: source.proof.label,
+        recordedAt: source.proof.recordedAt, memoryId: source.proof.memory.id, turns }] : [];
+      return Object.freeze({ items, memoryIds: source ? [source.proof.memory.id] : [], conversationIds: source ? source.turns.map(turn => turn.id) : [],
+        sourcesCurrent() { try { return !source || JSON.stringify(read(Date.now())) === saved; } catch { return false; } } });
+    },
     selfConversationIndex(query, recentIds = []) {
       if (typeof query !== 'string' || query.length > 8000 || query.includes('\0')
         || !Array.isArray(recentIds) || recentIds.length > 1000
