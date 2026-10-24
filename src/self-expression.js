@@ -350,7 +350,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
       if (state.decisionAttempts >= decisionLimit(config)) update({ nextRunAt: '' });
       const mood = moodSnapshot(store, now());
       const decision = validateDecision(await generate({ persona: store.getSetting('persona', {}), previousMood: mood.label, mood,
-        readings, readingNotes, previousPosts, discussion, ...(bili ? { biliDiscussion: bili.context } : {}), avatars, platforms: allowed, instructions: SELF_EXPRESSION_INSTRUCTIONS, signal: activeController.signal }), allowed, avatars, discussion, bili);
+        readings, readingNotes, previousPosts, discussion, ...(bili ? { biliDiscussion: bili.context, memoryAccess: bili.memory } : {}), avatars, platforms: allowed, instructions: SELF_EXPRESSION_INSTRUCTIONS, signal: activeController.signal }), allowed, avatars, discussion, bili);
       biliQuiet = decision.actions.length === 0;
       if (bili && !bili.current()) throw new Error('B站通知或本次引用资料已变化，未继续回复。');
       check(); update({ mood: decision.mood, reason: decision.reason, lastOutcome: decision.actions.length ? 'decided' : 'quiet' });

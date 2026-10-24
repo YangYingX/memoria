@@ -43,6 +43,7 @@ import { createCompanionPreferenceActions } from './companion-preferences.js';
 import { readBiliCredentials } from './bili-credentials.js';
 import { createBiliSocialRuntime } from './bili-social-runtime.js';
 import { createBiliSocialDiscussion } from './bili-social.js';
+import { generateBiliSocialDecision } from './bili-social-agent.js';
 import { defaultFeishuSettings, normalizeFeishuSettings } from './feishu-message.js';
 import { createFeishuChat } from './feishu.js';
 import { createFeishuRuntime } from './feishu-runtime.js';
@@ -201,7 +202,11 @@ function makeSelfExpressionJobs() {
       return runtime.readHeyboxComments(reading.url, { expectedTitle: reading.title, signal });
     },
     getBiliDiscussion,
-    generate: async ({ instructions, signal, ...context }) => {
+    generate: async ({ instructions, signal, memoryAccess, ...context }) => {
+      if (Object.hasOwn(context, 'biliDiscussion')) {
+        if (typeof memoryAccess?.execute !== 'function' || typeof memoryAccess?.current !== 'function') throw new Error('B站回复缺少可核对的公开线程记忆访问，本次不执行。');
+        return generateBiliSocialDecision({ store, instructions, context, memoryAccess, signal });
+      }
       const result = await requestCompletion({ store, signal, maxTokens: 900, messages: [
         { role: 'system', content: instructions },
         { role: 'user', content: JSON.stringify(context) },
