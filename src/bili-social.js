@@ -95,7 +95,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         execute(name, args) {
           if (!current()) invalidSource();
           const fields = { search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
-            search_conversations: ['query', 'offset'], read_conversation: ['id', 'offset'] };
+            search_conversations: ['query', 'offset', 'role'], read_conversation: ['id', 'offset'] };
           if (typeof name !== 'string' || !Object.hasOwn(fields, name) || !args || typeof args !== 'object' || Array.isArray(args)
             || Object.keys(args).some(key => !fields[name].includes(key))) throw new Error('B站记忆工具或参数无效，不能更改范围或回复目标。');
           const result = memoryAccess.execute(name, args);

@@ -86,8 +86,9 @@ function calendarDate(value, label) {
 function conversationDateRange(input) {
   if (input === undefined) return null;
   record(input, '对话日期范围');
-  if (Object.keys(input).some(key => !['startDate', 'endDate', 'timeZone', 'platform'].includes(key))) invalid('对话筛选包含未知字段。');
+  if (Object.keys(input).some(key => !['startDate', 'endDate', 'timeZone', 'platform', 'role'].includes(key))) invalid('对话筛选包含未知字段。');
   if (Object.hasOwn(input, 'platform') && !['qq', 'feishu'].includes(input.platform)) invalid('对话平台须为 qq 或 feishu。');
+  if (Object.hasOwn(input, 'role') && !['user', 'assistant'].includes(input.role)) invalid('对话文字角色须为 user 或 assistant。');
   const hasStart = Object.hasOwn(input, 'startDate'), hasEnd = Object.hasOwn(input, 'endDate');
   const startDate = hasStart ? calendarDate(input.startDate, '开始日期') : undefined;
   const endDate = hasEnd ? calendarDate(input.endDate, '结束日期') : undefined;
@@ -1960,25 +1961,31 @@ export function createStore(dbPath) {
       limit = integer(limit, '检索条数', 1, 100);
       offset = integer(offset, '检索位置', 0, Number.MAX_SAFE_INTEGER);
       if (excludeMessageId !== '') excludeMessageId = identifier(excludeMessageId, '当前消息 ID');
-      const dateFilter = conversationDateRange(dates);
+      const dateFilter = conversationDateRange(dates), role = dates?.role;
       const tokens = queryTokens(query);
       let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId
-        && (!dates?.platform || turn.platform === dates.platform) && (!dateFilter || dateFilter.includes(turn.createdAt)));
+        && (role !== 'assistant' || !turn.assistantHidden && Boolean(turn.assistant.trim()))
+        && (role !== 'user' || turn.proactive !== true && Boolean(turn.user.trim()))
+        && (!dates?.platform || turn.platform === dates.platform)
+        && (!dateFilter || dateFilter.includes(role === 'assistant' ? turn.replyAt : turn.createdAt)));
+      if (role === 'assistant') matches.sort((a, b) => b.replyAt.localeCompare(a.replyAt) || a.id.localeCompare(b.id));
       if (query) matches = tokens.length ? matches.map(turn => ({ turn,
-        score: conversationScore(turn.user, tokens) + conversationScore(turn.assistant, tokens)
+        score: (role !== 'assistant' ? conversationScore(turn.user, tokens)
           + (turn.imageCount ? conversationScore('图片 附件', tokens) : 0)
-          + (turn.qqReplyContext || []).reduce((sum, part) => sum + (part.reply?.status === 'verified' ? conversationScore(part.reply.text, tokens) : 0), 0) }))
+          + (turn.qqReplyContext || []).reduce((sum, part) => sum + (part.reply?.status === 'verified' ? conversationScore(part.reply.text, tokens) : 0), 0) : 0)
+          + (role !== 'user' ? conversationScore(turn.assistant, tokens) : 0) }))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.turn) : [];
       const total = matches.length;
       const items = offset < total ? matches.slice(offset, offset + limit).map(turn => {
         const { qqBatchNotice, qqReplyContext, ...summary } = turn;
-        const user = conversationExcerpt(turn.user, tokens), assistant = conversationExcerpt(turn.assistant, tokens);
-        return { ...summary, ...(qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}),
+        const user = role === 'assistant' ? { content: '', offset: null } : conversationExcerpt(turn.user, tokens);
+        const assistant = role === 'user' ? { content: '', offset: null } : conversationExcerpt(turn.assistant, tokens);
+        return { ...summary, ...(role ? { matchRole: role } : {}), ...(qqReplyContext?.some(part => part.reply?.status === 'verified') ? { hasQuote: true } : {}),
           user: user.content, assistant: assistant.content, userExcerptOffset: user.offset, assistantExcerptOffset: assistant.offset, userLength: turn.user.length,
-          userTruncated: turn.user.length > 1200, assistantTruncated: turn.assistant.length > 1200 };
+          userTruncated: role !== 'assistant' && turn.user.length > 1200, assistantTruncated: role !== 'user' && turn.assistant.length > 1200 };
       }) : [];
       return { items, total, offset, nextOffset: offset + items.length < total ? offset + items.length : null,
-        ...(dateFilter ? { dateRange: dateFilter.range } : {}) };
+        ...(role ? { role } : {}), ...(dateFilter ? { dateRange: dateFilter.range } : {}) };
     },
     getConversation(id, scopes, excludeMessageId = '') {
       id = identifier(id, '对话 ID');

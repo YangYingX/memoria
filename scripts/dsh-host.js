@@ -409,7 +409,7 @@ async function main(input) {
 
   // No model prompt or DSH session owns these memories: the parent binds verified identity and scope.
   for (const name of memoryTools) {
-    const keys = name.startsWith('search_') ? ['query', 'offset', ...(['search_conversations', 'search_emotions'].includes(name) ? ['start_date', 'end_date', ...(name === 'search_conversations' ? ['platform'] : [])] : [])] : ['id', 'offset'];
+    const keys = name.startsWith('search_') ? ['query', 'offset', ...(['search_conversations', 'search_emotions'].includes(name) ? ['start_date', 'end_date', ...(name === 'search_conversations' ? ['platform', 'role'] : [])] : [])] : ['id', 'offset'];
     ctx.tools.register(defineTool({
       name: `memoria_${name}`,
       description: name === 'search_emotions' ? 'Search the roles own verified past emotional episodes with the current participant in this scope, newest first, six per page. Query may be empty; optional inclusive dates filter record dates in the application calendar. Preserve query/dates for nextOffset. Verify reasons with read_conversation; the index is not a quote or current mood.'
@@ -419,11 +419,12 @@ async function main(input) {
         : name === 'read_memory' ? 'Read a page from a persistent Memoria memory in the current verified scope.'
           : 'Read a page of source evidence for a Memoria memory in the current verified scope.',
       parameters: name.startsWith('search_') ? { query: { type: 'string', required: true }, offset: { type: 'integer' },
-        ...(['search_conversations', 'search_emotions'].includes(name) ? { start_date: { type: 'string', description: 'Inclusive start date, YYYY-MM-DD; the parent validates the calendar date.' }, end_date: { type: 'string', description: 'Inclusive end date, YYYY-MM-DD; the parent validates the calendar date.' }, ...(name === 'search_conversations' ? { platform: { type: 'string', description: 'Optional qq or feishu, only for verified historical DM source filtering; never an identity or sending permission.' } } : {}) } : {}) }
+        ...(['search_conversations', 'search_emotions'].includes(name) ? { start_date: { type: 'string', description: 'Inclusive start date, YYYY-MM-DD; the parent validates the calendar date.' }, end_date: { type: 'string', description: 'Inclusive end date, YYYY-MM-DD; the parent validates the calendar date.' }, ...(name === 'search_conversations' ? { role: { type: 'string', description: 'Optional user or assistant: match only this text side; assistant dates use reply time. Preserve role for pagination. Match labels do not verify identity or facts; read_conversation provides the full context.' }, platform: { type: 'string', description: 'Optional qq or feishu, only for verified historical DM source filtering; never an identity or sending permission.' } } : {}) } : {}) }
         : { id: { type: 'string', required: true }, offset: { type: 'integer' } },
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
       async execute(args, exec) {
         if (!fields(args, keys)) fail('INVALID_MEMORY_ARGS');
+        if (name === 'search_conversations' && Object.hasOwn(args, 'role') && !['user', 'assistant'].includes(args.role)) fail('INVALID_MEMORY_ARGS');
         if (name === 'search_conversations' && Object.hasOwn(args, 'platform') && !['qq', 'feishu'].includes(args.platform)) fail('INVALID_MEMORY_ARGS');
         return JSON.stringify(await requestMemory(name, args, exec.signal));
       },

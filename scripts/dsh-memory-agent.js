@@ -8,10 +8,11 @@ const fields = (value, allowed) => object(value) && Object.keys(value).every(key
 const identifier = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(value);
 
 function validArgs(name, args) {
-  if (!fields(args, name.startsWith('search_') ? ['query', 'offset', ...(['search_conversations', 'search_emotions'].includes(name) ? ['start_date', 'end_date', ...(name === 'search_conversations' ? ['platform'] : [])] : [])] : ['id', 'offset'])) return false;
+  if (!fields(args, name.startsWith('search_') ? ['query', 'offset', ...(['search_conversations', 'search_emotions'].includes(name) ? ['start_date', 'end_date', ...(name === 'search_conversations' ? ['platform', 'role'] : [])] : [])] : ['id', 'offset'])) return false;
   if (args.offset !== undefined && (!Number.isSafeInteger(args.offset) || args.offset < 0)) return false;
   if (['search_conversations', 'search_emotions'].includes(name) && ['start_date', 'end_date'].some(key => Object.hasOwn(args, key)
     && (typeof args[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(args[key])))) return false;
+  if (name === 'search_conversations' && Object.hasOwn(args, 'role') && !['user', 'assistant'].includes(args.role)) return false;
   if (name === 'search_conversations' && Object.hasOwn(args, 'platform') && !['qq', 'feishu'].includes(args.platform)) return false;
   return name.startsWith('search_') ? typeof args.query === 'string' && args.query.length <= 500 : identifier(args.id);
 }
@@ -116,7 +117,7 @@ export async function runMemoryAgent({ ctx, load, query, requestModel, requestMe
             : name === 'read_memory' ? 'Read an authorized memory body page. Continue with nextOffset.'
               : 'Read authorized original conversation evidence. Continue with nextOffset.',
           parameters: name.startsWith('search_') ? { query: { type: 'string', required: true }, offset: { type: 'integer' },
-            ...(['search_conversations', 'search_emotions'].includes(name) ? { start_date: { type: 'string', description: 'Inclusive start date, YYYY-MM-DD; the parent validates the calendar date.' }, end_date: { type: 'string', description: 'Inclusive end date, YYYY-MM-DD; the parent validates the calendar date.' }, ...(name === 'search_conversations' ? { platform: { type: 'string', description: 'Optional qq or feishu, only for verified historical DM source filtering; never an identity or sending permission.' } } : {}) } : {}) }
+            ...(['search_conversations', 'search_emotions'].includes(name) ? { start_date: { type: 'string', description: 'Inclusive start date, YYYY-MM-DD; the parent validates the calendar date.' }, end_date: { type: 'string', description: 'Inclusive end date, YYYY-MM-DD; the parent validates the calendar date.' }, ...(name === 'search_conversations' ? { role: { type: 'string', description: 'Optional user or assistant: match only this text side; assistant dates use reply time. Preserve role for pagination. Match labels do not verify identity or facts; read_conversation provides the full context.' }, platform: { type: 'string', description: 'Optional qq or feishu, only for verified historical DM source filtering; never an identity or sending permission.' } } : {}) } : {}) }
             : { id: { type: 'string', required: true }, offset: { type: 'integer' } },
           output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
           async execute(args, exec) {

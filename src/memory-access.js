@@ -131,7 +131,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
   return Object.freeze({
     execute(name, args) {
       const definitions = { search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
-        search_conversations: ['query', 'offset', 'start_date', 'end_date', 'platform'], read_conversation: ['id', 'offset'] };
+        search_conversations: ['query', 'offset', 'start_date', 'end_date', 'platform', 'role'], read_conversation: ['id', 'offset'] };
       const fields = typeof name === 'string' && Object.hasOwn(definitions, name) ? definitions[name] : null;
       if (!fields || !args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !fields.includes(key))) {
         throw new Error('记忆工具或参数无效，不能更改身份、范围或会话。');
@@ -141,10 +141,10 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
         if (typeof args.query !== 'string' || args.query.length > 500) throw new Error('查询无效。');
         if (name === 'search_conversations') {
           const dated = Object.hasOwn(args, 'start_date') || Object.hasOwn(args, 'end_date');
-          const filtered = dated || Object.hasOwn(args, 'platform');
+          const filtered = dated || Object.hasOwn(args, 'platform') || Object.hasOwn(args, 'role');
           const dates = filtered ? { ...(Object.hasOwn(args, 'start_date') ? { startDate: args.start_date } : {}),
             ...(Object.hasOwn(args, 'end_date') ? { endDate: args.end_date } : {}), ...(dated ? { timeZone: conversationClock(store).timeZone } : {}),
-            ...(Object.hasOwn(args, 'platform') ? { platform: args.platform } : {}) } : undefined;
+            ...(Object.hasOwn(args, 'platform') ? { platform: args.platform } : {}), ...(Object.hasOwn(args, 'role') ? { role: args.role } : {}) } : undefined;
           const page = store.searchConversationPage(args.query, scopes, 6, args.offset === undefined ? 0 : args.offset, excludeMessageId, dates);
           return { ...page, items: page.items.map(turn => {
             const { userExcerptOffset, assistantExcerptOffset, userLength, ...summary } = turn;
