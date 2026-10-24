@@ -1515,9 +1515,13 @@ export function createStore(dbPath) {
     getConversationMoodEvidence(scope, replyId) {
       scope = scopeValue(scope);
       if (scope === 'public') return null;
-      const history = api.listConversationHistory(scope, 40);
+      const requested = replyId === undefined ? null : conversationMoodSource(scope, identifier(replyId, '情绪来源回复 ID'));
+      if (replyId !== undefined && !requested) return null;
+      const ids = requested ? [...new Set([requested.user.id, ...all(`SELECT id FROM messages WHERE scope = ? AND rowid <=
+        (SELECT rowid FROM messages WHERE id = ? AND scope = ?) ORDER BY rowid DESC LIMIT 40`, scope, requested.reply.id, scope).map(row => row.id)])] : undefined;
+      const history = api.listConversationHistory(scope, ids?.length || 40, ids);
       const reply = replyId === undefined ? history.findLast(item => item.role === 'assistant')
-        : history.find(item => item.id === identifier(replyId, '情绪来源回复 ID'));
+        : history.find(item => item.id === requested.reply.id);
       const source = reply && conversationMoodSource(scope, reply.id);
       const user = source && history.find(item => item.id === source.user.id);
       if (!source || !user

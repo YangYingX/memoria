@@ -4,6 +4,7 @@ import { normalizeMoodSettings, defaultMoodSettings, moodSnapshot, validateMoodD
 
 const DAY_MS = 86400000;
 const INPUT_KEYS_LIMIT = 50;
+const PENDING_LIMIT = 50;
 const scopePattern = /^(owner|(?:group|person):[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127})$/;
 const outcomes = new Set(['evaluating', 'success', 'unchanged', 'low_confidence', 'error', 'cancelled', 'interrupted']);
 const messages = { success: '本次心情评估已应用。', unchanged: '本次没有新的明显变化，心境继续自然回稳。', low_confidence: '本次评估置信度不足，心情保持不变。',
@@ -44,6 +45,7 @@ function publicReadingUrl(value) {
 
 export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = Date.now }) {
   let busy = false, stopped = false, controller, backgroundRun = false;
+  let lastPending = [];
   let lastState = store.getSetting('moodStatus', {});
   let lastConfig = normalizeMoodSettings({}, store.getSetting('mood', defaultMoodSettings));
   const now = () => Number(clock());
@@ -63,7 +65,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     const current = state(now());
     const lastOutcome = !busy && current.lastOutcome === 'evaluating' ? 'interrupted'
       : outcomes.has(current.lastOutcome) ? current.lastOutcome : '';
-    return { enabled: config.enabled, day: current.day, timeZone: 'UTC', attempts: current.attempts,
+    return { pendingConversations: pendingQueue(now()).length, pendingLimit: PENDING_LIMIT, droppedPendingTotal: count(current.droppedPendingTotal),
+      enabled: config.enabled, day: current.day, timeZone: 'UTC', attempts: current.attempts,
       dailyLimit: config.dailyLimit, remaining: Math.max(0, config.dailyLimit - current.attempts), busy,
       lastAttemptAt: current.lastAttemptAt, lastInputAt: current.lastInputAt, lastSuccessAt: date(current.lastSuccessAt), lastOutcome,
       lastError: ['error', 'interrupted'].includes(lastOutcome) ? messages[lastOutcome] : '',
@@ -87,22 +90,49 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
         + evidence.context.map(item => '[此前对方原话节选]\n' + conversationText(item.user, 450)
           + '\n[你当时的回复节选，可能有误，不代表对方的事实或感受]\n' + item.reply.content.slice(0, 220)).join('\n').slice(0, 1400)).slice(0, 3000)
         : conversationText(user), reply: reply.content.slice(0, 1500),
-      fingerprint: evidence.fingerprint, reference: { scope, replyId: reply.id, createdAt: reply.createdAt } };
+      fingerprint: evidence.fingerprint, reference: { scope, actor: user.actor, replyId: reply.id, createdAt: reply.createdAt } };
+  }
+  const participant = reference => JSON.stringify([reference.scope, reference.actor]);
+  function pendingQueue(time) {
+    if (stopped) return lastPending;
+    const raw = store.getSetting('moodPending', null), entries = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const byParticipant = new Map();
+    for (let reference of entries) {
+      if (!reference || typeof reference !== 'object' || Array.isArray(reference)
+        || typeof reference.scope !== 'string' || !scopePattern.test(reference.scope)
+        || typeof reference.replyId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(reference.replyId)
+        || !fresh(reference.createdAt, time)) continue;
+      // Upgrade the previous single-reference format using its actual saved speaker.
+      if (!Array.isArray(raw) && reference.actor === undefined) {
+        const selected = conversation(reference.scope, reference.replyId, time);
+        if (!selected || selected.at !== reference.createdAt) continue;
+        reference = selected.reference;
+      }
+      if (typeof reference.actor !== 'string' || !reference.actor.trim() || reference.actor.length > 160 || reference.actor.includes('\0')) continue;
+      const item = { scope: reference.scope, actor: reference.actor, replyId: reference.replyId, createdAt: reference.createdAt };
+      const slot = participant(item), previous = byParticipant.get(slot);
+      if (!previous || Date.parse(previous.createdAt) <= Date.parse(item.createdAt)) byParticipant.set(slot, item);
+    }
+    lastPending = [...byParticipant.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    return lastPending;
+  }
+  function savePending(entries) {
+    if (stopped) return;
+    if (JSON.stringify(store.getSetting('moodPending', null)) !== JSON.stringify(entries)) store.setSetting('moodPending', entries);
+    lastPending = entries;
   }
   function observeConversation(scope, replyId) {
     if (stopped) return;
-    const selected = conversation(scope, replyId, now());
+    const time = now(), selected = conversation(scope, replyId, time);
     if (!selected) return;
-    const pending = store.getSetting('moodPending', null);
-    if (!pending || Date.parse(pending.createdAt) <= Date.parse(selected.at) || !date(pending.createdAt)) {
-      store.setSetting('moodPending', selected.reference);
-    }
-  }
-  function pendingConversation(time) {
-    const pending = store.getSetting('moodPending', null);
-    if (!pending || typeof pending.replyId !== 'string' || !fresh(pending.createdAt, time)) return null;
-    const selected = conversation(pending.scope, pending.replyId, time);
-    return selected?.at === pending.createdAt ? selected : null;
+    const current = state(time);
+    if (current.lastInputKeys.includes(selected.key) || current.lastInputAt && Date.parse(selected.at) < Date.parse(current.lastInputAt)) return;
+    const entries = pendingQueue(time), slot = participant(selected.reference), previous = entries.find(item => participant(item) === slot);
+    if (previous && Date.parse(previous.createdAt) > Date.parse(selected.at)) return;
+    const next = [...entries.filter(item => participant(item) !== slot), selected.reference]
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    if (next.length > PENDING_LIMIT) save({ ...current, droppedPendingTotal: count(current.droppedPendingTotal) + next.length - PENDING_LIMIT });
+    savePending(next.slice(-PENDING_LIMIT));
   }
   function reading(time, eventId, eligible = () => true) {
     for (const event of store.listEvents({ type: 'reading', actor: 'scheduler', readingHeadsOnly: true, scope: 'owner', limit: 20 })) {
@@ -124,8 +154,17 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
   }
   function select(time, current) {
     const eligible = item => !current.lastInputKeys.includes(item.key) && (!current.lastInputAt || Date.parse(item.at) >= Date.parse(current.lastInputAt));
-    const pending = pendingConversation(time);
-    return pending && eligible(pending) ? pending : reading(time, undefined, eligible);
+    const pending = pendingQueue(time).filter(item => eligible({ at: item.createdAt, key: key(`conversation:${item.scope}:${item.replyId}`) }));
+    while (pending.length) {
+      const reference = pending[0], selected = conversation(reference.scope, reference.replyId, time);
+      if (selected?.at === reference.createdAt && selected.reference.actor === reference.actor) {
+        savePending(pending);
+        return selected;
+      }
+      pending.shift();
+    }
+    savePending([]);
+    return reading(time, undefined, eligible);
   }
 
   async function run({ force = false, background = false } = {}) {
@@ -146,6 +185,7 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     const runId = randomUUID();
     save({ ...currentState, attempts: currentState.attempts + 1, runId, lastAttemptAt: stamp(time), lastOutcome: 'evaluating',
       lastInputAt: selected.at, lastInputKeys: [...currentState.lastInputKeys.filter(value => value !== selected.key), selected.key].slice(-INPUT_KEYS_LIMIT) });
+    if (selected.kind === 'conversation') savePending(pendingQueue(time).filter(item => item.scope !== selected.scope || item.replyId !== selected.reference.replyId));
     busy = true;
     backgroundRun = background;
     const activeController = controller = new AbortController();
@@ -155,6 +195,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
       try {
         const source = selected.kind === 'conversation' ? conversation(selected.scope, selected.reference.replyId, now()) : reading(now(), selected.eventId);
         return sameRun() && !isBusy() && dependencies() === dependencySnapshot
+          && (selected.kind !== 'conversation' || !pendingQueue(now()).some(item => participant(item) === participant(selected.reference)
+            && Date.parse(item.createdAt) >= Date.parse(selected.at)))
           && JSON.stringify(store.getSetting('moodState', null)) === JSON.stringify(expectedState)
           && source?.fingerprint === selected.fingerprint;
       } catch { return false; }
