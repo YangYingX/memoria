@@ -91,6 +91,7 @@ if (!store.getSetting('admin') && !existsSync(setupKeyPath)) writeFileSync(setup
 const sessions = createSessions();
 const activeConversations = new Set();
 const conversationQueues = new Map();
+let pendingOwnerConversation;
 const readingJobs = new Set();
 let readingBusy = false, scheduledReadingController, closing = false;
 let activeMutation = 0;
@@ -603,10 +604,9 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
   queue.pending++; activeMutation++;
   conversationQueues.set(scope, queue);
   const task = queue.tail.then(async () => {
-    options.signal?.throwIfAborted(); options.assertActive?.();
-    if (activeConversations.size >= 3) throw new Error('已有 3 个对话同时处理，请稍后再试。');
-    activeConversations.add(scope);
+    await acquireConversation(scope, actor, options);
     try {
+      checkConversationAdmission(options);
       const images = imageUrls.length ? await loadQQImages(imageUrls, { signal: options.signal }) : [];
       options.signal?.throwIfAborted(); options.assertActive?.();
       const currentExpressions = () => options.textOnly ? [] : [...getExpressionCatalog(), ...store.listExpressions('custom'), ...(origin ? store.listExpressions(origin) : [])]
@@ -646,7 +646,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
       try { if (!result.silent && !options.deferAssistant) moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;
     }
-    finally { activeConversations.delete(scope); }
+    finally { releaseConversation(scope); }
   });
   queue.tail = task.catch(() => {});
   try { return await task; }
@@ -654,6 +654,57 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
     activeMutation--; queue.pending--;
     if (!queue.pending) conversationQueues.delete(scope);
   }
+}
+
+function checkConversationAdmission(options) {
+  options.signal?.throwIfAborted(); options.assertActive?.();
+  options.signal?.throwIfAborted();
+  if (closing) throw new Error('服务正在关闭，未开始新的对话。');
+}
+
+function acquireConversation(scope, actor, options) {
+  checkConversationAdmission(options);
+  if (activeConversations.size < 3 && !pendingOwnerConversation) {
+    activeConversations.add(scope);
+    return Promise.resolve();
+  }
+  if (scope !== 'owner' || actor !== 'owner' || pendingOwnerConversation) throw new Error('已有 3 个对话同时处理，请稍后再试。');
+  return new Promise((resolve, reject) => {
+    const pending = { deadline: Date.now() + 30000 };
+    const timeoutError = () => new Error('等待对话空位超过 30 秒，请稍后再试。');
+    const cleanup = () => {
+      clearTimeout(pending.timer);
+      options.signal?.removeEventListener('abort', pending.onAbort);
+      if (pendingOwnerConversation === pending) pendingOwnerConversation = undefined;
+    };
+    pending.cancel = error => {
+      if (pendingOwnerConversation !== pending) return;
+      cleanup(); reject(error);
+    };
+    pending.onAbort = () => {
+      try { options.signal.throwIfAborted(); }
+      catch (error) { pending.cancel(error); }
+    };
+    pending.grant = () => {
+      if (pendingOwnerConversation !== pending) return;
+      try {
+        checkConversationAdmission(options);
+        if (Date.now() >= pending.deadline) throw timeoutError();
+        if (activeConversations.size >= 3) return;
+      } catch (error) { pending.cancel(error); return; }
+      cleanup();
+      activeConversations.add(scope);
+      resolve();
+    };
+    pendingOwnerConversation = pending;
+    pending.timer = setTimeout(() => pending.cancel(timeoutError()), 30000);
+    options.signal?.addEventListener('abort', pending.onAbort, { once: true });
+  });
+}
+
+function releaseConversation(scope) {
+  activeConversations.delete(scope);
+  pendingOwnerConversation?.grant();
 }
 
 function replyExpressionSegments(ids, origin) {
@@ -1228,5 +1279,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });

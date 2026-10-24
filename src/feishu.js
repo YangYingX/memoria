@@ -100,7 +100,8 @@ export function createFeishuChat({ store, chat, transport, onError = () => {}, o
     if (running) return running;
     running = (async () => {
       while (!stopped && settings().enabled && transport.status().connected) {
-        const item = store.listReceivedFeishuMessages(1)[0];
+        const pending = store.listReceivedFeishuMessages(100);
+        const item = pending.find(message => message.scope === 'owner' && message.actor === 'owner') || pending[0];
         if (!item) break;
         await process(item);
       }
