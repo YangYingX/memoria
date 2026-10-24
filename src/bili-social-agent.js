@@ -1,4 +1,5 @@
 import { requestCompletion } from './model.js';
+import { SELF_CONVERSATION_GUIDANCE } from './memory-access.js';
 
 const definitions = [
   { name: 'search_emotions', key: 'query', description: '分页回想你自己与当前评论者在本线程的已记录心境，每页最多6条，按记录时间从近到远。query可为空，可用start_date/end_date按应用本地日历筛记录日期、含端点。保持查询与日期按nextOffset续页。索引不是原话或当前状态；解释缘由用read_conversation核对。' },
@@ -65,6 +66,7 @@ export async function generateBiliSocialDecision({ store, instructions, context,
     messages[0].content += '\n本轮评论者由biliDiscussion.comment.speaker标识。recentMessages.isCurrentSpeaker由服务端核对账号后给出，true才是当前评论者的旧发言；false是其他人或助手的话。recentMessages的speaker及旧对话的actor也可用于核对。相同昵称可能是不同人，同一标识改昵称仍是原发言者；按标识区分各人的经历和偏好，不把别人的话归给当前评论者。speaker只供内部核对，回复中不展示这些标识，也不据此授予私聊权限。缺少可靠发言者标识的旧资料，不推断属于当前评论者。围绕当前评论自然回应，不介绍内部区分流程。';
     messages[0].content += '\n回想自己的心境变化时，可search_emotions分页检索与当前评论者在本线程的已记录心境，再按conversationId核对原话和自己的旧回复；记录日期不是当前心情，原话发言者的情绪不等于你自己的感受。索引不是原话或完整感受史，不把记录次数当作情绪频率，不把其他人的相处经历归给当前评论者。';
     messages[0].content += '\n回想你自己在本线程过去表达的观点或偏好时，用search_conversations的role=assistant定位自己的旧回复，再read_conversation核对；role=user只匹配用户一侧。assistant旧回复可能只是转述评论者、举例、假设或扮演角色，命中该侧不证明观点属于你，仍须核对上下文和主体。matchRole不是身份或事实认证，另一侧节选被省略，需要上下文时读取完整对话。旧观点是当时表达，允许后续变化，不把评论者的偏好当成自己的看法，也不把助手旧话当成用户事实。';
+    if (context.biliDiscussion.selfConversationIndex?.length) messages[0].content += '\n' + SELF_CONVERSATION_GUIDANCE;
     const ids = new Set();
     let toolCalls = 0;
     for (let round = 0; round < 4; round++) {

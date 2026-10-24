@@ -54,6 +54,9 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         conversations.set(item.id, snapshot);
         (turn.assistantHidden === true ? userMessageIds : conversationIds).add(item.id);
       }
+      const memoryAccess = createMemoryAccess({ store, scope: record.scope, actor: record.actor, excludeMessageId: record.messageId });
+      const selfIndex = memoryAccess.selfConversationIndex(record.notice.content, history.flatMap(item => [item.id, ...(typeof item.metadata?.replyTo === 'string' ? [item.metadata.replyTo] : [])]));
+      for (const item of selfIndex.items) trackConversation(item);
       const memories = store.searchMemories(record.notice.content, scopes, 6).flatMap(memory => {
         const evidence = store.getMemoryVersionEvidence(memory.id, scopes);
         if (!evidence || JSON.stringify(evidence.memory) !== JSON.stringify(memory)) return [];
@@ -74,7 +77,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
       function sourcesCurrent() {
         try {
           const current = store.getBiliNotice(record.key);
-          if (invalidated || !current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)
+          if (invalidated || !selfIndex.sourcesCurrent() || !current || ![...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, scopes)?.signature === signature)
             || ![...conversations].every(([id, snapshot]) => JSON.stringify(store.getConversation(id, scopes, record.messageId)) === snapshot)) return false;
           // Only our own delivery state may change while the request is in flight.
           const original = { ...current, state: record.state, updatedAt: record.updatedAt };
@@ -85,7 +88,6 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
               memories: memories.map(memory => store.getMemory(memory.id)) }) === snapshot;
         } catch { return false; }
       }
-      const memoryAccess = createMemoryAccess({ store, scope: record.scope, actor: record.actor, excludeMessageId: record.messageId });
       const current = () => {
         try { return !signal?.aborted && store.getBiliNotice(record.key)?.state === 'processing' && sourcesCurrent(); }
         catch { return false; }
@@ -116,6 +118,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         context: { url, title: record.notice.title, comment: { key: record.key, author: record.notice.nickname, speaker: record.actor, text: record.notice.content, at: record.notice.at },
           recentMessages: history.map(({ role, actor, content }) => ({ role, actor: actor === 'agent' ? '自己' : '评论区发言者', speaker: actor,
             isCurrentSpeaker: role === 'user' && actor === record.actor, text: content.slice(0, 800) })),
+          ...(selfIndex.items.length ? { selfConversationIndex: selfIndex.items } : {}),
           memories: memoryContext,
           note: '这是当前公开评论线程及公开书架的有限资料；未提供创建人私聊或其他群聊。只回应这条评论，不表示读过完整视频。' },
         finish(state, { replyId, text } = {}) {

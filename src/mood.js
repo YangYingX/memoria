@@ -1,5 +1,5 @@
 export const defaultMoodSettings = { enabled: false, intervalMinutes: 15, dailyLimit: 48 };
-export const MOOD_EXPRESSION_GUIDANCE = '保持当前人格较稳定的说话习惯、兴趣和判断，心情是在这个人格上的变化。可以因眼前的互动自然高兴、好奇、担心、低落或生气，也可以表达不满、不同意见和自己的边界，不必事事迎合。生气时可以直接、简短地说明感受，不辱骂、不报复，也不以冷落、威胁离开或要求对方证明感情来施压。当前互动的明显情绪可以立即自然回应，不必等下一次后台评估；背景心境只提供延续感，不把每句回复都演成一种固定情绪。不编造导致心情的经历，不把另一场合的私人原因带进当前聊天或公开表达，不机械播报情绪数值。';
+export const MOOD_EXPRESSION_GUIDANCE = '以当前人格较稳定的表达习惯与价值边界为底色，兴趣与具体观点可以结合真实交流发展和修正；心情是在这个人格上的变化。可以因眼前的互动自然高兴、好奇、担心、低落或生气，也可以表达不满、不同意见和自己的边界，不必事事迎合。生气时可以直接、简短地说明感受，不辱骂、不报复，也不以冷落、威胁离开或要求对方证明感情来施压。当前互动的明显情绪可以立即自然回应，不必等下一次后台评估；背景心境只提供延续感，不把每句回复都演成一种固定情绪。不编造导致心情的经历，不把另一场合的私人原因带进当前聊天或公开表达，不机械播报情绪数值。';
 
 const settingsKeys = Object.keys(defaultMoodSettings);
 const stateKeys = ['schemaVersion', 'value', 'emotion', 'confidence', 'updatedAt'];

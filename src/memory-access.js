@@ -1,5 +1,7 @@
 import { queryTokens } from './store.js';
 
+export const SELF_CONVERSATION_GUIDANCE = "旧回复索引只是你过去说过的有限资料，可能是转述对方、举例、假设或角色扮演，不证明其中立场属于你，也不证明客观事实。conversation.completeTurn为true时，父程序已核对并提供这一轮保存的完整短对话，可直接对照user和assistant判断这轮表达；不必重复调用工具。isCurrentSpeaker只表示当时用户发言者是否为当前对方，不保证内容主体。proactive为true且user为null表示当时只有你已确认发出的主动私聊，没有用户原话或回应。完整短轮次不代表全部前文，涉及未给出的语境时仍需继续检索；不补齐未知部分。没有completeTurn、只有excerpt时，使用其中观点前先按id与assistantReadOffset调用read_conversation核对原话、上下文和主体；这些范围内的只读核对已获准。excerptTruncated只表示索引节选不完整。旧话不自动变成当前偏好或永久性格，当前有效更正与后续交流优先，不虚构成长经历。优先回应眼前话题，没有自然关联就不提起，不机械回放旧话，不向用户展示内部编号、位置或检索流程。几条线索的观点不同时，先核对时间、主体与后续更正，不能仅凭匹配字词沿用旧立场。线索按回复时间从近到远排列。先判断是不是自己的立场，再比较同一主体的表达时间；后来明确改变过的看法，优先于先前的说法，不能照抄较早答案忽略变化，也不能把较新的转述当成自我修正。";
+
 export function allowedScopes(scope) {
   return [scope, 'public'];
 }
@@ -129,6 +131,45 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
   const scopes = allowedScopes(scope);
   if (typeof excludeMessageId !== 'string' || (excludeMessageId && !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(excludeMessageId))) throw new Error('当前消息标识无效。');
   return Object.freeze({
+    selfConversationIndex(query, recentIds = []) {
+      if (typeof query !== 'string' || query.length > 8000 || query.includes('\0')
+        || !Array.isArray(recentIds) || recentIds.length > 1000
+        || recentIds.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(id))) throw new Error('旧回复索引输入无效。');
+      const evidence = new Map(), items = [], excluded = new Set([excludeMessageId, ...recentIds]);
+      const noise = new Set(['你好', '您好', '谢谢', '好的', '早安', '晚安', '哈哈', '在吗', '我的', '你的', '自己', '现在', '最近', '今天', '以前', '之前', '怎么', '什么', '如何', '一下', '这个', '那个', '我们', '你们', '我想', '想聊', '聊聊', '说说']);
+      const tokens = queryTokens(query).filter(token => token.length >= 2 && !noise.has(token)).slice(0, 48);
+      if (tokens.length && !/^(?:hi|hello|hey|good morning|good night)[.!?\s]*$/i.test(query.trim())) {
+        const page = store.searchConversationPage(tokens.join(' ').slice(0, 500), scopes, 24, 0, excludeMessageId, { role: 'assistant' });
+        const candidates = page.items.filter(turn => !excluded.has(turn.id));
+        const ordered = candidates.length ? [candidates[0], ...candidates.slice(1).sort((a, b) => b.replyAt.localeCompare(a.replyAt) || a.id.localeCompare(b.id))] : [];
+        for (const turn of ordered) {
+          if (!Number.isSafeInteger(turn.assistantExcerptOffset)) continue;
+          const source = store.getConversation(turn.id, scopes, excludeMessageId);
+          if (!source || source.assistantHidden || source.replyAt !== turn.replyAt
+            || source.assistant.slice(turn.assistantExcerptOffset, turn.assistantExcerptOffset + turn.assistant.length) !== turn.assistant) continue;
+          let excerpt = turn.assistant.slice(0, 180);
+          if (/[\uD800-\uDBFF]$/.test(excerpt)) excerpt = excerpt.slice(0, -1);
+          const { userHeader, assistantHeader } = conversationHeaders(source);
+          const conversation = !source.qqReplyContext?.length && !source.imageCount && !(source.qqBatchCount > 1)
+            && source.user.length <= 450 && source.assistant.length <= 450 && source.user.length + source.assistant.length <= 700
+            ? Object.freeze({ completeTurn: true, userAt: source.createdAt, user: source.proactive === true ? null : source.user,
+              assistant: source.assistant, ...(source.proactive === true ? { proactive: true } : { isCurrentSpeaker: source.actor === actor }) }) : undefined;
+          items.push({ id: source.id, replyAt: source.replyAt, excerpt,
+            excerptTruncated: turn.assistantTruncated || excerpt.length < turn.assistant.length,
+            ...(conversation ? { conversation } : {}),
+            assistantReadOffset: (source.proactive === true ? 0 : userHeader.length + source.user.length) + assistantHeader.length + turn.assistantExcerptOffset,
+            ...(source.platform ? { platform: source.platform } : {}) });
+          evidence.set(source.id, JSON.stringify(source));
+          if (items.length === 2) break;
+        }
+      }
+      items.sort((a, b) => b.replyAt.localeCompare(a.replyAt) || a.id.localeCompare(b.id));
+      return Object.freeze({ items: Object.freeze(items.map(item => Object.freeze(item))),
+        sourcesCurrent() {
+          try { return [...evidence].every(([id, saved]) => JSON.stringify(store.getConversation(id, scopes, excludeMessageId)) === saved); }
+          catch { return false; }
+        } });
+    },
     execute(name, args) {
       const definitions = { search_emotions: ['query', 'offset', 'start_date', 'end_date'], search_memory: ['query', 'offset'], read_memory: ['id', 'offset'], read_memory_source: ['id', 'offset'],
         search_conversations: ['query', 'offset', 'start_date', 'end_date', 'platform', 'role'], read_conversation: ['id', 'offset'] };
