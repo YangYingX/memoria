@@ -1,4 +1,10 @@
 export const defaultOwnerChatReserve = 20;
+export const defaultModelDailyRequestLimit = 3000;
+
+export function normalizeModelDailyRequestLimit(value = defaultModelDailyRequestLimit) {
+  if (!Number.isInteger(value) || value < 1 || value > 1_000_000) throw new Error('每日模型请求上限须为1–1000000的整数。');
+  return value;
+}
 
 export function normalizeOwnerChatReserve(value = defaultOwnerChatReserve) {
   if (!Number.isInteger(value) || value < 0 || value > 200) throw new Error('创建人私聊模型预留须为0–200的整数。');
@@ -7,11 +13,13 @@ export function normalizeOwnerChatReserve(value = defaultOwnerChatReserve) {
 
 export function modelBudget(store) {
   const day = new Date().toISOString().slice(0, 10);
+  const model = store.getSetting('model', {});
+  const dailyLimit = normalizeModelDailyRequestLimit(model?.dailyRequestLimit);
   const usage = store.getSetting('modelUsage', { day, calls: 0 });
-  const calls = usage?.day !== day ? 0 : Number.isSafeInteger(usage.calls) && usage.calls >= 0 ? usage.calls : 200;
-  const reserve = normalizeOwnerChatReserve(store.getSetting('model', {})?.ownerChatReserve);
-  return { day, calls, reserve, dailyLimit: 200,
-    sharedRemaining: Math.max(0, 200 - reserve - calls), ownerRemaining: Math.max(0, 200 - calls) };
+  const calls = usage?.day !== day ? 0 : Number.isSafeInteger(usage.calls) && usage.calls >= 0 ? usage.calls : dailyLimit;
+  const reserve = Math.min(normalizeOwnerChatReserve(model?.ownerChatReserve), dailyLimit);
+  return { day, calls, reserve, dailyLimit,
+    sharedRemaining: Math.max(0, dailyLimit - reserve - calls), ownerRemaining: Math.max(0, dailyLimit - calls) };
 }
 
 async function responseJson(response) {
@@ -33,7 +41,7 @@ export async function requestCompletion({ store, messages, tools, maxTokens = 15
   let usage = store.getSetting('modelUsage', { day, calls: 0 });
   if (usage.day !== day) usage = { day, calls: 0 };
   if (!budget.ownerRemaining) {
-    const error = new Error('已达到每日 200 次模型请求上限。');
+    const error = new Error(`已达到每日 ${budget.dailyLimit} 次模型请求上限。`);
     error.code = 'MODEL_DAILY_LIMIT';
     throw error;
   }

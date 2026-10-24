@@ -8,7 +8,7 @@ import { readPage } from './reader.js';
 import { encryptBackup, decryptBackup } from './backup.js';
 import { createSessions, hashPassword, sameSecret, verifyPassword } from './auth.js';
 import { runConversation } from './agent.js';
-import { testModel, requestCompletion, defaultOwnerChatReserve, normalizeOwnerChatReserve } from './model.js';
+import { testModel, requestCompletion, defaultOwnerChatReserve, normalizeOwnerChatReserve, defaultModelDailyRequestLimit, normalizeModelDailyRequestLimit, modelBudget } from './model.js';
 import { createBackupJobs, normalizeBackupSettings, publicBackupSettings } from './backup-jobs.js';
 import { parseQQMessage, verifiedQQReply } from './qq-message.js';
 import { loadQQImages, validateQQImageUrls } from './images.js';
@@ -69,7 +69,7 @@ const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () 
 const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
-  model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '', ownerChatReserve: defaultOwnerChatReserve },
+  model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '', ownerChatReserve: defaultOwnerChatReserve, dailyRequestLimit: defaultModelDailyRequestLimit },
   qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit, mergeWindowMs: defaultQQMergeWindow, ...normalizeQQGroupAttentionSettings(), ...normalizeQQReplySettings() },
   feishu: defaultFeishuSettings,
   reading: { enabled: false, urls: [], intervalMinutes: 60, dailyLimit: 5 },
@@ -508,6 +508,7 @@ function publicSettings() {
   const persona = store.getSetting('persona'), model = store.getSetting('model'), qq = store.getSetting('qq');
   const { apiKey, ...modelView } = model;
   modelView.ownerChatReserve = normalizeOwnerChatReserve(model.ownerChatReserve);
+  modelView.dailyRequestLimit = normalizeModelDailyRequestLimit(model.dailyRequestLimit);
   const { accessToken, ...qqView } = qq;
   qqView.dailyChatLimit = normalizeQQChatLimit(qq.dailyChatLimit);
   qqView.mergeWindowMs = normalizeQQMergeWindow(qq.mergeWindowMs);
@@ -522,7 +523,7 @@ function saveSettings(input) {
   if (input.persona) next.persona = { name: text(input.persona.name, '名字', 40), description: text(input.persona.description, '人格设定', 4000) };
   if (input.model) {
     const previous = store.getSetting('model');
-    next.model = { baseUrl: endpoint(input.model.baseUrl), model: text(input.model.model, '模型名称', 120), apiKey: input.model.clearApiKey ? '' : (input.model.apiKey ? text(input.model.apiKey, 'API 密钥', 1000) : previous.apiKey), ownerChatReserve: normalizeOwnerChatReserve(input.model.ownerChatReserve === undefined ? previous.ownerChatReserve : input.model.ownerChatReserve) };
+    next.model = { baseUrl: endpoint(input.model.baseUrl), model: text(input.model.model, '模型名称', 120), apiKey: input.model.clearApiKey ? '' : (input.model.apiKey ? text(input.model.apiKey, 'API 密钥', 1000) : previous.apiKey), ownerChatReserve: normalizeOwnerChatReserve(input.model.ownerChatReserve === undefined ? previous.ownerChatReserve : input.model.ownerChatReserve), dailyRequestLimit: normalizeModelDailyRequestLimit(input.model.dailyRequestLimit === undefined ? previous.dailyRequestLimit : input.model.dailyRequestLimit) };
   }
   if (input.qq) {
     const q = input.qq, previous = store.getSetting('qq');
@@ -1004,7 +1005,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
       if (path === '/api/mate/reset' && req.method === 'POST') {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) return json(res, 400, { error: '重置陪伴节奏不接受额外参数。' });
         if (proactiveJobs.status().busy || mateRuntime.status().busy) return json(res, 409, { error: '请等待当前主动私聊判断完成后重置节奏。' });

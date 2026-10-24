@@ -89,6 +89,10 @@ async function loadState({ fill = false } = {}) {
   $('sidebar-mode').textContent = state.status.mode === 'live' ? '模型已配置' : '离线演示模式';
   $('model-mode').textContent = state.status.mode === 'live' ? settings.model.model : '离线演示';
   $('offline-note').hidden = state.status.mode === 'live';
+  const budget = state.data.modelBudget, usage = state.data.modelUsage;
+  $('model-budget-summary').textContent = !budget ? '正在读取模型额度…'
+    : usage?.day === budget.day && (!Number.isSafeInteger(usage.calls) || usage.calls < 0) ? '本日模型调用计数异常，已暂停新请求；请检查本机数据。'
+      : `今日模型请求 ${budget.calls} / ${budget.dailyLimit} 次，剩余 ${budget.ownerRemaining} 次（UTC）。普通任务还可用 ${budget.sharedRemaining} 次；创建人私聊预留配置 ${budget.reserve} 次，已包含在总额中。`;
   $('stat-memories').textContent = stats.memories ?? 0;
   $('stat-events').textContent = stats.events ?? 0;
   $('app-version').textContent = `v${state.status.version || '0.1.0'} · 本地开发版`;
@@ -433,6 +437,7 @@ function fillSettings() {
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
   $('model-name').value = model.model;
+  $('model-daily-request-limit').value = model.dailyRequestLimit ?? 3000;
   $('model-owner-reserve').value = model.ownerChatReserve ?? 20;
   $('model-api-key').value = '';
   $('model-api-key').disabled = false;
@@ -1107,7 +1112,7 @@ $('settings-form').addEventListener('submit', event => {
         mood: { enabled: $('mood-enabled').checked, intervalMinutes: Number($('mood-interval').value), dailyLimit: Number($('mood-limit').value) },
         chatMemory: { enabled: $('chat-memory-enabled').checked, intervalMinutes: Number($('chat-memory-interval').value), dailyLimit: Number($('chat-memory-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
-        model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked, ownerChatReserve: Number($('model-owner-reserve').value) },
+        model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked, dailyRequestLimit: Number($('model-daily-request-limit').value), ownerChatReserve: Number($('model-owner-reserve').value) },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value), mergeWindowMs: Number($('qq-merge-window').value), groupReplyChance: Number($('qq-group-reply-chance').value), groupReplyCooldownSeconds: Number($('qq-group-reply-cooldown').value), replySplitEnabled: $('qq-reply-split').checked, replyDelayMs: Number($('qq-reply-delay').value) },
         feishu: { enabled: $('feishu-enabled').checked, botId: $('feishu-bot-id').value.trim(), expectedFingerprint: $('feishu-fingerprint').value.trim(), allowedUsers: lines('feishu-users'), allowedGroups: lines('feishu-groups'), dailyChatLimit: Number($('feishu-chat-limit').value) },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
