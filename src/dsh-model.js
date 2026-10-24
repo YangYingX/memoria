@@ -1,4 +1,4 @@
-import { requestCompletion } from './model.js';
+import { requestCompletion, modelBudget } from './model.js';
 
 const inputLimit = 20000;
 const outputLimit = 2000;
@@ -34,14 +34,13 @@ export function createDshModelAccess({ store, signal, request = requestCompletio
     if (used) fail('DSH_MODEL_LIMIT');
     if (!fields(input, ['messages', 'maxTokens']) || !Array.isArray(input.messages) || !input.messages.length
       || !Number.isSafeInteger(input.maxTokens) || input.maxTokens < 1 || input.maxTokens > 800) fail('DSH_MODEL_INVALID_INPUT');
-    let system, configuredModel, usage;
-    const day = new Date().toISOString().slice(0, 10);
+    let system, configuredModel, budget;
     try {
       system = instructions(store, purpose);
       configuredModel = store.getSetting('model', {})?.model;
-      usage = store.getSetting('modelUsage', { day, calls: 0 });
+      budget = modelBudget(store);
     } catch { fail('DSH_MODEL_FAILED'); }
-    if (usage?.day === day && usage.calls >= 200) fail('DSH_MODEL_LIMIT');
+    if (!budget.sharedRemaining) fail('DSH_MODEL_LIMIT');
     let characters = system.length;
     const messages = input.messages.map(message => {
       if (!fields(message, ['role', 'content']) || !['user', 'assistant'].includes(message.role)
@@ -55,9 +54,9 @@ export function createDshModelAccess({ store, signal, request = requestCompletio
     let result;
     try {
       result = await request({ store, messages: [{ role: 'system', content: system }, ...messages],
-        maxTokens: purpose === 'mood' ? 300 : input.maxTokens, signal });
+        maxTokens: purpose === 'mood' ? 300 : input.maxTokens, signal, ownerChat: false });
     } catch (error) {
-      fail(signal?.aborted ? 'DSH_MODEL_CANCELLED' : error?.code === 'MODEL_DAILY_LIMIT' ? 'DSH_MODEL_LIMIT' : 'DSH_MODEL_FAILED');
+      fail(signal?.aborted ? 'DSH_MODEL_CANCELLED' : ['MODEL_DAILY_LIMIT', 'MODEL_OWNER_CHAT_RESERVED'].includes(error?.code) ? 'DSH_MODEL_LIMIT' : 'DSH_MODEL_FAILED');
     }
     if (signal?.aborted) fail('DSH_MODEL_CANCELLED');
     const choice = result?.choices?.[0];

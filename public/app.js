@@ -433,6 +433,7 @@ function fillSettings() {
   $('persona-description').value = persona.description;
   $('model-base-url').value = model.baseUrl;
   $('model-name').value = model.model;
+  $('model-owner-reserve').value = model.ownerChatReserve ?? 20;
   $('model-api-key').value = '';
   $('model-api-key').disabled = false;
   $('model-clear-api-key').checked = false;
@@ -1106,7 +1107,7 @@ $('settings-form').addEventListener('submit', event => {
         mood: { enabled: $('mood-enabled').checked, intervalMinutes: Number($('mood-interval').value), dailyLimit: Number($('mood-limit').value) },
         chatMemory: { enabled: $('chat-memory-enabled').checked, intervalMinutes: Number($('chat-memory-interval').value), dailyLimit: Number($('chat-memory-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
-        model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked },
+        model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked, ownerChatReserve: Number($('model-owner-reserve').value) },
         qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value), mergeWindowMs: Number($('qq-merge-window').value), groupReplyChance: Number($('qq-group-reply-chance').value), groupReplyCooldownSeconds: Number($('qq-group-reply-cooldown').value), replySplitEnabled: $('qq-reply-split').checked, replyDelayMs: Number($('qq-reply-delay').value) },
         feishu: { enabled: $('feishu-enabled').checked, botId: $('feishu-bot-id').value.trim(), expectedFingerprint: $('feishu-fingerprint').value.trim(), allowedUsers: lines('feishu-users'), allowedGroups: lines('feishu-groups'), dailyChatLimit: Number($('feishu-chat-limit').value) },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },

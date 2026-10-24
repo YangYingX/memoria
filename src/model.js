@@ -1,3 +1,19 @@
+export const defaultOwnerChatReserve = 20;
+
+export function normalizeOwnerChatReserve(value = defaultOwnerChatReserve) {
+  if (!Number.isInteger(value) || value < 0 || value > 200) throw new Error('创建人私聊模型预留须为0–200的整数。');
+  return value;
+}
+
+export function modelBudget(store) {
+  const day = new Date().toISOString().slice(0, 10);
+  const usage = store.getSetting('modelUsage', { day, calls: 0 });
+  const calls = usage?.day !== day ? 0 : Number.isSafeInteger(usage.calls) && usage.calls >= 0 ? usage.calls : 200;
+  const reserve = normalizeOwnerChatReserve(store.getSetting('model', {})?.ownerChatReserve);
+  return { day, calls, reserve, dailyLimit: 200,
+    sharedRemaining: Math.max(0, 200 - reserve - calls), ownerRemaining: Math.max(0, 200 - calls) };
+}
+
 async function responseJson(response) {
   const chunks = []; let size = 0;
   for await (const chunk of response.body) {
@@ -8,19 +24,25 @@ async function responseJson(response) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-export async function requestCompletion({ store, messages, tools, maxTokens = 1500, signal }) {
+export async function requestCompletion({ store, messages, tools, maxTokens = 1500, signal, ownerChat = false }) {
+  if (typeof ownerChat !== 'boolean') throw new Error('模型额度请求类型须为布尔值。');
   signal?.throwIfAborted();
   const model = store.getSetting('model');
   if (!model?.apiKey) throw new Error('请先保存模型 API 密钥。');
-  const day = new Date().toISOString().slice(0, 10);
+  const budget = modelBudget(store), { day, calls } = budget;
   let usage = store.getSetting('modelUsage', { day, calls: 0 });
   if (usage.day !== day) usage = { day, calls: 0 };
-  if (usage.calls >= 200) {
+  if (!budget.ownerRemaining) {
     const error = new Error('已达到每日 200 次模型请求上限。');
     error.code = 'MODEL_DAILY_LIMIT';
     throw error;
   }
-  store.setSetting('modelUsage', { ...usage, calls: usage.calls + 1 });
+  if (!ownerChat && !budget.sharedRemaining) {
+    const error = new Error('本次任务的共享模型额度不足，剩余额度为创建人私聊预留。');
+    error.code = 'MODEL_OWNER_CHAT_RESERVED';
+    throw error;
+  }
+  store.setSetting('modelUsage', { ...usage, calls: calls + 1 });
   const baseUrl = new URL(model.baseUrl);
   const response = await fetch(`${model.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),

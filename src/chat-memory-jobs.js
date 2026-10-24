@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { modelBudget } from './model.js';
 
 export const defaultChatMemorySettings = { enabled: true, intervalMinutes: 180, dailyLimit: 4 };
 const settingsKeys = Object.keys(defaultChatMemorySettings);
@@ -91,8 +92,8 @@ export function createChatMemoryJobs({ store, generate, isBusy = () => false, cl
     if (date(currentState.lastAttemptAt) && time - Date.parse(currentState.lastAttemptAt) < config.intervalMinutes * 60000) {
       return { ...status(), skipped: 'not_due' };
     }
-    const usage = store.getSetting('modelUsage', {});
-    if (usage.day === stamp(time).slice(0, 10) && count(usage.calls) >= 200) return { ...status(), skipped: 'model_daily_limit' };
+    const budget = modelBudget(store);
+    if (!budget.sharedRemaining) return { ...status(), skipped: budget.ownerRemaining ? 'model_reserved' : 'model_daily_limit' };
     if (typeof generate !== 'function') return { ...status(), skipped: 'no_model' };
     const batch = store.listChatMemoryCandidates({ limit: 12, maxChars: 24000, quietBefore: stamp(time - QUIET_MS) });
     if (!batch?.sources?.length || batch.activationId !== activation.eventId) return { ...status(), skipped: 'no_new_input' };

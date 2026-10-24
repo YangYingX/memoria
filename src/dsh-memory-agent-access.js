@@ -121,10 +121,12 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
       let completion;
       try {
         completion = await request({ store, messages: inputMessages, maxTokens: 1000, signal,
+          ownerChat: purpose === 'recall' && scope === 'owner' && actor === 'owner',
           ...(modelRequests < 4 && approvedCalls < 5 ? { tools: structuredClone(tools) } : {}) });
       } catch (error) {
         if (signal?.aborted) fail('记忆子代理任务已取消。');
         if (error?.code === 'MODEL_DAILY_LIMIT') fail('今日模型请求额度已用完，本次任务已停止。');
+        if (error?.code === 'MODEL_OWNER_CHAT_RESERVED') fail('本次任务可用模型额度不足，已停止。');
         fail('记忆子代理模型请求未完成，任务已停止，请检查模型配置或调用额度。');
       }
       available();

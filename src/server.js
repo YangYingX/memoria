@@ -8,7 +8,7 @@ import { readPage } from './reader.js';
 import { encryptBackup, decryptBackup } from './backup.js';
 import { createSessions, hashPassword, sameSecret, verifyPassword } from './auth.js';
 import { runConversation } from './agent.js';
-import { testModel, requestCompletion } from './model.js';
+import { testModel, requestCompletion, defaultOwnerChatReserve, normalizeOwnerChatReserve } from './model.js';
 import { createBackupJobs, normalizeBackupSettings, publicBackupSettings } from './backup-jobs.js';
 import { parseQQMessage, verifiedQQReply } from './qq-message.js';
 import { loadQQImages, validateQQImageUrls } from './images.js';
@@ -69,7 +69,7 @@ const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () 
 const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
-  model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' },
+  model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '', ownerChatReserve: defaultOwnerChatReserve },
   qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit, mergeWindowMs: defaultQQMergeWindow, ...normalizeQQGroupAttentionSettings(), ...normalizeQQReplySettings() },
   feishu: defaultFeishuSettings,
   reading: { enabled: false, urls: [], intervalMinutes: 60, dailyLimit: 5 },
@@ -505,6 +505,7 @@ function endpoint(value) {
 function publicSettings() {
   const persona = store.getSetting('persona'), model = store.getSetting('model'), qq = store.getSetting('qq');
   const { apiKey, ...modelView } = model;
+  modelView.ownerChatReserve = normalizeOwnerChatReserve(model.ownerChatReserve);
   const { accessToken, ...qqView } = qq;
   qqView.dailyChatLimit = normalizeQQChatLimit(qq.dailyChatLimit);
   qqView.mergeWindowMs = normalizeQQMergeWindow(qq.mergeWindowMs);
@@ -519,7 +520,7 @@ function saveSettings(input) {
   if (input.persona) next.persona = { name: text(input.persona.name, '名字', 40), description: text(input.persona.description, '人格设定', 4000) };
   if (input.model) {
     const previous = store.getSetting('model');
-    next.model = { baseUrl: endpoint(input.model.baseUrl), model: text(input.model.model, '模型名称', 120), apiKey: input.model.clearApiKey ? '' : (input.model.apiKey ? text(input.model.apiKey, 'API 密钥', 1000) : previous.apiKey) };
+    next.model = { baseUrl: endpoint(input.model.baseUrl), model: text(input.model.model, '模型名称', 120), apiKey: input.model.clearApiKey ? '' : (input.model.apiKey ? text(input.model.apiKey, 'API 密钥', 1000) : previous.apiKey), ownerChatReserve: normalizeOwnerChatReserve(input.model.ownerChatReserve === undefined ? previous.ownerChatReserve : input.model.ownerChatReserve) };
   }
   if (input.qq) {
     const q = input.qq, previous = store.getSetting('qq');

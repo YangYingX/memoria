@@ -545,7 +545,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       for (let round = 0; round < 4; round++) {
         const newlyShownExpressionIds = new Set();
         checkMemoryAgentSources();
-        const completion = await requestCompletion({ store, messages, signal, ...(round < 3 ? { tools } : {}) });
+        const completion = await requestCompletion({ store, messages, signal, ownerChat: scope === 'owner' && actor === 'owner', ...(round < 3 ? { tools } : {}) });
         checkMemoryAgentSources();
         if (allowSilence && (!Array.isArray(completion.choices) || completion.choices.length !== 1)) throw new Error('自主群聊须返回唯一的回复或静默决定。');
         const answer = completedConversationAnswer(completion, round, tools, toolCount, seenCallIds);

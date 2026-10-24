@@ -38,7 +38,7 @@ const readingErrors = {
   DSH_READ_FAILED: 'B站文字读取未完成，未自动重试。',
 };
 const modelErrors = {
-  DSH_MODEL_LIMIT: '今日模型请求额度已用完，本次任务已停止。',
+  DSH_MODEL_LIMIT: '本次任务可用模型额度不足，已停止。',
   DSH_MODEL_CANCELLED: 'DSH 模型任务已取消。',
   DSH_MODEL_INVALID_RESPONSE: 'DSH 模型回复格式无效，本次任务已停止。',
   DSH_MODEL_FAILED: 'DSH 模型请求未完成，本次任务已停止。',
