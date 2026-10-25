@@ -3,7 +3,13 @@ import { createMemoryAccess } from './memory-access.js';
 import { moodSnapshot, MOOD_EXPRESSION_GUIDANCE, COMPANION_DIALOGUE_GUIDANCE, CURRENT_EMOTION_GUIDANCE } from './mood.js';
 import { proactiveQuoteContext, proactiveRecentMessages, proactiveTextExcerpt } from './dsh-proactive-context.js';
 
+import { initialQQContact } from './proactive-first-contact.js';
+
 const DAY_MS = 86400000;
+const FIRST_CONTACT_INSTRUCTIONS = [MOOD_EXPRESSION_GUIDANCE, COMPANION_DIALOGUE_GUIDANCE,
+  '创建人已在本机允许你主动联系其绑定QQ；本次是一次不依赖旧对话的初始问候，也可以保持安静。只依据当前人格和统一心境写一两句自然、简短的招呼，可以留出接话空间。',
+  '没有提供旧聊天、阅读或情绪原因，不声称做过事情、一直等候或记得共同往事，不把背景情绪归咎于对方。不播报后台授权或工具过程，不催促回复，不要求对方安慰或证明感情。',
+  '只返回严格JSON {"text":"一小段招呼，或空字符串表示安静"}。text最多600字，不写网址、账号或内部ID。'].join('\n');
 export const defaultProactiveSettings = {
   enabled: false, desire: 35, dailyLimit: 1, cooldownMinutes: 360, idleMinutes: 60,
   startHour: 10, endHour: 22, timeZone: 'Asia/Shanghai', quietUntil: '',
@@ -90,7 +96,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
   };
   const event = (selected, outcome, content, metadata = {}) => {
     if (!stopped) store.addEvent({ type: 'proactive', scope: 'owner', actor: 'scheduler', sourceRef: selected.sourceKey,
-      content, metadata: { kind: selected.kind, ...(['reading', 'theme'].includes(selected.kind) ? { memoryId: selected.memory.id }
+      content, metadata: { kind: selected.kind, ...(selected.kind === 'greeting' ? { authorizationEventId: selected.authorizationId }
+        : ['reading', 'theme'].includes(selected.kind) ? { memoryId: selected.memory.id }
         : selected.kind === 'agenda' ? { agendaId: selected.agenda.id, memoryId: selected.evidence.memory.id, messageId: selected.evidence.message.id } : { messageId: selected.message.id }),
         sourceKey: selected.sourceKey, outcome, ...metadata } });
   };
@@ -112,6 +119,14 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     state.configSignature = signature;
     if (JSON.stringify(state) !== JSON.stringify(store.getSetting('proactiveStatus', {}))) save(state);
     return state;
+  }
+  function greeting(time) {
+    const allowed = initialQQContact(store, { now: time });
+    if (!allowed) return null;
+    const sourceKey = createHash('sha256').update('greeting:' + allowed.authorizationId).digest('hex');
+    if (store.hasProactiveDecision(sourceKey) || store.hasDelivery(`proactive-decision:${sourceKey}`)
+      || store.hasProactiveAttempt(sourceKey) || store.hasDelivery(`proactive:${sourceKey}`)) return null;
+    return { kind: 'greeting', authorizationId: allowed.authorizationId, sourceKey, url: '' };
   }
   function reading(time) {
     for (const index of store.listRecentReadings(['owner'], 30)) {
@@ -207,22 +222,26 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     const agendas = dueAgendas(time);
     let selected = agendas[0];
     let recipient = selected ? selected.recipient : getRecipient();
+    if (!recipient && !selected) {
+      const first = greeting(time);
+      if (first) { selected = first; recipient = getRecipient({ initialAuthorizationId: first.authorizationId }); }
+    }
     if (!recipient && !selected) return { ...status(), skipped: 'no_recipient' };
     if (!store.getSetting('model')?.apiKey) return { ...status(), skipped: 'no_model' };
     if (!selected && !canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
     let state = plan(config, time);
     if (time < Date.parse(state.dayStartAt) || !inHours(time, config)) return { ...status(), skipped: 'outside_hours' };
     if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), skipped: 'daily_limit' };
-    if (!selected && time < Date.parse(state.nextRunAt)) return { ...status(), skipped: 'not_due' };
+    if (selected?.kind !== 'agenda' && time < Date.parse(state.nextRunAt)) return { ...status(), skipped: 'not_due' };
     if (time - Date.parse(state.lastOpportunityAt) < config.cooldownMinutes * 60000) return { ...status(), skipped: 'cooldown' };
-    if (!selected && time - Date.parse(state.nextRunAt) > 10 * 60000) {
+    if (selected?.kind !== 'agenda' && time - Date.parse(state.nextRunAt) > 10 * 60000) {
       save({ ...state, nextRunAt: stamp(time + draw() * config.cooldownMinutes * 60000), lastOutcome: 'missed' });
       return { ...status(), skipped: 'missed' };
     }
     const lastUser = latestUser();
-    if (!lastUser || time - Date.parse(lastUser.createdAt) < config.idleMinutes * 60000) return { ...status(), skipped: 'recent_chat' };
+    if ((!lastUser && selected?.kind !== 'greeting') || lastUser && time - Date.parse(lastUser.createdAt) < config.idleMinutes * 60000) return { ...status(), skipped: 'recent_chat' };
     state = save({ ...state, lastOpportunityAt: stamp(time), nextRunAt: stamp(time + config.cooldownMinutes * 60000 * (1 + draw() / 4)), lastError: '' });
-    const companion = selected?.kind !== 'agenda' && canAssessCompanion() === true;
+    const companion = !['agenda', 'greeting'].includes(selected?.kind) && canAssessCompanion() === true;
     if (!selected && typeof generateConversation === 'function' && canGenerateConversation() === true) {
       const message = conversationSeed(time);
       if (message) {
@@ -241,7 +260,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       selected = theme(time);
       nativeTheme = Boolean(selected);
     }
-    const recipientSource = candidate => candidate?.kind === 'agenda' ? { sourceEventId: candidate.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: candidate.agenda.recipientAccountId }
+    const recipientSource = candidate => candidate?.kind === 'greeting' ? { initialAuthorizationId: candidate.authorizationId }
+      : candidate?.kind === 'agenda' ? { sourceEventId: candidate.agenda.sourceEventId, allowLegacyQQ: true, legacyAccountId: candidate.agenda.recipientAccountId }
       : candidate?.kind === 'conversation' ? { messageId: candidate.message.id }
         : candidate?.kind === 'theme' && candidate.memory.sourceType === 'conversation' ? { sourceEventId: candidate.evidence.source.eventId } : {};
     recipient = getRecipient(recipientSource(selected));
@@ -256,8 +276,10 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     for (const candidate of agendas) candidate.sourceKey = createHash('sha256').update(`agenda:${candidate.agenda.id}:${candidate.agenda.revision}`).digest('hex');
     busy = true;
     const activeController = controller = new AbortController();
-    const context = recentContext();
-    const emotionContext = createMemoryAccess({ store, scope: 'owner', actor: 'owner' }).currentEmotionContext(time);
+    const initial = selected.kind === 'greeting';
+    const context = initial ? { messages: [], historyMessageIds: [], userMessageIds: [] } : recentContext();
+    const emotionContext = initial ? { items: [], memoryIds: [], conversationIds: [], sourcesCurrent: () => true }
+      : createMemoryAccess({ store, scope: 'owner', actor: 'owner' }).currentEmotionContext(time);
     const memoryVersions = new Map();
     const versionsCurrent = () => [...memoryVersions].every(([id, signature]) => store.getMemoryVersionEvidence(id, ['owner', 'public'])?.signature === signature);
     const captureMemory = memory => {
@@ -274,11 +296,13 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     };
     const commonDependencies = () => JSON.stringify({ persona: store.getSetting('persona'), model: store.getSetting('model'),
       ...(companion || nativeTheme ? { companionAvailable: canAssessCompanion() === true } : {}),
-      recentContext: recentContext(), lastUserId: latestUser()?.id });
+      recentContext: initial ? context : recentContext(), lastUserId: latestUser()?.id,
+      ...(initial ? { moodState: store.getSetting('moodState', null) } : {}) });
     const dependencies = candidate => JSON.stringify({ recipient: getRecipient(recipientSource(candidate)),
       channel: candidate.recipient ? store.getSetting(candidate.recipient.platform || 'qq')
         : { qq: store.getSetting('qq'), feishu: store.getSetting('feishu') },
       ...(candidate.kind === 'reading' ? { memory: store.getMemory(candidate.memory.id), bookExists: !candidate.bookId || Boolean(store.getBook(candidate.bookId)) }
+        : candidate.kind === 'greeting' ? { authorization: initialQQContact(store, { authorizationId: candidate.authorizationId, now: now() }) }
         : candidate.kind === 'agenda' ? { agenda: agendaEvidence(candidate), conversationAvailable: canGenerateConversation() === true }
         : candidate.kind === 'theme' ? { theme: store.getCompanionMemoryEvidence(candidate.memory.id), conversationAvailable: canGenerateConversation() === true }
         : { seed: conversationSeed(now(), candidate.message.id), conversationAvailable: canGenerateConversation() === true }) });
@@ -376,11 +400,15 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       check();
       state = save({ ...state, decisionAttempts: state.decisionAttempts + 1, lastAttempt: stamp(time), lastOutcome: 'deciding' });
       if (store.hasProactiveDecision(selected.sourceKey) || !store.claimDelivery(`proactive-decision:${selected.sourceKey}`)) throw new Error('此主动话题已经判断过。');
-      event(selected, 'decision', selected.kind === 'agenda' ? '开始根据到期私人约定判断是否自然跟进。' : selected.kind === 'conversation'
+      event(selected, 'decision', selected.kind === 'greeting' ? '开始根据创建人的绑定QQ授权判断一次初始问候，同一授权不自动重试。'
+        : selected.kind === 'agenda' ? '开始根据到期私人约定判断是否自然跟进。' : selected.kind === 'conversation'
         ? '开始根据已验证创建人的聊天来源判断是否主动搭话，同一来源不自动重试。'
         : selected.kind === 'theme' ? '开始根据可核验的旧主题判断是否自然搭话，同一版本不自动重试。'
         : '开始根据实际阅读判断是否主动分享，同一来源不自动重试。');
-      if (selected.kind === 'conversation' || selected.kind === 'theme') {
+      if (selected.kind === 'greeting') {
+        decision = await generate({ instructions: FIRST_CONTACT_INSTRUCTIONS, recipient, persona: store.getSetting('persona'),
+          mood: moodSnapshot(store, now()), initialContact: { now: stamp(now()), timeZone: config.timeZone }, signal: activeController.signal });
+      } else if (selected.kind === 'conversation' || selected.kind === 'theme') {
         decision = selected.kind === 'conversation'
           ? await generateConversation({ messageId: selected.message.id, recipient, ...(impulse ? { impulse } : {}), signal: activeController.signal })
           : await generateTheme({ memoryId: selected.memory.id, recipient, impulse, signal: activeController.signal });
@@ -442,7 +470,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         if (attempted || state.sendAttempts >= config.dailyLimit || store.hasProactiveAttempt(selected.sourceKey)
           || !store.claimDelivery(`proactive:${selected.sourceKey}`)) throw new Error('本次话题不再发送。');
         update({ sendAttempts: state.sendAttempts + 1, lastOutcome: 'pending' });
-        event(selected, 'attempt', selected.kind === 'reading' ? '开始向已验证的创建人原私聊分享阅读，本次已计入额度。'
+        event(selected, 'attempt', selected.kind === 'greeting' ? '开始向已授权的创建人绑定QQ发起初始问候，本次已计入额度。'
+          : selected.kind === 'reading' ? '开始向已验证的创建人原私聊分享阅读，本次已计入额度。'
           : '开始向已验证的创建人原私聊主动搭话，本次已计入额度。', { platform: recipient.platform || 'qq' });
         attempted = true;
       };

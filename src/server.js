@@ -22,6 +22,7 @@ import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { parseBookFile, BOOK_FILE_MAX_BYTES } from './book-files.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 import { createProactiveRecipientResolver } from './proactive-recipient.js';
+import { authorizeInitialQQContact } from './proactive-first-contact.js';
 import { composeProactive } from './proactive-compose.js';
 import { bindOwnerHeybox, bindOwnerBilibili } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
@@ -617,7 +618,9 @@ function saveSettings(input) {
   if ((next.qq && qqConfigSignature(next.qq) !== qqConfigSignature(store.getSetting('qq')))
     || ['model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) cancelQQ();
   const reconnectFeishu = next.feishu && ['enabled', 'botId', 'expectedFingerprint'].some(key => next.feishu[key] !== store.getSetting('feishu', defaultFeishuSettings)[key]);
+  const allowInitialQQ = next.proactive?.enabled === true && store.getSetting('proactive', {}).enabled !== true;
   for (const [key, value] of Object.entries(next)) store.setSetting(key, value);
+  if (allowInitialQQ && !getProactiveRecipient()) authorizeInitialQQContact(store);
   if (next.chatMemory) void chatMemoryJobs.tick().catch(error => console.error('Chat memory scheduler:', error.message));
   if (reconnectFeishu) void feishuRuntime.restart().catch(() => {});
   return publicSettings();

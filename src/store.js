@@ -1231,7 +1231,7 @@ export function createStore(dbPath) {
         const metadata = message.metadata;
         if (message.scope !== 'owner' || message.role !== 'assistant' || message.actor !== 'agent' || metadata.mode !== 'live'
           || metadata.proactive !== true || Object.hasOwn(metadata, 'replyTo')
-          || !['reading', 'conversation', 'theme', 'agenda'].includes(metadata.kind) || typeof metadata.sourceKey !== 'string'
+          || !['reading', 'conversation', 'theme', 'agenda', 'greeting'].includes(metadata.kind) || typeof metadata.sourceKey !== 'string'
           || !/^[a-f0-9]{64}$/.test(metadata.sourceKey) || typeof metadata.messageId !== 'string'
           || !/^(?:0|-?[1-9]\d{0,19}|[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127})$/.test(metadata.messageId)) continue;
         const key = JSON.stringify([metadata.sourceKey, metadata.messageId, metadata.kind, message.content]);
@@ -2206,6 +2206,7 @@ export function createStore(dbPath) {
       return transaction(() => {
         const previous = accountRow(get('SELECT * FROM accounts WHERE platform = ? AND user_id = ?', fields.platform, fields.userId));
         const account = { id: previous?.id ?? randomUUID(), ...fields, createdAt: previous?.createdAt ?? now, updatedAt: now };
+        if (api.getSetting('proactiveInitialQQ', null)?.accountId === account.id) api.setSetting('proactiveInitialQQ', null);
         if (previous) run('UPDATE accounts SET person_id = ?, label = ?, updated_at = ? WHERE id = ?', account.personId, account.label, now, previous.id);
         else insertAccount(account);
         if (!validFollowupRecipient(account)) for (const row of all("SELECT * FROM followups WHERE recipient_account_id = ? AND status IN ('pending', 'paused', 'deciding', 'attempted')", account.id)) {
@@ -3010,6 +3011,7 @@ export function createStore(dbPath) {
         if (companionState?.opportunityKey) api.claimDelivery(`companion-opportunity:${companionState.opportunityKey}`);
         const proactive = api.getSetting('proactive', null);
         if (proactive) api.setSetting('proactive', { ...proactive, enabled: false });
+        api.setSetting('proactiveInitialQQ', null);
         const chatMemory = api.getSetting('chatMemory', null);
         api.setSetting('chatMemory', { ...(chatMemory || {}), enabled: false });
         insertEvent({ id: randomUUID(), ...eventFields({ type: 'chat_memory_activation', scope: 'owner', actor: 'scheduler',
