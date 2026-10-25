@@ -13,6 +13,8 @@ import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js
 import { normalizeQQReplyContext, normalizeQQDisplayName } from './qq-message.js';
 import { normalizeConversationOrigin } from './conversation-origin.js';
 
+const MAX_TOOL_CALLS = 5;
+
 const toolDefinitions = [
   {"type":"function","function":{"name":"search_own_expressions","description":"分页检索你自己曾向B站提交并取得回执的文字动态和回复，每页最多6条，query可为空，可按start_date/end_date筛记录日期，含端点。保持查询日期按nextOffset续页。只含自己的发言，不含对方原话或私聊；索引不是全文，用read_own_expression核对。回执不证明公开可见、内容属实或永久偏好。","parameters":{"type":"object","properties":{"query":{"type":"string","maxLength":500},"offset":{"type":"integer","minimum":0},"start_date":{"type":"string","pattern":"^\\d{4}-\\d{2}-\\d{2}$"},"end_date":{"type":"string","pattern":"^\\d{4}-\\d{2}-\\d{2}$"}},"required":["query"],"additionalProperties":false}}},
   {"type":"function","function":{"name":"read_own_expression","description":"按记录ID分段核对自己取得B站回执的提交正文，最多4000字符，按nextOffset续页。只证明当时说过，不提供原讨论上下文，不表示当前仍可见或现在仍持相同观点。","parameters":{"type":"object","properties":{"id":{"type":"string"},"offset":{"type":"integer","minimum":0}},"required":["id"],"additionalProperties":false}}},
@@ -65,8 +67,8 @@ function completedConversationAnswer(completion, round, tools, toolCount, seenCa
     if (choice.finish_reason !== 'stop' || typeof answer.content !== 'string' || !answer.content.trim()) invalid();
     return answer;
   }
-  if (round >= 3 || choice.finish_reason !== 'tool_calls') invalid();
-  if (calls.length > 5 || toolCount + calls.length > 5) throw new Error('本次对话已达到 5 次工具调用上限。');
+  if (round >= MAX_TOOL_CALLS || choice.finish_reason !== 'tool_calls') invalid();
+  if (calls.length > MAX_TOOL_CALLS || toolCount + calls.length > MAX_TOOL_CALLS) throw new Error('本次对话已达到 5 次工具调用上限。');
   const names = new Set(tools.map(tool => tool.function.name)), batchIds = new Set();
   for (const [index, call] of calls.entries()) {
     if (!record(call) || Object.keys(call).some(key => !['index', 'id', 'type', 'function'].includes(key))
@@ -594,13 +596,14 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       const readArchiveIds = new Set();
       let toolCount = 0;
       const seenCallIds = new Set();
-      for (let round = 0; round < 4; round++) {
+      for (let round = 0; round <= MAX_TOOL_CALLS; round++) {
         const newlyShownExpressionIds = new Set();
         checkMemoryAgentSources();
+        const canUseTools = round < MAX_TOOL_CALLS && toolCount < MAX_TOOL_CALLS;
         const pendingArchiveIds = [...requiredArchiveIds].filter(id => !readArchiveIds.has(id));
-        if (pendingArchiveIds.length && round < 3) messages.push({ role: 'system', content: '回答前须先用read_conversation核对这些已命中的长对话，依据索引位置读取原话；这不授予其他权限：' + JSON.stringify(pendingArchiveIds) });
+        if (pendingArchiveIds.length && canUseTools) messages.push({ role: 'system', content: '回答前须先用read_conversation核对这些已命中的长对话，依据索引位置读取原话；这不授予其他权限：' + JSON.stringify(pendingArchiveIds) });
         const completion = await requestCompletion({ store, messages, signal, ownerChat: scope === 'owner' && actor === 'owner',
-          ...(round < 3 ? { tools, ...(pendingArchiveIds.length ? { requiredTool: 'read_conversation' } : {}) } : {}) });
+          ...(canUseTools ? { tools, ...(pendingArchiveIds.length ? { requiredTool: 'read_conversation' } : {}) } : {}) });
         checkMemoryAgentSources();
         if (allowSilence && (!Array.isArray(completion.choices) || completion.choices.length !== 1)) throw new Error('自主群聊须返回唯一的回复或静默决定。');
         const answer = completedConversationAnswer(completion, round, tools, toolCount, seenCallIds);
@@ -613,7 +616,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
           const call = answer.tool_calls?.[0];
           let args;
           try { args = JSON.parse(call?.function?.arguments); } catch { /* Invalid arguments are rejected below. */ }
-          if (!allowSilence || round >= 3 || completion.choices.length !== 1 || completion.choices[0].finish_reason !== 'tool_calls'
+          if (!allowSilence || round >= MAX_TOOL_CALLS || completion.choices.length !== 1 || completion.choices[0].finish_reason !== 'tool_calls'
             || answer.role !== 'assistant' || answer.function_call != null || (answer.content !== undefined && answer.content !== null && (typeof answer.content !== 'string' || answer.content.trim()))
             || !Array.isArray(answer.tool_calls) || answer.tool_calls.length !== 1 || !call || call.type !== 'function'
             || typeof call.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(call.id)
