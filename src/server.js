@@ -98,6 +98,7 @@ let pendingOwnerConversation;
 const readingJobs = new Set();
 let readingBusy = false, scheduledReadingController, closing = false;
 let activeMutation = 0;
+let qqQuoteChecks = 0;
 let attempts = [];
 let pendingBinding = null;
 let feishuChat;
@@ -855,7 +856,7 @@ async function qqQuotedContext(item, { signal, assertActive, canRead }) {
 
 async function runQQBatch(items, { signal }) {
   const first = items[0], context = first.context;
-  const ambient = first.ambient === true;
+  let ambient = first.ambient === true;
   const assertActive = () => { signal.throwIfAborted(); for (const item of items) item.context.assertActive(); };
   const send = (reply, expressionIds = []) => sendQQ(context.config, context.target, reply, expressionIds, context.origin,
     { signal, beforeSend: assertActive });
@@ -863,6 +864,16 @@ async function runQQBatch(items, { signal }) {
   try {
     assertActive();
     if (items.some(item => (item.ambient === true) !== ambient)) throw new Error('群聊参与方式已变化。');
+    let quotedFrame;
+    if (first.quoteCandidate) {
+      if (items.length !== 1 || !qqChatBudget.status().remaining || qqQuoteChecks >= 4) return;
+      qqQuoteChecks++;
+      try { quotedFrame = await qqQuotedContext(first, { signal, assertActive, canRead: true }); }
+      finally { qqQuoteChecks--; }
+      assertActive();
+      if (quotedFrame?.reply?.status === 'verified' && quotedFrame.reply.actor === 'agent') ambient = false;
+      else if (!store.getSetting('model').apiKey || !qqGroupAttention.reserve({ groupId: context.target.group_id, config: context.config }).allowed) return;
+    }
     if (ambient && !store.getSetting('model').apiKey) return;
     if (!reserveQQChat()) return;
     if (first.imageUrls.length && !store.getSetting('model').apiKey) {
@@ -879,7 +890,8 @@ async function runQQBatch(items, { signal }) {
     const qqReplyContext = [];
     let quoteRead = false;
     for (let index = 0; index < items.length; index++) {
-      const item = items[index], frame = await qqQuotedContext(item, { signal, assertActive, canRead: !quoteRead });
+      const item = items[index], frame = index === 0 && first.quoteCandidate ? quotedFrame
+        : await qqQuotedContext(item, { signal, assertActive, canRead: !quoteRead });
       if (item.replyId !== undefined) quoteRead = true;
       if (frame) qqReplyContext.push({ startOffset: sources[index].startOffset, endOffset: sources[index].endOffset, ...frame });
     }
@@ -923,7 +935,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
   if (event.message_type === 'group' && !/^\d{1,20}$/.test(groupId)) return;
   const conversation = `qq:${selfId}:${groupId ? `group:${groupId}` : `private:${userId}`}`;
   const segments = Array.isArray(event.message) ? event.message : [];
-  let ambient = false;
+  let ambient = false, quoteCandidate = false;
   const parsed = parseQQMessage(event), { message, imageUrls } = parsed;
   const bookFile = parseQQBookFile(event);
   let platformMessageId;
@@ -962,7 +974,8 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     try { validateQQImageUrls(imageUrls); }
     catch { qqChatBatch.seal(conversation); return; }
   }
-  if (ambient && (bookFile || !store.getSetting('model').apiKey || !qqChatBudget.status().remaining
+  quoteCandidate = ambient && parsed.replyId !== undefined && !bookFile && qqChatBudget.status().remaining > 0;
+  if (ambient && !quoteCandidate && (bookFile || !store.getSetting('model').apiKey || !qqChatBudget.status().remaining
     || !qqGroupAttention.reserve({ groupId, config }).allowed)) { qqChatBatch.seal(conversation); return; }
   chatMemoryJobs.cancel();
   // Group context never inherits the owner's private scope, even when the owner speaks.
@@ -1060,7 +1073,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     ? segments.every(segment => segment?.type === 'text' || (groupId && segment?.type === 'at' && String(segment.data?.qq) === selfId))
     : !/\[CQ:/i.test(String(event.raw_message || '')));
   if (!qqChatBatch.enqueue({ conversation, mergeKey: `${context.mergeKey}:${ambient ? 'ambient' : 'addressed'}`, context, text: message, imageUrls,
-    ambient, mergeable, qqDisplayName: parsed.displayName, mentions: parsed.mentions, replyId: parsed.replyId, replyUnavailable: parsed.replyUnavailable,
+    ambient, quoteCandidate, mergeable, qqDisplayName: parsed.displayName, mentions: parsed.mentions, replyId: parsed.replyId, replyUnavailable: parsed.replyUnavailable,
     windowMs: normalizeQQMergeWindow(config.mergeWindowMs), platformMessageId, receivedAt: new Date().toISOString() })) {
     if (!ambient) await sendQQ(config, target, '当前聊天有较多消息等待处理，请稍后再发。', [], origin, { beforeSend: context.assertActive });
   }
