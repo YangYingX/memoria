@@ -218,7 +218,7 @@ export function createMemoryAgentAccess({ store, scope, actor, query, signal, ex
         if (input.name === 'search_memory' || input.name === 'search_emotions') for (const item of result.items) memoryIds.add(item.id);
         else if (input.name === 'search_conversations') for (const item of result.items) (item.assistantHidden === true ? userMessageIds : conversationIds).add(item.id);
         else if (input.name === 'read_conversation') (result.assistantHidden === true ? userMessageIds : conversationIds).add(args.id);
-        else memoryIds.add(args.id);
+        else if (!['search_own_expressions', 'read_own_expression'].includes(input.name)) memoryIds.add(args.id);
       }
       available();
       messages.push({ role: 'tool', tool_call_id: input.callId, content: JSON.stringify(result) });

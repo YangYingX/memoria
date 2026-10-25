@@ -377,7 +377,7 @@ function makeProactiveJobs() {
     catch { throw new Error('原生主动私聊未返回有效决定。'); }
     return { text: proposal.text, memoryIds: result.memoryIds, conversationIds: result.conversationIds,
       historyMessageIds: result.historyMessageIds, userMessageIds: result.userMessageIds,
-      memoryVersions: result.memoryVersions, sourcesCurrent() {
+      memoryVersions: result.memoryVersions, ownExpressionVersions: result.ownExpressionVersions, sourcesCurrent() {
         try { assertActive(); return result.sourcesCurrent() === true; }
         catch { return false; }
       } };
