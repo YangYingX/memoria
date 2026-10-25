@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { CURRENT_EMOTION_GUIDANCE, createMemoryAccess } from './memory-access.js';
-import { moodSnapshot, MOOD_EXPRESSION_GUIDANCE, COMPANION_DIALOGUE_GUIDANCE } from './mood.js';
+import { createMemoryAccess } from './memory-access.js';
+import { moodSnapshot, MOOD_EXPRESSION_GUIDANCE, COMPANION_DIALOGUE_GUIDANCE, CURRENT_EMOTION_GUIDANCE } from './mood.js';
 import { proactiveQuoteContext, proactiveRecentMessages, proactiveTextExcerpt } from './dsh-proactive-context.js';
 
 const DAY_MS = 86400000;
