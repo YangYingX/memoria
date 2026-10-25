@@ -32,8 +32,10 @@ async function responseJson(response) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-export async function requestCompletion({ store, messages, tools, maxTokens = 1500, signal, ownerChat = false }) {
+export async function requestCompletion({ store, messages, tools, maxTokens = 1500, signal, ownerChat = false, requiredTool }) {
   if (typeof ownerChat !== 'boolean') throw new Error('模型额度请求类型须为布尔值。');
+  if (requiredTool !== undefined && (typeof requiredTool !== 'string' || !Array.isArray(tools)
+    || !tools.some(tool => tool?.type === 'function' && tool.function?.name === requiredTool))) throw new Error('指定的只读核对工具不在本次模型工具列表中。');
   signal?.throwIfAborted();
   const model = store.getSetting('model');
   if (!model?.apiKey) throw new Error('请先保存模型 API 密钥。');
@@ -57,7 +59,7 @@ export async function requestCompletion({ store, messages, tools, maxTokens = 15
     headers: { Authorization: `Bearer ${model.apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: model.model, messages, max_tokens: maxTokens,
       ...(baseUrl.hostname === 'api.deepseek.com' ? { thinking: { type: 'disabled' } } : {}),
-      ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
+      ...(tools?.length ? { tools, tool_choice: requiredTool ? { type: 'function', function: { name: requiredTool } } : 'auto' } : {}),
     }),
   });
   if (!response.ok) throw new Error(`模型接口返回 HTTP ${response.status}，请检查服务地址、模型名称、余额和密钥。`);
