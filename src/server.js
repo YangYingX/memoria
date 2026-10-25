@@ -798,12 +798,16 @@ async function sendQQ(config, target, reply, expressionIds = [], origin = '', op
   try {
     let imageSegments = [];
     try { imageSegments = replyExpressionSegments(expressionIds, origin); }
-    catch { store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: '本次表情已不可用，已仅发送文字。' }); }
+    catch {
+      if (!reply.trim()) throw new Error('本次表情已不可用，未发送空消息。');
+      store.addEvent({ type: 'error', scope: 'owner', actor: 'onebot', content: '本次表情已不可用，已仅发送文字。' });
+    }
+    if (!reply.trim() && !imageSegments.length) throw new Error('没有可发送的回复文字或表情。');
     options.beforeSend?.();
     const response = await fetch(`${config.apiBaseUrl}/${target.group_id ? 'send_group_msg' : 'send_private_msg'}`, {
       method: 'POST', redirect: 'error', signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
       headers: { 'Content-Type': 'application/json', ...(config.accessToken ? { Authorization: `Bearer ${config.accessToken}` } : {}) },
-      body: JSON.stringify({ ...target, message: [{ type: 'text', data: { text: reply.slice(0, 5000) } }, ...imageSegments] }),
+      body: JSON.stringify({ ...target, message: [...(reply.trim() ? [{ type: 'text', data: { text: reply.slice(0, 5000) } }] : []), ...imageSegments] }),
     });
     if (!response.ok) throw new Error(`QQ 发送接口 HTTP ${response.status}`);
     const result = await response.json();

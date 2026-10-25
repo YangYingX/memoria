@@ -53,6 +53,8 @@ const conversationDisplayName = source => source?.qqDisplayName ? { displayName:
 
 const conversationImages = source => source?.imageCount ? { imageCount: source.imageCount, imageNotice: source.imageNotice } : {};
 
+const conversationExpression = source => source?.assistantExpressionNotice ? { assistantExpressionNotice: source.assistantExpressionNotice } : {};
+
 export function withConversationSource(store, memory, scope) {
   const source = store.getMemorySource(memory.id, allowedScopes(scope));
   const parts = store.getReadingParts(memory.id, allowedScopes(scope));
@@ -65,7 +67,7 @@ export function withConversationSource(store, memory, scope) {
   const ownTurn = selfView ? store.getConversation(selfView.conversationId, allowedScopes(scope)) : null;
   const ownConversation = ownTurn && !ownTurn.assistantHidden && !ownTurn.qqReplyContext?.length && !ownTurn.imageCount && !(ownTurn.qqBatchCount > 1)
     && ownTurn.user.length <= 450 && ownTurn.assistant.length <= 450 && ownTurn.user.length + ownTurn.assistant.length <= 700
-    ? { completeTurn: true, actor: ownTurn.actor, userAt: ownTurn.createdAt, user: ownTurn.user, assistant: ownTurn.assistant } : undefined;
+    ? { completeTurn: true, actor: ownTurn.actor, userAt: ownTurn.createdAt, user: ownTurn.user, assistant: ownTurn.assistant, ...conversationExpression(ownTurn) } : undefined;
   const emotion = memory.category === 'emotion' ? store.getEmotionMemoryEvidence(memory.id, allowedScopes(scope)) : null;
   return { ...memory, ...(source ? { conversationSource: { actor: source.actor, recordedAt: source.createdAt, ...conversationDisplayName(source),
     ...historicalConversationSource(store, memory, source),
@@ -196,6 +198,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
           && turn.user.length <= 450 && turn.assistant.length <= 450 && turn.user.length + turn.assistant.length <= 700;
         return { id: turn.id, userAt: turn.createdAt, replyAt: turn.replyAt,
           ...(complete ? { completeTurn: true, user: turn.user, assistant: turn.assistant } : { completeTurn: false }),
+          ...conversationExpression(turn),
           ...(turn.platform ? { platform: turn.platform } : {}) };
       }) || [];
       const items = source ? [{ subject: 'self', emotion: moodSnapshot(store, now).emotion, label: source.proof.label,
@@ -250,9 +253,9 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
           const conversation = !source.qqReplyContext?.length && !source.imageCount && !(source.qqBatchCount > 1)
             && source.user.length <= 450 && source.assistant.length <= 450 && source.user.length + source.assistant.length <= 700
             ? Object.freeze({ completeTurn: true, userAt: source.createdAt, user: source.proactive === true ? null : source.user,
-              assistant: source.assistant, ...(source.proactive === true ? { proactive: true } : { isCurrentSpeaker: source.actor === actor }) }) : undefined;
+              assistant: source.assistant, ...conversationExpression(source), ...(source.proactive === true ? { proactive: true } : { isCurrentSpeaker: source.actor === actor }) }) : undefined;
           const userSnippet = conversationIndexExcerpt(turn.user, tokens), userExcerpt = userSnippet.content;
-          items.push({ id: source.id, replyAt: source.replyAt, excerpt, ...conversationDisplayName(source),
+          items.push({ id: source.id, replyAt: source.replyAt, excerpt, ...conversationDisplayName(source), ...conversationExpression(source),
             ...(currentIds.has(source.id) ? { isCurrentSpeaker: true, userExcerpt, userExcerptTruncated: userExcerpt.length < source.user.length, userReadOffset: userHeader.length + turn.userExcerptOffset + userSnippet.offset } : {}),
             excerptTruncated: turn.assistantTruncated || excerpt.length < turn.assistant.length,
             ...(conversation ? { conversation } : {}),
@@ -328,7 +331,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
           const content = header + turn.assistant;
           if (offset >= content.length) throw new Error('对话正文位置超出范围。');
           return memoryPage({ id: turn.id, scope: turn.scope, actor: turn.actor, createdAt: turn.createdAt, replyAt: turn.replyAt,
-            assistantHidden: false, proactive: true, content, ...(channel ? { platform: turn.platform, conversationKind: turn.conversationKind } : {}),
+            assistantHidden: false, proactive: true, content, ...conversationExpression(turn), ...(channel ? { platform: turn.platform, conversationKind: turn.conversationKind } : {}),
             sections: [{ role: 'assistant', startOffset: header.length, endOffset: content.length }] }, offset, 4000);
         }
         const content = userHeader + turn.user + assistantHeader + turn.assistant;
@@ -336,6 +339,7 @@ export function createMemoryAccess({ store, scope, actor, excludeMessageId = '' 
         return memoryPage({ id: turn.id, scope: turn.scope, actor: turn.actor, createdAt: turn.createdAt, replyAt: turn.replyAt, assistantHidden: turn.assistantHidden, content, ...conversationDisplayName(turn),
           ...(channel ? { platform: turn.platform, conversationKind: turn.conversationKind } : {}),
           ...conversationImages(turn),
+          ...conversationExpression(turn),
           ...(turn.qqBatchCount ? { qqBatchCount: turn.qqBatchCount, qqBatchNotice: turn.qqBatchNotice } : {}),
           ...qqReplySource(turn),
           sections: [{ role: 'user', startOffset: userHeader.length, endOffset: userHeader.length + turn.user.length },

@@ -221,11 +221,19 @@ function eventFields(input) {
   };
 }
 
+function assistantExpressionNotice(message) {
+  return message?.role === 'assistant' && message.actor === 'agent' && message.content === ''
+    && Array.isArray(message.metadata?.expressionIds) && message.metadata.expressionIds.length === 1
+    && typeof message.metadata.expressionIds[0] === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(message.metadata.expressionIds[0])
+    ? '仅发送一张表情，未发送文字；本轮没有这张旧图。' : undefined;
+}
+
 function messageFields(input) {
   record(input, '消息');
   if (!['user', 'assistant'].includes(input.role)) invalid('消息角色须为 user 或 assistant。');
-  const content = text(input.content, '消息正文', input.role === 'user' ? 8000 : 16000);
   const metadata = metadataValue(input.metadata);
+  const expressionOnly = Boolean(assistantExpressionNotice({ ...input, metadata }));
+  const content = text(input.content, '消息正文', input.role === 'user' ? 8000 : 16000, { empty: expressionOnly });
   if (Object.hasOwn(metadata, 'conversationOrigin')) {
     if (input.role !== 'user' || input.scope !== 'owner' || input.actor !== 'owner') invalid('私聊来源只能保存在创建人用户消息中。');
     metadata.conversationOrigin = normalizeConversationOrigin(metadata.conversationOrigin);
@@ -766,7 +774,7 @@ export function createStore(dbPath) {
     const reply = messageRow(get("SELECT * FROM messages WHERE id = ? AND scope = ? AND role = 'assistant' AND actor = 'agent'", replyId, scope));
     if (!reply || reply.metadata.mode !== 'live' || typeof reply.metadata.replyTo !== 'string') return null;
     const user = messageRow(get("SELECT * FROM messages WHERE id = ? AND scope = ? AND role = 'user'", reply.metadata.replyTo, scope));
-    if (!user || !user.content.trim() || !reply.content.trim() || Date.parse(user.createdAt) > Date.parse(reply.createdAt)) return null;
+    if (!user || !user.content.trim() || (!reply.content.trim() && !assistantExpressionNotice(reply)) || Date.parse(user.createdAt) > Date.parse(reply.createdAt)) return null;
     const sources = all("SELECT * FROM events WHERE type = 'message' AND scope = ? AND actor = ? AND content = ? AND json_extract(metadata, '$.messageId') = ?", scope, user.actor, user.content, user.id).map(eventRow);
     if (sources.length !== 1) return null;
     const source = sources[0];
@@ -774,7 +782,7 @@ export function createStore(dbPath) {
       || Date.parse(source.createdAt) < Date.parse(user.createdAt) || Date.parse(source.createdAt) > Date.parse(reply.createdAt)
       || api.isConversationSourceBlocked(scope, source.id)
       || ['conversationOrigin', 'qqReplyContext', 'qqBatchSources'].some(key => JSON.stringify(source.metadata[key]) !== JSON.stringify(user.metadata[key]))) return null;
-    return { user, reply, source, fingerprint: JSON.stringify([user, reply, source]) };
+    return { user, reply, source, ...(assistantExpressionNotice(reply) ? { assistantExpressionNotice: assistantExpressionNotice(reply) } : {}), fingerprint: JSON.stringify([user, reply, source]) };
   }
 
   function emotionMemoryEvidence(memory) {
@@ -1209,6 +1217,7 @@ export function createStore(dbPath) {
       const origin = historicalOrigins.get(user.id);
       turns.push({ id: user.id, scope: user.scope, actor: user.actor, createdAt: user.createdAt, user: user.content,
         assistant: assistantHidden ? '' : reply.content, replyAt: reply.createdAt, assistantHidden,
+        ...(!assistantHidden && assistantExpressionNotice(reply) ? { assistantExpressionNotice: assistantExpressionNotice(reply) } : {}),
         ...(origin ? { platform: origin.platform, conversationKind: 'dm' } : {}),
         ...conversationImageInfo(user, imageSources.get(user.id)),
         ...qqBatchSourceInfo(user.metadata.qqBatchSources, user.content), ...replySources.get(user.id) });
@@ -1633,7 +1642,7 @@ export function createStore(dbPath) {
         || scope === 'owner' && source.user.actor === 'owner' && api.getConversationOrigin(source.user.id) === null) return null;
       const context = [], seen = new Set([user.id]), before = history.slice(0, history.indexOf(user));
       for (const earlierReply of [...before].reverse()) {
-        if (earlierReply.role !== 'assistant' || !earlierReply.content.trim()) continue;
+        if (earlierReply.role !== 'assistant' || (!earlierReply.content.trim() && !assistantExpressionNotice(earlierReply))) continue;
         const earlier = conversationMoodSource(scope, earlierReply.id);
         const earlierUser = earlier && before.find(item => item.id === earlier.user.id);
         if (!earlierUser || seen.has(earlierUser.id) || earlierUser.actor !== user.actor || ![undefined, 'live'].includes(earlierUser.metadata.mode)
@@ -2083,10 +2092,11 @@ export function createStore(dbPath) {
       let confirmedEnd = 0, confirmedExpressions = [], previous;
       return (endOffset, expressionIds = []) => {
         try {
-          endOffset = integer(endOffset, '已确认回复位置', 1, fields.content.length);
+          endOffset = integer(endOffset, '已确认回复位置', fields.content.length ? 1 : 0, fields.content.length);
           if (endOffset < confirmedEnd) invalid('已确认回复位置不能后退。');
           if (!Array.isArray(expressionIds) || expressionIds.length > 1 || expressionIds.some(id => !plannedExpressions.includes(id))
             || (confirmedExpressions.length && expressionIds[0] !== confirmedExpressions[0])) invalid('已确认表情须来自本轮计划，且不能撤回或替换。');
+          if (!fields.content.length && (expressionIds.length !== 1 || expressionIds[0] !== plannedExpressions[0])) invalid('纯表情回复必须先确认原计划表情已发送。');
           const metadata = JSON.stringify({ ...fields.metadata, ...(expressionIds.length ? { expressionIds: [...expressionIds] } : {}) });
           const saved = transaction(() => {
             if (generation !== assistantReplyGeneration) invalid('数据已恢复，本次回复不能继续保存。');
@@ -2158,7 +2168,7 @@ export function createStore(dbPath) {
       const tokens = queryTokens(query);
       let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId
         && (actor === undefined || turn.actor === actor)
-        && (role !== 'assistant' || !turn.assistantHidden && Boolean(turn.assistant.trim()))
+        && (role !== 'assistant' || !turn.assistantHidden && Boolean(turn.assistant.trim() || turn.assistantExpressionNotice))
         && (role !== 'user' || turn.proactive !== true && Boolean(turn.user.trim()))
         && (!dates?.platform || turn.platform === dates.platform)
         && (!dateFilter || dateFilter.includes(role === 'assistant' ? turn.replyAt : turn.createdAt)));
@@ -2167,7 +2177,7 @@ export function createStore(dbPath) {
         score: (role !== 'assistant' ? conversationScore(turn.user, tokens)
           + (turn.imageCount ? conversationScore('图片 附件', tokens) : 0)
           + (turn.qqReplyContext || []).reduce((sum, part) => sum + (part.reply?.status === 'verified' ? conversationScore(part.reply.text, tokens) : 0), 0) : 0)
-          + (role !== 'user' ? conversationScore(turn.assistant, tokens) : 0) }))
+          + (role !== 'user' ? conversationScore(turn.assistant || turn.assistantExpressionNotice || '', tokens) : 0) }))
         .filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.turn) : [];
       const total = matches.length;
       const items = offset < total ? matches.slice(offset, offset + limit).map(turn => {

@@ -45,7 +45,8 @@ export function qqReplyDelay(text, maximum, random = Math.random) {
 export async function deliverQQReply({ reply, expressionIds = [], config, send, onConfirmed, assertActive, signal }) {
   const { replyDelayMs } = normalizeQQReplySettings(config);
   if (typeof send !== 'function' || typeof onConfirmed !== 'function' || typeof assertActive !== 'function') throw new Error('QQ 回复发送方式无效。');
-  const parts = planQQReply(reply, config);
+  if (!Array.isArray(expressionIds) || expressionIds.length > 1 || expressionIds.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(id))) throw new Error('QQ 回复表情标识无效。');
+  const parts = reply === '' && expressionIds.length === 1 ? [{ text: '', endOffset: 0 }] : planQQReply(reply, config);
   for (let index = 0; index < parts.length; index++) {
     signal?.throwIfAborted(); assertActive();
     const part = parts[index], delay = qqReplyDelay(part.text, replyDelayMs);
