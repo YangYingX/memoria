@@ -8,12 +8,26 @@ const date = value => typeof value === 'string' && Number.isFinite(Date.parse(va
 const currentDay = (state, time) => Date.parse(state.dayStartAt) <= time && time < Date.parse(state.dayEndAt);
 const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'updated', 'submitted', 'unchanged', 'failed', 'fee_required', 'verification_required', 'cancelled', 'skipped', 'quiet', 'busy', 'limit', 'missed', 'deciding', 'decided', 'checking', 'unavailable']);
 const outcome = value => outcomes.has(value) ? value : 'unrecorded';
+const activityIds = new Set(['companion', 'books', 'browse_heybox', 'browse_bilibili', 'expression', 'rest', 'unselected']);
+const sharedOutcomes = new Set([...outcomes, 'choosing', 'executing', 'empty', 'model_limit']);
+const sharedDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) ? value : '';
+function sharedActivity(value) {
+  if (value?.mode !== 'shared') return null;
+  const bounded = value => Number.isSafeInteger(value) && value >= 0 && value <= 24 ? value : null;
+  return { mode: 'shared', enabled: value.enabled !== false, busy: value.busy === true, phase: ['choosing', 'executing'].includes(value.phase) ? value.phase : '',
+    target: bounded(value.target), opportunityAttempts: bounded(value.opportunityAttempts), nextRunAt: value.enabled === false ? '' : sharedDate(value.nextRunAt),
+    lastActivity: activityIds.has(value.lastActivity) ? value.lastActivity : '', lastOutcome: sharedOutcomes.has(value.lastOutcome) ? value.lastOutcome : 'unrecorded',
+    lastFinishedAt: sharedDate(value.lastFinishedAt),
+    history: (Array.isArray(value.history) ? value.history : []).slice(-10).filter(item => item && activityIds.has(item.activity) && sharedDate(item.at))
+      .map(item => ({ activity: item.activity, outcome: sharedOutcomes.has(item.outcome) ? item.outcome : 'unrecorded', at: sharedDate(item.at) })) };
+}
 
 // Only project selected fields: raw scheduler state can contain private settings and errors.
-export function activitySnapshot(store, { readingStatus = {}, expressionStatus = {}, dshStatus = {}, qqChatStatus = {}, time = Date.now() } = {}) {
+export function activitySnapshot(store, { readingStatus = {}, expressionStatus = {}, dshStatus = {}, qqChatStatus = {}, activityStatus, time = Date.now() } = {}) {
   const reading = normalizeAutonomySettings({}, store.getSetting('autonomy', {}));
   const expression = normalizeExpressionSettings({}, store.getSetting('selfExpression', {}));
   const readingToday = currentDay(readingStatus, time), expressionToday = currentDay(expressionStatus, time);
+  const shared = sharedActivity(activityStatus);
   const events = store.listEvents({ scope: 'owner', limit: 200 });
   const posts = events.filter(item => item.type === 'self_expression' && item.actor === 'scheduler'
     && ['post', 'comment', 'reply'].includes(item.metadata?.action) && Object.hasOwn(expressionPlatforms, item.metadata.platform) && item.metadata.outcome !== 'attempt')
@@ -23,12 +37,14 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
       ...(['success', 'review'].includes(item.metadata.outcome) ? { title: text(item.metadata.title, 30), text: text(item.content, 800) } : {}) }));
   return {
     asOf: new Date(time).toISOString(),
+    ...(shared ? { sharedActivity: shared } : {}),
     chat: { platform: 'qq', day: typeof qqChatStatus.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(qqChatStatus.day) ? qqChatStatus.day : '', timeZone: 'UTC',
       dailyLimit: count(qqChatStatus.dailyLimit), attempts: count(qqChatStatus.attempts), remaining: count(qqChatStatus.remaining) },
     reading: { enabled: reading.enabled, sources: reading.sources, busy: readingStatus.busy === true, dailyMax: reading.dailyMax,
       attempts: readingToday ? count(readingStatus.attempts) : 0,
       plannedLimit: readingToday ? Math.min(count(readingStatus.target), reading.dailyMax) : null,
-      nextRunAt: reading.enabled && readingToday ? date(readingStatus.nextRunAt) : '',
+      nextRunAt: !shared && reading.enabled && readingToday ? date(readingStatus.nextRunAt) : '',
+      ...(shared ? { scheduleMode: 'shared' } : {}),
       budgetTimeZone: readingToday ? text(readingStatus.timeZone, 80) : reading.timeZone,
       lastOutcome: outcome(readingStatus.lastOutcome), lastAttempt: date(readingStatus.lastAttempt),
       recentReadings: store.listRecentReadings(['owner'], 5),
@@ -40,7 +56,8 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
       dailyLimit: expression.dailyLimit, attempts: expressionToday ? expressionUsedAttempts(expressionStatus) : 0,
       cooldownMinutes: expression.cooldownMinutes,
       budgetTimeZone: expressionToday ? text(expressionStatus.timeZone, 80) : expression.timeZone,
-      nextRunAt: expression.enabled && expressionToday ? date(expressionStatus.nextRunAt) : '',
+      nextRunAt: !shared && expression.enabled && expressionToday ? date(expressionStatus.nextRunAt) : '',
+      ...(shared ? { scheduleMode: 'shared' } : {}),
       platforms: Object.entries(expressionPlatforms).map(([id, platform]) => ({ id, name: platform.name,
         enabled: expression.platforms[id].enabled, postEnabled: expression.platforms[id].post,
         commentEnabled: expression.platforms[id].comment === true, replyEnabled: expression.platforms[id].reply === true, dailyLimit: expression.platforms[id].dailyLimit,

@@ -148,11 +148,13 @@ export function createBackupJobs({ store, root, dataDir, isBusy = () => false })
   const prefix = `persona-${installationId}-`;
   let busy = false;
   let stopped = false;
-  let controller;
-  const status = () => ({ ...EMPTY_STATUS, ...store.getSetting('backupStatus', {}), busy });
+  let controller, activeRun;
+  let lastStatus = { ...EMPTY_STATUS, ...store.getSetting('backupStatus', {}) };
+  const status = () => ({ ...(stopped ? lastStatus : lastStatus = { ...EMPTY_STATUS, ...store.getSetting('backupStatus', {}) }), busy });
   function update(values) {
     const { busy: ignored, ...previous } = status();
-    store.setSetting('backupStatus', { ...previous, ...values });
+    lastStatus = { ...previous, ...values };
+    store.setSetting('backupStatus', lastStatus);
   }
 
   async function prune(directory, keepLocal) {
@@ -186,6 +188,8 @@ export function createBackupJobs({ store, root, dataDir, isBusy = () => false })
     if (!config.passphrase) throw new Error('请先设置至少 12 个字符的备份口令。');
     busy = true;
     controller = new AbortController();
+    let finish;
+    const running = activeRun = { finished: new Promise(resolve => { finish = resolve; }) };
     let phase = 'snapshot';
     try {
       update({ lastAttempt: new Date().toISOString(), lastError: '', remoteVerified: false, lastRemoteUrl: '' });
@@ -197,6 +201,7 @@ export function createBackupJobs({ store, root, dataDir, isBusy = () => false })
       const localFile = await atomicArchive(config.localDirectory, filename, archive);
       update({ lastLocalFile: localFile });
       if (stopped) throw new Error('备份任务已停止，本地备份已保留。');
+      controller.signal.throwIfAborted();
       if (config.webdav.enabled) {
         phase = 'remote';
         const url = new URL(filename, config.webdav.url).href;
@@ -205,6 +210,7 @@ export function createBackupJobs({ store, root, dataDir, isBusy = () => false })
         const options = { redirect: 'error', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]) };
         const uploaded = await fetch(url, { ...options, method: 'PUT', headers, body: archive });
         await uploaded.body?.cancel();
+        controller.signal.throwIfAborted();
         if (!uploaded.ok) throw new Error(`WebDAV 上传失败（HTTP ${uploaded.status}），本地备份已保留。`);
         const downloaded = await fetch(url, { ...options, method: 'GET', headers: { ...headers, 'Cache-Control': 'no-cache' } });
         if (!downloaded.ok) {
@@ -212,22 +218,25 @@ export function createBackupJobs({ store, root, dataDir, isBusy = () => false })
           throw new Error(`WebDAV 回读失败（HTTP ${downloaded.status}），本地备份已保留。`);
         }
         await verifyRemote(downloaded, archive);
+        controller.signal.throwIfAborted();
         update({ lastRemoteUrl: url, remoteVerified: true });
       }
       phase = 'cleanup';
       await prune(config.localDirectory, config.keepLocal);
+      controller.signal.throwIfAborted();
       update({ lastSuccess: new Date().toISOString(), lastError: '' });
       return { ...status(), busy: false };
     } catch (error) {
       let message;
       if (stopped) message = '备份任务已停止；已生成的本地备份会保留。';
+      else if (controller.signal.aborted) message = '本次备份已取消；已生成的本地备份会保留。';
       else if (phase === 'remote') message = /^WebDAV /.test(error.message) ? error.message : 'WebDAV 上传或回读失败，请检查连接与凭据；本地备份已保留。';
       else if (phase === 'cleanup') message = '备份已保存，但本地旧版本清理失败，请检查目录权限。';
       else if (phase === 'local') message = '本地备份写入失败，请检查目录权限、磁盘空间及符号链接。';
       else message = '无法生成加密备份，请检查备份口令与数据大小。';
       update({ lastError: message });
       throw new Error(message);
-    } finally { busy = false; controller = null; }
+    } finally { busy = false; controller = null; if (activeRun === running) activeRun = null; queueMicrotask(finish); }
   }
 
   async function tick() {
@@ -235,6 +244,8 @@ export function createBackupJobs({ store, root, dataDir, isBusy = () => false })
     try { return await run(); } catch { return status(); }
   }
 
-  function stop() { stopped = true; controller?.abort(); }
-  return { run, tick, status, stop };
+  function cancel() { controller?.abort(); }
+  function cancelAndWait() { const running = activeRun; cancel(); return running?.finished || Promise.resolve(); }
+  function stop() { if (!stopped) lastStatus = status(); stopped = true; return cancelAndWait(); }
+  return { run, tick, status, cancel, cancelAndWait, stop };
 }

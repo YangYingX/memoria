@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const DAY_MS = 86400000;
 export const defaultBookSettings = { enabled: false, discoverEnabled: true, dailyLimit: 2, chunkChars: 3000, startHour: 9, endHour: 23, timeZone: 'Asia/Shanghai' };
@@ -72,7 +72,7 @@ function bookDecision(value, books, candidates) {
 }
 
 export function createBookJobs({ store, summarize, decide, discover, load, isBusy = () => false, clock = Date.now, random = Math.random }) {
-  let busy = false, stopped = false, controller, activeRun, foregroundPending;
+  let busy = false, stopped = false, controller, activeRun, foregroundPending, foregroundFinished;
   let lastState = store.getSetting('bookStatus', {});
   const now = () => Number(clock());
   const draw = () => Math.min(0.999999999, Math.max(0, Number(random()) || 0));
@@ -107,7 +107,22 @@ export function createBookJobs({ store, summarize, decide, discover, load, isBus
     return state;
   }
 
-  async function execute({ force = false, bookId, signal, assertActive } = {}) {
+  function opportunity() {
+    if (stopped || busy || foregroundPending || isBusy()) return null;
+    const config = settings(), time = now(), model = store.getSetting('model');
+    if (!config.enabled || !store.getSetting('admin') || !model?.apiKey) return null;
+    const state = plan(config, time);
+    const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.timeZone, hour: '2-digit', hourCycle: 'h23' }).format(time));
+    if (time < Date.parse(state.dayStartAt) || time >= Date.parse(state.dayEndAt)
+      || state.attempts >= Math.min(state.target, config.dailyLimit) || hour < config.startHour || hour >= config.endHour) return null;
+    const books = store.listBooks().filter(book => book.currentOffset < book.totalChars)
+      .map(({ id, currentOffset, totalChars }) => ({ id, currentOffset, totalChars }));
+    if (!books.length && !(config.discoverEnabled && typeof decide === 'function' && typeof discover === 'function' && typeof load === 'function')) return null;
+    return { key: createHash('sha256').update(JSON.stringify({ dayId: state.dayId, dayStartAt: state.dayStartAt,
+      dayEndAt: state.dayEndAt, target: state.target, attempts: state.attempts, config, model, books })).digest('hex') };
+  }
+
+  async function execute({ force = false, bookId, signal, assertActive, scheduledKey } = {}) {
     if (stopped) return { ...status(), skipped: 'stopped' };
     signal?.throwIfAborted(); assertActive?.();
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
@@ -115,6 +130,7 @@ export function createBookJobs({ store, summarize, decide, discover, load, isBus
     if ((!config.enabled && !force) || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
     const state = plan(config, time);
     if (state.attempts >= Math.min(state.target, config.dailyLimit)) return { ...status(), skipped: 'daily_limit' };
+    if (scheduledKey !== undefined && (typeof scheduledKey !== 'string' || opportunity()?.key !== scheduledKey)) return { ...status(), skipped: 'changed' };
     if (!force) {
       // Missed opportunities expire; waking or restarting never causes catch-up reads.
       const missed = state.daySlots.filter(value => Date.parse(value) < time - 10 * 60000).length;
@@ -123,7 +139,7 @@ export function createBookJobs({ store, summarize, decide, discover, load, isBus
       }
       const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.timeZone, hour: '2-digit', hourCycle: 'h23' }).format(time));
       if (hour < config.startHour || hour >= config.endHour) return { ...status(), skipped: 'outside_hours' };
-      if (!state.daySlots.length || Date.parse(state.daySlots[0]) > time) return { ...status(), skipped: 'not_due' };
+      if (scheduledKey === undefined && (!state.daySlots.length || Date.parse(state.daySlots[0]) > time)) return { ...status(), skipped: 'not_due' };
     }
     const selecting = !force && typeof decide === 'function';
     const unread = store.listBooks().filter(book => book.currentOffset < book.totalChars && (!bookId || book.id === bookId)).slice(0, 10);
@@ -157,6 +173,10 @@ export function createBookJobs({ store, summarize, decide, discover, load, isBus
         signal?.throwIfAborted(); assertActive?.();
         if (!sameDay() || activeController.signal.aborted || now() < Date.parse(state.dayStartAt) || now() >= Date.parse(state.dayEndAt)
           || isBusy() || !store.getSetting('admin') || JSON.stringify(settings()) !== state.configSignature || sourceSignature() !== inputSignature) return false;
+        if (scheduledKey !== undefined) {
+          const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: config.timeZone, hour: '2-digit', hourCycle: 'h23' }).format(now()));
+          if (hour < config.startHour || hour >= config.endHour) return false;
+        }
         return sources.every(source => {
           const latest = store.getBook(source.book.id);
           return latest && JSON.stringify(latest) === JSON.stringify(source.book)
@@ -235,15 +255,22 @@ export function createBookJobs({ store, summarize, decide, discover, load, isBus
       finish();
     }
   }
-  async function run(options = {}) {
+  async function run({ force = false, bookId, signal, assertActive } = {}) {
     if (foregroundPending) return { ...status(), skipped: 'busy' };
-    return execute(options);
+    return execute({ force, bookId, signal, assertActive });
+  }
+  async function runScheduled(key) {
+    if (typeof key !== 'string') return { ...status(), skipped: 'changed' };
+    if (foregroundPending) return { ...status(), skipped: 'busy' };
+    return execute({ scheduledKey: key });
   }
   async function runForeground({ bookId, signal, assertActive } = {}) {
     if (stopped) return { ...status(), skipped: 'stopped' };
     signal?.throwIfAborted(); assertActive?.();
     if (foregroundPending) return { ...status(), skipped: 'busy' };
     const pending = foregroundPending = new AbortController();
+    let finishForeground;
+    const finished = foregroundFinished = new Promise(resolve => { finishForeground = resolve; });
     const abort = () => pending.abort();
     signal?.addEventListener('abort', abort, { once: true });
     const checkActive = () => { signal?.throwIfAborted(); pending.signal.throwIfAborted(); assertActive?.(); };
@@ -272,11 +299,24 @@ export function createBookJobs({ store, summarize, decide, discover, load, isBus
     finally {
       signal?.removeEventListener('abort', abort);
       if (foregroundPending === pending) foregroundPending = null;
+      if (foregroundFinished === finished) foregroundFinished = null;
+      finishForeground();
     }
     return { ...result, busy };
   }
   async function tick() { try { return await run(); } catch { return status(); } }
   function cancel() { controller?.abort(); foregroundPending?.abort(); }
-  function stop() { stopped = true; cancel(); }
-  return { status, tick, run, runForeground, cancel, stop };
+  function cancelAndWait() {
+    const running = activeRun;
+    if (!running || running.forced || foregroundPending) return Promise.resolve();
+    running.controller.abort();
+    return running.finished;
+  }
+  function stop() {
+    stopped = true;
+    const pending = [activeRun?.finished, foregroundFinished].filter(Boolean);
+    cancel();
+    return Promise.all(pending);
+  }
+  return { status, tick, run, runForeground, opportunity, runScheduled, cancel, cancelAndWait, stop };
 }

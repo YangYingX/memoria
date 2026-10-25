@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createMemoryAccess } from './memory-access.js';
+import { modelBudget } from './model.js';
 import { moodSnapshot, MOOD_EXPRESSION_GUIDANCE, COMPANION_DIALOGUE_GUIDANCE, CURRENT_EMOTION_GUIDANCE } from './mood.js';
 import { proactiveQuoteContext, proactiveRecentMessages, proactiveTextExcerpt } from './dsh-proactive-context.js';
 
@@ -73,8 +74,8 @@ function dayBounds(time, timeZone) {
 }
 
 export function createProactiveJobs({ store, generate, generateConversation, generateAgenda, generateTheme, assessCompanion, send, getRecipient, canGenerate = () => true,
-  canGenerateConversation = () => false, canAssessCompanion = () => false, isRecipientReady = () => true, isBusy = () => false, clock = Date.now, random = Math.random }) {
-  let busy = false, stopped = false, controller, recovered = false;
+  canGenerateConversation = () => false, canAssessCompanion = () => false, isRecipientReady = () => true, getOpportunityIdentity = () => null, isBusy = () => false, clock = Date.now, random = Math.random }) {
+  let busy = false, stopped = false, controller, recovered = false, activeRun;
   let lastState = store.getSetting('proactiveStatus', {});
   const now = () => Number(clock());
   const stamp = time => new Date(time).toISOString();
@@ -232,7 +233,58 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     return candidates;
   }
 
-  async function run() {
+  function ordinarySelection(time, config) {
+    let selected, recipient = getRecipient();
+    if (!recipient) {
+      selected = greeting(time) || presence(time, config);
+      if (selected) recipient = getRecipient(selected.kind === 'greeting' ? { initialAuthorizationId: selected.authorizationId } : { companionAuthorizationId: selected.authorizationId });
+    }
+    if (!recipient || !canGenerate(recipient)) return null;
+    const companion = !['greeting', 'presence'].includes(selected?.kind) && canAssessCompanion() === true;
+    if (!selected && typeof generateConversation === 'function' && canGenerateConversation() === true) {
+      const message = conversationSeed(time);
+      if (message && getRecipient({ messageId: message.id })) {
+        const sourceKey = createHash('sha256').update(`conversation:${message.id}`).digest('hex');
+        if (!store.hasProactiveDecision(sourceKey) && !store.hasDelivery(`proactive-decision:${sourceKey}`)
+          && !store.hasProactiveAttempt(sourceKey) && !store.hasDelivery(`proactive:${sourceKey}`)) selected = { kind: 'conversation', message, sourceKey, url: '' };
+      }
+    }
+    if (!selected && companion && typeof generateTheme === 'function' && canGenerateConversation() === true) selected = theme(time);
+    selected ||= reading(time);
+    if (!selected && !companion && typeof generateTheme === 'function' && canGenerateConversation() === true && store.getCompanionStats({ now: time }).unanswered === 0) selected = theme(time);
+    selected ||= presence(time, config);
+    if (!selected) return null;
+    const source = selected.kind === 'presence' ? { companionAuthorizationId: selected.authorizationId }
+      : selected.kind === 'greeting' ? { initialAuthorizationId: selected.authorizationId } : selected.kind === 'conversation' ? { messageId: selected.message.id }
+        : selected.kind === 'theme' && selected.memory.sourceType === 'conversation' ? { sourceEventId: selected.evidence.source.eventId } : {};
+    recipient = getRecipient(source);
+    return recipient && canGenerate(recipient) ? { selected, recipient } : null;
+  }
+  const opportunityDependencies = () => JSON.stringify({ identity: getOpportunityIdentity(), persona: store.getSetting('persona'), model: store.getSetting('model'),
+    qq: store.getSetting('qq'), feishu: store.getSetting('feishu'), moodState: store.getSetting('moodState', null) });
+  function opportunityInfo() {
+    try {
+      if (stopped || busy || isBusy() || !store.getSetting('admin') || !store.getSetting('model')?.apiKey || modelBudget(store).sharedRemaining === 0) return null;
+      const config = settings(), time = now();
+      if (!config.enabled || !config.desire || !config.dailyLimit || config.quietUntil && time < Date.parse(config.quietUntil) || !inHours(time, config)) return null;
+      const state = plan(config, time), lastUser = latestUser();
+      if (time < Date.parse(state.dayStartAt) || state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6
+        || time - Date.parse(state.lastOpportunityAt) < config.cooldownMinutes * 60000
+        || lastUser && time - Date.parse(lastUser.createdAt) < config.idleMinutes * 60000) return null;
+      const selection = ordinarySelection(time, config);
+      if (!selection || !lastUser && !['greeting', 'presence'].includes(selection.selected.kind)) return null;
+      const snapshot = JSON.stringify(selection);
+      const key = createHash('sha256').update(JSON.stringify({ kind: 'proactive-opportunity-v1', config, dayId: state.dayId, sendAttempts: state.sendAttempts,
+        decisionAttempts: state.decisionAttempts, lastOpportunityAt: state.lastOpportunityAt, lastUserId: lastUser?.id, selection, dependencies: opportunityDependencies() })).digest('hex');
+      return { offer: { key, platforms: [selection.recipient.platform || 'qq'] }, selection: snapshot };
+    } catch { return null; }
+  }
+  const opportunity = () => opportunityInfo()?.offer || null;
+
+  async function run({ scheduledKey, agendaOnly = false } = {}) {
+    if (typeof agendaOnly !== 'boolean' || scheduledKey !== undefined && (agendaOnly || typeof scheduledKey !== 'string' || !/^[a-f0-9]{64}$/.test(scheduledKey))) throw new Error('主动陪伴机会来源无效。');
+    const scheduled = scheduledKey === undefined ? null : opportunityInfo();
+    if (scheduledKey !== undefined && scheduled?.offer.key !== scheduledKey) return { ...status(), skipped: 'changed' };
     if (stopped) return { ...status(), skipped: 'stopped' };
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
     const config = settings(), time = now();
@@ -241,6 +293,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     if (config.quietUntil && time < Date.parse(config.quietUntil)) return { ...status(), skipped: 'quiet_until' };
     if (!config.dailyLimit || !config.desire) return { ...status(), skipped: 'quiet' };
     const agendas = dueAgendas(time);
+    if (agendaOnly && !agendas.length) return { ...status(), skipped: 'no_agenda' };
+    if (scheduledKey && agendas.length) return { ...status(), skipped: 'agenda_due' };
     let selected = agendas[0];
     let recipient = selected ? selected.recipient : getRecipient();
     if (!recipient && !selected) {
@@ -254,9 +308,9 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     let state = plan(config, time);
     if (time < Date.parse(state.dayStartAt) || !inHours(time, config)) return { ...status(), skipped: 'outside_hours' };
     if (state.sendAttempts >= config.dailyLimit || state.decisionAttempts >= 6) return { ...status(), skipped: 'daily_limit' };
-    if (selected?.kind !== 'agenda' && time < Date.parse(state.nextRunAt)) return { ...status(), skipped: 'not_due' };
+    if (!scheduledKey && selected?.kind !== 'agenda' && time < Date.parse(state.nextRunAt)) return { ...status(), skipped: 'not_due' };
     if (time - Date.parse(state.lastOpportunityAt) < config.cooldownMinutes * 60000) return { ...status(), skipped: 'cooldown' };
-    if (selected?.kind !== 'agenda' && time - Date.parse(state.nextRunAt) > 10 * 60000) {
+    if (!scheduledKey && selected?.kind !== 'agenda' && time - Date.parse(state.nextRunAt) > 10 * 60000) {
       save({ ...state, nextRunAt: stamp(time + draw() * config.cooldownMinutes * 60000), lastOutcome: 'missed' });
       return { ...status(), skipped: 'missed' };
     }
@@ -290,6 +344,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
       : candidate?.kind === 'conversation' ? { messageId: candidate.message.id }
         : candidate?.kind === 'theme' && candidate.memory.sourceType === 'conversation' ? { sourceEventId: candidate.evidence.source.eventId } : {};
     recipient = getRecipient(recipientSource(selected));
+    if (scheduled && scheduled.selection !== JSON.stringify({ selected, recipient })) return { ...status(), skipped: 'changed' };
     if (!recipient && selected?.kind !== 'agenda') return { ...status(), skipped: 'no_recipient' };
     if (selected?.kind !== 'agenda' && !canGenerate(recipient)) return { ...status(), skipped: 'platform_limit' };
     if (!selected || (selected.kind !== 'agenda' && draw() >= config.desire / 100)) {
@@ -299,8 +354,8 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     selected.recipient = recipient;
     const candidates = selected.kind === 'agenda' ? agendas : [selected];
     for (const candidate of agendas) candidate.sourceKey = createHash('sha256').update(`agenda:${candidate.agenda.id}:${candidate.agenda.revision}`).digest('hex');
-    busy = true;
-    const activeController = controller = new AbortController();
+    const activeController = new AbortController();
+    const executionIdentity = opportunityDependencies();
     const initial = selected.kind === 'greeting', ordinaryPresence = selected.kind === 'presence';
     const context = initial ? { messages: [], historyMessageIds: [], userMessageIds: [] } : recentContext(ordinaryPresence);
     const emotionContext = initial || ordinaryPresence ? { items: [], memoryIds: [], conversationIds: [], sourcesCurrent: () => true }
@@ -339,6 +394,7 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     const current = () => {
       try {
         return sameState() && !activeController.signal.aborted && JSON.stringify(settings()) === state.configSignature
+          && opportunityDependencies() === executionIdentity
           && (!config.quietUntil || now() >= Date.parse(config.quietUntil))
           && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt) && inHours(now(), config)
           && (selected.kind !== 'agenda' || now() >= Date.parse(selected.agenda.dueAt) && now() < Date.parse(selected.agenda.expiresAt))
@@ -351,6 +407,9 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
     const check = () => { if (!current() || isBusy()) throw new Error('主动私聊已取消。'); };
     const update = patch => { if (sameState()) state = save({ ...store.getSetting('proactiveStatus', {}), ...patch }); };
     let assessingCompanion = false;
+    let resolveDrained;
+    const running = activeRun = { finished: new Promise(resolve => { resolveDrained = resolve; }) };
+    controller = activeController; busy = true;
     try {
       for (const id of emotionContext.memoryIds) captureMemory(store.getMemory(id));
       let decision, references = { memoryIds: emotionContext.memoryIds, memoryVersions: emotionContext.memoryIds.map(memoryId => ({ memoryId, signature: memoryVersions.get(memoryId) })),
@@ -553,11 +612,14 @@ export function createProactiveJobs({ store, generate, generateConversation, gen
         } else if (current?.status === 'attempted' && selected.attempt?.revision === current.revision) {
           store.transitionFollowup(current.id, current.revision, 'unknown', { now: now() });
         }
-      } } finally { busy = false; if (controller === activeController) controller = null; }
+      } } finally { busy = false; if (controller === activeController) controller = null; if (activeRun === running) activeRun = null; resolveDrained(); }
     }
   }
   async function tick() { try { return await run(); } catch { return status(); } }
+  async function tickAgenda() { try { return await run({ agendaOnly: true }); } catch { return status(); } }
+  async function runScheduled(key) { if (typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key)) return { ...status(), skipped: 'changed' }; return run({ scheduledKey: key }); }
   function cancel() { controller?.abort(); }
-  function stop() { stopped = true; cancel(); }
-  return { status, tick, run, cancel, stop };
+  function cancelAndWait() { const running = activeRun; cancel(); return running?.finished || Promise.resolve(); }
+  function stop() { stopped = true; return cancelAndWait(); }
+  return { status, opportunity, runScheduled, tick, tickAgenda, run, cancel, cancelAndWait, stop };
 }

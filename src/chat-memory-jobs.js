@@ -55,7 +55,7 @@ function selectionsFrom(value, sourceCount) {
 }
 
 export function createChatMemoryJobs({ store, generate, isBusy = () => false, clock = Date.now }) {
-  let busy = false, stopped = false, controller;
+  let busy = false, stopped = false, controller, activeRun;
   let lastConfig = normalizeChatMemorySettings({}, store.getSetting('chatMemory', defaultChatMemorySettings));
   let lastState = store.getSetting('chatMemoryStatus', {});
   const now = () => Number(clock());
@@ -109,6 +109,8 @@ export function createChatMemoryJobs({ store, generate, isBusy = () => false, cl
     lastState = claimedStatus;
     busy = true;
     const activeController = controller = new AbortController();
+    let resolveDrained;
+    const running = activeRun = { finished: new Promise(resolve => { resolveDrained = resolve; }) };
     const sameRun = () => !stopped && same(store.getSetting('chatMemoryStatus', {}), claimedStatus)
       && store.getChatMemoryActivation()?.eventId === batch.activationId;
     const valid = () => sameRun() && !activeController.signal.aborted && !isBusy()
@@ -140,10 +142,14 @@ export function createChatMemoryJobs({ store, generate, isBusy = () => false, cl
     } catch {
       if (stopped) return { ...status(), busy: false, skipped: 'stopped' };
       return finish(valid() ? 'error' : 'cancelled');
-    } finally { busy = false; if (controller === activeController) controller = null; }
+    } finally {
+      busy = false; if (controller === activeController) controller = null;
+      if (activeRun === running) activeRun = null; queueMicrotask(resolveDrained);
+    }
   }
   async function tick() { try { return await run(); } catch { return status(); } }
   function cancel() { controller?.abort(); }
-  function stop() { if (!stopped) lastState = store.getSetting('chatMemoryStatus', lastState); stopped = true; cancel(); }
-  return { tick, status, cancel, stop, run };
+  function cancelAndWait() { const running = activeRun; cancel(); return running?.finished || Promise.resolve(); }
+  function stop() { if (!stopped) lastState = store.getSetting('chatMemoryStatus', lastState); stopped = true; return cancelAndWait(); }
+  return { tick, status, cancel, cancelAndWait, stop, run };
 }

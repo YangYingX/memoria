@@ -56,7 +56,7 @@ function publicReadingUrl(value) {
 }
 
 export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = Date.now }) {
-  let busy = false, stopped = false, controller, backgroundRun = false;
+  let busy = false, stopped = false, controller, backgroundRun = false, activeRun;
   let lastPending = [];
   let lastState = store.getSetting('moodStatus', {});
   let lastConfig = normalizeMoodSettings({}, store.getSetting('mood', defaultMoodSettings));
@@ -204,6 +204,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     busy = true;
     backgroundRun = background;
     const activeController = controller = new AbortController();
+    let resolveDrained;
+    const running = activeRun = { finished: new Promise(resolve => { resolveDrained = resolve; }) };
     const sameRun = () => !stopped && store.getSetting('moodStatus', {}).runId === runId;
     function valid() {
       if (stopped || activeController.signal.aborted) return false;
@@ -238,10 +240,17 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     } catch {
       if (stopped) return { ...status(), busy: false, skipped: 'stopped' };
       return finish(valid() ? 'error' : 'cancelled');
-    } finally { busy = false; if (controller === activeController) { controller = null; backgroundRun = false; } }
+    } finally {
+      busy = false; if (controller === activeController) { controller = null; backgroundRun = false; }
+      if (activeRun === running) activeRun = null; queueMicrotask(resolveDrained);
+    }
   }
   async function tick() { try { return await run({ background: true }); } catch { return status(); } }
   function cancel({ backgroundOnly = false } = {}) { if (!backgroundOnly || backgroundRun) controller?.abort(); }
-  function stop() { stopped = true; cancel(); }
-  return { status, observeConversation, run, tick, cancel, stop };
+  function cancelAndWait(options = {}) {
+    if (options.backgroundOnly && !backgroundRun) return Promise.resolve();
+    const running = activeRun; cancel(options); return running?.finished || Promise.resolve();
+  }
+  function stop() { stopped = true; return cancelAndWait(); }
+  return { status, observeConversation, run, tick, cancel, cancelAndWait, stop };
 }

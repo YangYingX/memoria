@@ -102,6 +102,7 @@ async function loadState({ fill = false } = {}) {
     : '尚未启用。可以在设置中添加阅读地址和时间间隔。';
   renderAccounts();
   renderBackupStatus(state.data.backupStatus);
+  renderActivityStatus(state.data.activityStatus);
   renderAutonomyStatus(state.data.autonomyStatus);
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
   renderMoodStatus();
@@ -286,6 +287,29 @@ async function loadBooks() {
   renderBookStatus(result.status || {});
 }
 
+function renderActivityStatus(status = {}) {
+  const panel = $('activity-panel');
+  panel.hidden = status.mode !== 'shared';
+  if (panel.hidden) return;
+  const names = { companion: '陪伴与聊天', books: '读书', browse_heybox: '逛小黑盒', browse_bilibili: '浏览B站文字资料', expression: '公开表达', rest: '休息', unselected: '尚未选择' };
+  const outcomes = { choosing: '正在选择，尚未执行', executing: '正在执行，结果待确认', success: '已返回完成结果，详见对应记录', updated: '已更新并回读确认', submitted: '已提交，尚未核实生效或审核', unchanged: '原本即为所选内容', quiet: '保持安静或休息', unknown: '结果未确认，不自动重试', pending: '等待核对结果', review: '已提交，待平台审核', skipped: '本次未执行', empty: '暂无可用内容', unavailable: '当前条件不足', model_limit: '模型额度不足', failed: '未能完成', error: '未能完成', cancelled: '已取消', missed: '错过的机会已跳过', checking: '正在核对条件' };
+  const bounded = value => Number.isSafeInteger(value) && value >= 0 && value <= 24 ? value : '—';
+  const enabled = status.enabled !== false;
+  $('activity-summary').textContent = enabled ? '陪伴优先。每次空闲机会只选择一项活动或休息；选择不表示已经完成，实际结果见各项记录。' : '自主活动已暂停，当前没有下一次共享机会；既有计次和历史结果保留。';
+  $('activity-count').textContent = `${bounded(status.opportunityAttempts)} / ${bounded(status.target)} 次`;
+  $('activity-choice').textContent = !enabled ? '已暂停' : status.busy && status.phase === 'choosing' ? '正在选择，尚未执行'
+    : status.busy && status.phase === 'executing' ? `已选择${names[status.lastActivity] || '一项活动'}，正在执行`
+      : names[status.lastActivity] ? `最近一次：${names[status.lastActivity]}` : '等待合适的空闲时刻';
+  $('activity-outcome').textContent = !enabled ? '当前未安排执行，历史结果见下方记录' : status.busy && ['choosing', 'executing'].includes(status.phase) ? outcomes[status.phase] : outcomes[status.lastOutcome] || '还没有结果记录';
+  $('activity-next').textContent = !enabled ? '无下一机会' : status.nextRunAt && Number.isFinite(Date.parse(status.nextRunAt)) ? date(status.nextRunAt) : '等待下一次合适机会';
+  const history = $('activity-history'); history.replaceChildren();
+  for (const item of (Array.isArray(status.history) ? status.history : []).slice(-6).reverse()) {
+    if (!item || !Object.hasOwn(names, item.activity) || !Number.isFinite(Date.parse(item.at))) continue;
+    history.append(node('p', `${date(item.at)} · ${names[item.activity]} · ${outcomes[item.outcome] || '结果未确认'}`, 'caption'));
+  }
+  history.hidden = !history.childElementCount;
+}
+
 function renderBookStatus(status = {}) {
   const config = state.data?.settings.books || {};
   const inDay = Date.now() >= Date.parse(status.dayStartAt) && Date.now() < Date.parse(status.dayEndAt);
@@ -293,13 +317,14 @@ function renderBookStatus(status = {}) {
   const limit = inDay && Number.isFinite(status.target) ? Math.min(status.target, config.dailyLimit || 2) : config.dailyLimit || 2;
   const hour = value => `${String(value ?? 0).padStart(2, '0')}:00`;
   $('book-schedule-summary').textContent = config.enabled
-    ? `每天最多 ${config.dailyLimit} 次读书机会，单次约 ${config.chunkChars} 字符，可选择安静，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
+    ? `每天最多 ${config.dailyLimit} 次读书机会，单次约 ${config.chunkChars} 字符，可选择安静，${state.data?.activityStatus?.mode === 'shared' ? '参与共享选择；允许时段为' : '随机安排在'} ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
     : '自主读书尚未启用。仍可在 QQ 私聊让她读一小段，或在这里手动阅读；每日次数共用。';
   const unread = state.books.some(book => book.currentOffset < book.totalChars);
   let next = config.enabled ? '等待安排' : '启用后安排';
   if (config.enabled && !unread && config.discoverEnabled === false) next = state.books.length ? '书房里的内容已读完' : '添加书籍后安排';
   else if (config.enabled && inDay) next = status.nextRunAt && count < limit
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '今天暂无后续安排';
+  if (config.enabled && state.data?.activityStatus?.mode === 'shared') next = '由自主活动统一安排';
   $('book-next').textContent = next;
   $('book-count').textContent = `${count} / ${limit} 次`;
   const outcomes = { choosing: '正在选书…', quiet: '这次想安静一会', success: '一段阅读完成', reading: '正在阅读…', empty: '暂无未读内容', missed: '错过的安排已跳过', error: '未能完成', cancelled: '已取消', busy: '稍后再读' };
@@ -544,6 +569,7 @@ function renderProactiveStatus(status = {}) {
   $('proactive-next').textContent = !config.enabled ? '启用后安排' : quiet ? `免打扰至 ${quietEnd}` : inDay && status.nextRunAt
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
     : '等待下次安排';
+  if (config.enabled && !quiet && state.data?.activityStatus?.mode === 'shared') $('proactive-next').textContent = '由自主活动统一安排';
   $('proactive-count').textContent = `${inDay ? status.sendAttempts || 0 : 0} / ${config.dailyLimit ?? 1} 次`;
   $('proactive-outcome').textContent = status.busy ? '正在考虑开口…' : proactiveOutcomes[status.lastOutcome] || '还没有记录';
   $('proactive-last').hidden = !status.lastAttempt && !status.lastSuccess;
@@ -645,13 +671,14 @@ function renderSelfExpressionStatus(status = {}) {
   const actionNames = { post: '空间动态', signature: '签名', avatar: '头像' };
   const avatarNames = { hello: '打招呼', happy: '开心', thinking: '思考', comfort: '安慰' };
   $('self-expression-summary').textContent = !config.enabled ? '自主表达尚未启用。可以在「人格与设置」中安排表达习惯。'
-    : `表达欲 ${config.desire ?? 45}% · 自动机会间隔至少 ${config.cooldownMinutes ?? 360} 分钟 · ${String(config.startHour ?? 9).padStart(2, '0')}:00–${String(config.endHour ?? 23).padStart(2, '0')}:00（${config.timeZone || 'Asia/Shanghai'}）。`;
+    : `表达欲 ${config.desire ?? 45}% · 本功能最小间隔 ${config.cooldownMinutes ?? 360} 分钟 · ${String(config.startHour ?? 9).padStart(2, '0')}:00–${String(config.endHour ?? 23).padStart(2, '0')}:00（${config.timeZone || 'Asia/Shanghai'}）。`;
   $('self-expression-mood').textContent = status.mood || '还没有表达状态';
   $('self-expression-reason').textContent = status.reason || '有想法时，也可以选择安静。';
   let next = config.enabled ? '等待安排' : '启用后安排';
   if (config.enabled && inDay) next = status.nextRunAt
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone || 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
     : '今天暂无后续机会';
+  if (config.enabled && state.data?.activityStatus?.mode === 'shared') next = '由自主活动统一安排';
   $('self-expression-next').textContent = next;
   $('self-expression-count').textContent = `${count} / ${config.dailyLimit ?? 80} 次（六类公开操作，全平台合计）`;
   $('self-expression-outcome').textContent = status.busy ? '正在考虑表达…' : outcomes[status.lastOutcome] || '还没有记录';
@@ -699,13 +726,14 @@ function renderAutonomyStatus(status = {}) {
   const count = inDay ? status.attempts || 0 : 0;
   const limit = inDay ? Math.min(status.target, config.dailyMax) : null;
   $('autonomy-schedule-summary').textContent = config.enabled
-    ? `${(config.sources || ['heybox']).map(source => source === 'bilibili' ? 'B站' : '小黑盒').join('、')} · 每天合计计划 ${config.dailyMin}–${config.dailyMax} 次，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
+    ? `${(config.sources || ['heybox']).map(source => source === 'bilibili' ? 'B站' : '小黑盒').join('、')} · ${state.data?.activityStatus?.mode === 'shared' ? `本功能每日最多 ${config.dailyMax} 次，参与共享选择；允许时段为` : `每天合计计划 ${config.dailyMin}–${config.dailyMax} 次，随机安排在`} ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
     : '自主浏览尚未启用。可以在「人格与设置」中选择来源并安排日常。';
   let next = config.enabled ? '等待安排' : '启用后安排';
   if (config.enabled && inDay) {
     next = '今天暂无后续安排';
     if (status.nextRunAt && count < limit) next = new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
   }
+  if (config.enabled && state.data?.activityStatus?.mode === 'shared') next = '由自主活动统一安排';
   $('autonomy-next').textContent = next;
   $('autonomy-count').textContent = limit !== null ? `${count} / ${limit} 次` : `${count} 次 · 尚未安排`;
   const outcomes = { success: '阅读完成', skipped: '未新增阅读', cancelled: '已取消', error: '未能完成' };

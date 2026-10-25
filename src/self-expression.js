@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { moodSnapshot, MOOD_EXPRESSION_GUIDANCE } from './mood.js';
 import { modelBudget } from './model.js';
 import { biliVideoUrl } from './bili-reading.js';
@@ -181,7 +181,7 @@ function biliProfileOutcome(result, action, checked, calls, at) {
     ...(result.value === undefined ? {} : { value: result.value }), ...(result.avatarId === undefined ? {} : { avatarId: result.avatarId }) };
 }
 
-export function createSelfExpressionJobs({ store, generate, perform, getAvatars = () => [], getDiscussion, getBiliDiscussion, getHeyboxDiscussion, getAvailableActions = defaultAvailableActions, platforms = DEFAULT_PLATFORMS, canUsePlatform = () => true, isPlatformReady = () => true, isBusy = () => false, clock = Date.now, random = Math.random }) {
+export function createSelfExpressionJobs({ store, generate, perform, getAvatars = () => [], getDiscussion, getBiliDiscussion, getHeyboxDiscussion, getAvailableActions = defaultAvailableActions, getOpportunityIdentity = () => null, platforms = DEFAULT_PLATFORMS, canUsePlatform = () => true, isPlatformReady = () => true, isBusy = () => false, clock = Date.now, random = Math.random }) {
   let busy = false, stopped = false, controller, activeRun;
   const now = () => Number(clock());
   const draw = () => Math.min(0.999999999, Math.max(0, Number(random()) || 0));
@@ -246,6 +246,25 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
             : !(attempts.avatar > 0) && (!state.lastAvatarAttempts?.[id] || time - Date.parse(state.lastAvatarAttempts[id]) >= config.avatarIntervalDays * DAY_MS)));
       return actions.length ? [{ id, name: clipped(platform.name, 80) || id, actions }] : [];
     });
+  }
+  const opportunityDependencies = () => JSON.stringify({ identity: getOpportunityIdentity(), persona: store.getSetting('persona'), model: store.getSetting('model'),
+    qq: store.getSetting('qq'), feishu: store.getSetting('feishu'), moodState: store.getSetting('moodState', null) });
+  function opportunity() {
+    try {
+      if (stopped || busy || isBusy() || !store.getSetting('admin') || !store.getSetting('model')?.apiKey || modelBudget(store).sharedRemaining === 0) return null;
+      const config = settings(), time = now();
+      if (!config.enabled || config.desire === 0 || hourAt(time, config) < config.startHour || hourAt(time, config) >= config.endHour) return null;
+      const state = plan(config, time);
+      if (time < Date.parse(state.dayStartAt) || state.decisionAttempts >= decisionLimit(config)
+        || time - (Date.parse(state.lastOpportunityAt) || 0) < config.cooldownMinutes * 60000) return null;
+      const permitted = allowedActions(config, state, time).map(({ id, actions }) => ({ id, actions }));
+      if (!permitted.length) return null;
+      const key = createHash('sha256').update(JSON.stringify({ kind: 'expression-opportunity-v1', config, dayId: state.dayId,
+        decisionAttempts: state.decisionAttempts, opportunityAttempts: state.opportunityAttempts, postAttempts: state.postAttempts,
+        platformAttempts: state.platformAttempts, outcomes: state.outcomes, lastOpportunityAt: state.lastOpportunityAt,
+        lastAvatarAttempts: state.lastAvatarAttempts, permitted, dependencies: opportunityDependencies() })).digest('hex');
+      return { key, platforms: permitted };
+    } catch { return null; }
   }
   function validateDecision(value, allowed, avatars, discussion, bili, biliVideo, heybox) {
     const text = (value, limit, label) => {
@@ -318,8 +337,10 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     return result;
   }
 
-  async function run({ force = false, repliesOnly = false } = {}) {
+  async function run({ force = false, repliesOnly = false, scheduledKey } = {}) {
     if (typeof repliesOnly !== 'boolean') throw new Error('通知检查任务来源无效。');
+    if (scheduledKey !== undefined && (force || repliesOnly || typeof scheduledKey !== 'string' || !/^[a-f0-9]{64}$/.test(scheduledKey))) throw new Error('共享表达机会来源无效。');
+    if (scheduledKey !== undefined && opportunity()?.key !== scheduledKey) return { ...status(), skipped: 'changed' };
     if (stopped) return { ...status(), skipped: 'stopped' };
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
     const config = settings(), time = now();
@@ -338,7 +359,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     } else {
       if (state.decisionAttempts >= decisionLimit(config)) return { ...status(), skipped: 'daily_limit' };
       if (!force) {
-        const missed = state.daySlots.filter(value => Date.parse(value) < time - 10 * 60000).length;
+        const missed = scheduledKey ? 0 : state.daySlots.filter(value => Date.parse(value) < time - 10 * 60000).length;
         if (missed) {
           state.daySlots.splice(0, missed); state.opportunityAttempts += missed;
           state.nextRunAt = state.daySlots[0] || ''; state.lastOutcome = 'missed';
@@ -346,10 +367,10 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
         }
         const hour = hourAt(time, config);
         if (hour < config.startHour || hour >= config.endHour) return { ...status(), skipped: 'outside_hours' };
-        if (!state.daySlots.length || Date.parse(state.daySlots[0]) > time) return { ...status(), skipped: 'not_due' };
+        if (!scheduledKey && (!state.daySlots.length || Date.parse(state.daySlots[0]) > time)) return { ...status(), skipped: 'not_due' };
         if (time - (Date.parse(state.lastOpportunityAt) || 0) < config.cooldownMinutes * 60000) return { ...status(), skipped: 'cooldown' };
       }
-      state.daySlots.shift(); state.opportunityAttempts += 1; state.lastOpportunityAt = stamp(time);
+      if (!scheduledKey) state.daySlots.shift(); state.opportunityAttempts += 1; state.lastOpportunityAt = stamp(time);
       state.nextRunAt = state.daySlots[0] || ''; state.lastError = '';
       allowed = allowedActions(config, state, time);
     }
@@ -360,6 +381,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
       return { ...status(), skipped: state.lastOutcome };
     }
     if (repliesOnly) state.biliReplyLastOutcome = 'checking'; else state.lastOutcome = 'checking';
+    const executionDependencies = opportunityDependencies();
     save(state);
     let resolveDrained;
     const running = activeRun = { finished: new Promise(resolve => { resolveDrained = resolve; }) };
@@ -394,8 +416,11 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
       return null;
     }
     const sameState = () => !stopped && store.getSetting('selfExpressionStatus', {}).dayId === state.dayId;
-    const current = () => sameState() && !activeController.signal.aborted && now() >= Date.parse(state.dayStartAt)
-      && now() < Date.parse(state.dayEndAt) && JSON.stringify(settings()) === state.configSignature && sourcesCurrent();
+    const current = () => {
+      try { return sameState() && !activeController.signal.aborted && now() >= Date.parse(state.dayStartAt)
+        && now() < Date.parse(state.dayEndAt) && JSON.stringify(settings()) === state.configSignature && opportunityDependencies() === executionDependencies && sourcesCurrent(); }
+      catch { return false; }
+    };
     const check = () => { if (!current()) throw new Error('自主表达已取消。'); };
     const update = patch => { if (sameState()) state = save({ ...store.getSetting('selfExpressionStatus', {}), ...patch,
       ...(repliesOnly && Object.hasOwn(patch, 'lastOutcome') ? { biliReplyLastOutcome: patch.lastOutcome } : {}) }); };
@@ -551,6 +576,7 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
         try {
           const result = await perform(action.platform, action.type, action.payload || (action.type === 'avatar' ? { avatarId: action.avatarId }
             : { text: action.text, ...(action.title ? { title: action.title } : {}) }), { signal: activeController.signal,
+              assertActive() { check(); if (isBusy()) throw new Error('当前聊天优先，自主表达已取消。'); },
               ...(isBiliProfile ? { sourceAttemptId: attempt?.id } : {}),
               ...(isBili ? { beforeSend() {
                 check();
@@ -694,9 +720,10 @@ export function createSelfExpressionJobs({ store, generate, perform, getAvatars 
     }
   }
   async function tick() { try { return await run(); } catch { return status(); } }
+  async function runScheduled(key) { if (typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key)) return { ...status(), skipped: 'changed' }; return run({ scheduledKey: key }); }
   async function tickReplies() { try { return await run({ repliesOnly: true }); } catch { return status(); } }
   function cancel() { controller?.abort(); }
   function cancelAndWait() { const running = activeRun; cancel(); return running?.finished || Promise.resolve(); }
-  function stop() { stopped = true; cancel(); }
-  return { status, tick, tickReplies, run, cancel, cancelAndWait, stop };
+  function stop() { stopped = true; return cancelAndWait(); }
+  return { status, opportunity, runScheduled, tick, tickReplies, run, cancel, cancelAndWait, stop };
 }

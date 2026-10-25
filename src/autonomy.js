@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { queryTokens } from './store.js';
 import { requestCompletion } from './model.js';
 import { biliVideoUrl } from './bili-reading.js';
@@ -96,7 +96,7 @@ export async function reflectReading(store, { signal, background: ignoredBackgro
 }
 
 export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideos, reflect = reading => reflectReading(store, reading), isBusy = () => false, clock = Date.now, random = Math.random }) {
-  let busy = false, stopped = false, controller;
+  let busy = false, stopped = false, controller, activeRun;
   const now = () => Number(clock());
   const draw = () => Math.min(0.999999999, Math.max(0, Number(random()) || 0));
   const settings = () => normalizeAutonomySettings({}, store.getSetting('autonomy', {}));
@@ -133,7 +133,21 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
     return state;
   }
 
-  async function run({ force = false, source: requestedSource, background = false } = {}) {
+  function opportunity() {
+    if (stopped || busy || isBusy()) return null;
+    const config = settings(), time = now(), model = store.getSetting('model');
+    if (!config.enabled || !store.getSetting('admin') || !model?.apiKey) return null;
+    const state = plan(config, time), hour = hourAt(time, config);
+    if (time < Date.parse(state.dayStartAt) || time >= Date.parse(state.dayEndAt)
+      || state.attempts >= Math.min(state.target, config.dailyMax) || hour < config.startHour || hour >= config.endHour) return null;
+    const sources = config.sources.filter(source => source === 'bilibili' ? typeof browseVideos === 'function'
+      : typeof discoverPosts === 'function' && typeof readPost === 'function');
+    if (!sources.length) return null;
+    return { key: createHash('sha256').update(JSON.stringify({ dayId: state.dayId, dayStartAt: state.dayStartAt,
+      dayEndAt: state.dayEndAt, target: state.target, attempts: state.attempts, config, model, sources })).digest('hex'), sources };
+  }
+
+  async function execute({ force = false, source: requestedSource, background = false, scheduledKey } = {}) {
     if (typeof background !== 'boolean') throw new Error('自主活动任务来源无效。');
     if (stopped) return { ...status(), skipped: 'stopped' };
     if (busy || isBusy()) return { ...status(), skipped: 'busy' };
@@ -142,6 +156,13 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
     if (!config.enabled || !store.getSetting('admin')) return { ...status(), skipped: 'disabled' };
     const state = plan(config, time);
     if (state.attempts >= Math.min(state.target, config.dailyMax)) return { ...status(), skipped: 'daily_limit' };
+    let scheduledSources;
+    if (scheduledKey !== undefined) {
+      const available = opportunity();
+      if (typeof scheduledKey !== 'string' || available?.key !== scheduledKey
+        || requestedSource !== undefined && !available.sources.includes(requestedSource)) return { ...status(), skipped: 'changed' };
+      scheduledSources = available.sources;
+    }
     if (!force) {
       const hour = hourAt(time, config);
       if (hour < config.startHour || hour >= config.endHour) {
@@ -150,10 +171,12 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
         save(state);
         return { ...status(), skipped: 'outside_hours' };
       }
-      const due = state.daySlots.filter(value => Date.parse(value) <= time).length;
-      if (!due) return { ...status(), skipped: 'not_due' };
-      // Consume just the latest missed slot; do not catch up in a burst after downtime.
-      state.daySlots.splice(0, due - 1);
+      if (scheduledKey === undefined) {
+        const due = state.daySlots.filter(value => Date.parse(value) <= time).length;
+        if (!due) return { ...status(), skipped: 'not_due' };
+        // Consume just the latest missed slot; do not catch up in a burst after downtime.
+        state.daySlots.splice(0, due - 1);
+      }
     }
     state.daySlots.shift();
     state.attempts += 1;
@@ -163,14 +186,20 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
     save(state);
     busy = true;
     const activeController = controller = new AbortController();
+    let finish;
+    const running = activeRun = { forced: Boolean(force), controller: activeController, finished: new Promise(resolve => { finish = resolve; }) };
+    const scheduledModel = scheduledKey === undefined ? '' : JSON.stringify(store.getSetting('model'));
     let interestSnapshot = '';
     const interestInputs = () => JSON.stringify({ evidence: conversationInterests(store), readingNotes: publicReadingNotes(store), model: store.getSetting('model'), persona: store.getSetting('persona') });
     const current = () => !stopped && !activeController.signal.aborted
       && store.getSetting('autonomyStatus', {}).dayId === state.dayId
       && JSON.stringify(settings()) === state.configSignature
+      && (scheduledKey === undefined || store.getSetting('admin') && now() >= Date.parse(state.dayStartAt) && now() < Date.parse(state.dayEndAt)
+        && hourAt(now(), config) >= config.startHour && hourAt(now(), config) < config.endHour && scheduledModel === JSON.stringify(store.getSetting('model')))
       && (!interestSnapshot || interestSnapshot === interestInputs());
     const check = () => { if (!current()) throw new Error('自主活动已取消。'); };
-    const source = requestedSource ?? config.sources[Math.floor(draw() * config.sources.length)];
+    const sources = scheduledSources || config.sources;
+    const source = requestedSource ?? sources[Math.floor(draw() * sources.length)];
     let url = SOURCE_URLS[source], title = '', selected = false, readingSaved = false;
     function rememberUnreadableVideos(values) {
       if (source !== 'bilibili' || !Array.isArray(values) || values.length > 2) return;
@@ -338,11 +367,34 @@ export function createAutonomyJobs({ store, discoverPosts, readPost, browseVideo
       event('error', `自主浏览失败：${message}`);
       save({ ...state, lastOutcome: 'error', lastError: message, lastUrl: url, lastTitle: title });
       throw new Error(message);
-    } finally { busy = false; if (controller === activeController) controller = null; }
+    } finally {
+      busy = false;
+      if (controller === activeController) controller = null;
+      if (activeRun === running) activeRun = null;
+      finish();
+    }
   }
 
+  async function run({ force = false, source, background = false } = {}) {
+    return execute({ force, source, background });
+  }
+  async function runScheduled(key, { source } = {}) {
+    if (typeof key !== 'string') return { ...status(), skipped: 'changed' };
+    return execute({ scheduledKey: key, source, background: true });
+  }
   async function tick() { try { return await run({ background: true }); } catch { return status(); } }
   function cancel() { controller?.abort(); }
-  function stop() { stopped = true; cancel(); }
-  return { status, tick, run, cancel, stop };
+  function cancelAndWait() {
+    const running = activeRun;
+    if (!running || running.forced) return Promise.resolve();
+    running.controller.abort();
+    return running.finished;
+  }
+  function stop() {
+    stopped = true;
+    const running = activeRun;
+    cancel();
+    return running?.finished || Promise.resolve();
+  }
+  return { status, tick, run, opportunity, runScheduled, cancel, cancelAndWait, stop };
 }

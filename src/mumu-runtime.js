@@ -135,8 +135,14 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     const device = await ownDevice();
     if (!device.is_android_started) throw new Error('MuMu 专用设备尚未完成启动，本次未执行操作。');
   }
-  async function androidShell(command) {
+  async function androidShell(command, { signal, beforeSend, assertActive, onDispatch } = {}) {
     await readyDevice();
+    signal?.throwIfAborted();
+    if (beforeSend) {
+      if (await beforeSend() === false) throw new Error('小黑盒发布前检查未通过，未执行提交命令。');
+      await readyDevice();
+    }
+    signal?.throwIfAborted(); assertActive?.(); onDispatch?.();
     const result = await run(manager, ['adb', '-v', index, '-c', `shell ${command}`], { timeout: 30000, cwd: dirname(manager) });
     const dump = command.match(/^uiautomator dump (\/data\/local\/tmp\/memoria-heybox-[0-9a-f-]+\.xml)$/)?.[1];
     // MuMu Android 15 can exit 139 after writing the dump. The caller still verifies the fresh XML.
@@ -216,12 +222,12 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
       await androidShell(`rm -f ${snapshot}`);
     }
   }
-  async function tapHeyboxNode(view, id) {
+  async function tapHeyboxNode(view, id, options) {
     const matches = view.nodes.filter(node => node.id === id && node.clickable);
     if (matches.length !== 1) throw new Error('没有唯一可核验的小黑盒资料入口，本次未点击。');
-    return tapHeyboxTarget(view, matches[0]);
+    return tapHeyboxTarget(view, matches[0], options);
   }
-  async function tapHeyboxLabel(view, text, resourceId = '') {
+  async function tapHeyboxLabel(view, text, resourceId = '', options) {
     const labels = view.nodes.filter(node => node.text === text && (!resourceId || node.id === resourceId));
     if (labels.length !== 1) throw new Error('没有唯一可核验的小黑盒菜单文字，本次未点击。');
     const bounds = value => value.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/)?.slice(1).map(Number);
@@ -231,9 +237,9 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
       .filter(({ box }) => box && box[0] <= label[0] && box[1] <= label[1] && box[2] >= label[2] && box[3] >= label[3])
       .map(item => ({ ...item, area: (item.box[2] - item.box[0]) * (item.box[3] - item.box[1]) })).sort((a, b) => a.area - b.area);
     if (!candidates.length || candidates[0].area === candidates[1]?.area) throw new Error('小黑盒菜单点击区域不唯一。');
-    return tapHeyboxTarget(view, candidates[0].node);
+    return tapHeyboxTarget(view, candidates[0].node, options);
   }
-  async function tapHeyboxTarget(view, node) {
+  async function tapHeyboxTarget(view, node, options) {
     const bounds = node.bounds.match(/^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$/)?.slice(1).map(Number);
     if (!bounds || bounds[0] >= bounds[2] || bounds[1] >= bounds[3] || bounds.some(value => value > 8192)) {
       throw new Error('小黑盒资料入口的位置无法核验，本次未点击。');
@@ -242,7 +248,7 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     const resumed = activities.split(/\r?\n/).find(line => /^\s*(?:topResumedActivity|mResumedActivity|ResumedActivity)\s*[:=]/.test(line));
     const currentActivity = resumed?.match(/\b[a-zA-Z][\w.]+\/[a-zA-Z0-9._$]+/)?.[0];
     if (currentActivity !== view.activity) throw new Error('小黑盒当前界面已变化，请重新读取。');
-    await androidShell(`input tap ${Math.floor((bounds[0] + bounds[2]) / 2)} ${Math.floor((bounds[1] + bounds[3]) / 2)}`);
+    await androidShell(`input tap ${Math.floor((bounds[0] + bounds[2]) / 2)} ${Math.floor((bounds[1] + bounds[3]) / 2)}`, options);
   }
   async function closeAvatarMenu(view) {
     if (view.activity === `${androidDevice.package}/.module.account.UpdateAccountActivity`
@@ -502,7 +508,10 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     postJournal.setDraft(post, nickname, 'ready');
     return { prepared: true, accountVerified: true, post };
   }
-  async function publishHeyboxPost(input, { signal, ...policy } = {}) {
+  async function publishHeyboxPost(input, { signal, beforeSend, assertActive, ...policy } = {}) {
+    if (beforeSend !== undefined && typeof beforeSend !== 'function' || assertActive !== undefined && typeof assertActive !== 'function') {
+      throw new Error('小黑盒发布前检查参数无效。');
+    }
     const post = validateHeyboxPost(input);
     if (!postJournal) throw new Error('请先绑定小黑盒专用账号。');
     const blocked = postJournal.guard(post, policy);
@@ -514,11 +523,18 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
     const nickname = postJournal.load().draft.nickname;
     const attempt = postJournal.reserve(post, policy);
     if (attempt.ok === false) return attempt;
-    let dispatched = false, textOnlyConfirmed = false;
+    let dispatched = false, textOnlyConfirmed = false, sendChecked = false;
     try {
       signal?.throwIfAborted();
-      dispatched = true;
-      await tapHeyboxLabel({ ...view, nodes: view.nodes.filter(node => node.className !== 'android.widget.EditText') }, '发布');
+      await tapHeyboxLabel({ ...view, nodes: view.nodes.filter(node => node.className !== 'android.widget.EditText') }, '发布', '', {
+        signal, assertActive, onDispatch: () => { dispatched = true; },
+        async beforeSend() {
+          if (sendChecked) throw new Error('本次小黑盒发布不能重复提交。');
+          sendChecked = true;
+          assertActive?.();
+          return beforeSend ? await beforeSend() : true;
+        },
+      });
       for (let poll = 0; poll < 6; poll++) {
         await setTimeout(700);
         const published = await readHeyboxView();
@@ -527,7 +543,7 @@ export function createMumuRuntime({ root, manager, index, createdTimestamp, devi
           && published.nodes.some(node => node.id === `${androidDevice.package}:id/tv_positive_button` && node.text === '前往配图')
           && published.nodes.some(node => node.id === `${androidDevice.package}:id/tv_negative_button` && node.text === '直接发布')) {
           textOnlyConfirmed = true;
-          await tapHeyboxNode(published, `${androidDevice.package}:id/tv_negative_button`);
+          await tapHeyboxNode(published, `${androidDevice.package}:id/tv_negative_button`, { signal, assertActive });
           continue;
         }
         const result = verifyHeyboxPostView(published, post, nickname);
