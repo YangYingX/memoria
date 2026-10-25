@@ -510,7 +510,7 @@ npm install --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.2 /absolute/
 
 Linux 可分别填写 `/opt/node24/bin/node` 和 `/var/lib/persona-agent/dsh-host` 等实际绝对路径。Memoria 服务用户须有执行 Node 和写入专用宿主目录的权限。使用仓库 systemd 模板时，宿主放在可写的 `StateDirectory` 内；其他位置还须加入该服务的 `ReadWritePaths`。此文件仅由部署者在本机设置，不接受聊天或插件修改路径。无需在 DSH profile 中填写模型密钥或复制个人配置。
 
-使用 WSL 时，将 Linux 宿主及其 `node_modules` 安装在 Linux 文件系统，例如 `~/memoria-dsh-host`。从 `/mnt/c` 或 `/mnt/d` 加载大量依赖可能导致启动超时；不要复用 Windows 的宿主依赖目录。
+使用 WSL 时，将 Linux 宿主及其 `node_modules` 安装在 Linux 文件系统，例如 `~/memoria-dsh-host`。从 `/mnt/c` 或 `/mnt/d` 加载大量依赖可能导致启动超时；不要复用 Windows 的宿主依赖目录。 在 `dsh-runtime.json` 中填写 `/home/你的用户名/memoria-dsh-host` 等实际绝对路径，JSON 不会展开 `~` 或环境变量。Linux Node.js 与 Linux 宿主依赖应分别安装在该系统内；遇到检测启动超时，先核对路径和文件系统位置。参见[微软 WSL 文件存储与性能说明](https://learn.microsoft.com/en-us/windows/wsl/filesystems#file-storage-and-performance-across-file-systems)。
 
 在后台“人格与设置 → DSH 插件运行层”点击检测。此按钮启动独立子进程，核对真实插件注册及只读开关，不调用模型或平台；结束后关闭宿主并清理临时 profile。关闭方法是将 `enabled` 改为 `false` 或移除配置文件，无需改变聊天与书架设置。
 
