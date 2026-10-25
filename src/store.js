@@ -2097,7 +2097,8 @@ export function createStore(dbPath) {
       return { items, offset, nextOffset: offset + items.length < matches.length ? offset + items.length : null,
         ...(filter ? { dateRange: filter.range } : {}) };
     },
-    searchConversationPage(query, scopes, limit = 6, offset = 0, excludeMessageId = '', dates) {
+    searchConversationPage(query, scopes, limit = 6, offset = 0, excludeMessageId = '', dates, actor) {
+      if (actor !== undefined) actor = text(actor, '检索发言者', 160);
       query = text(query, '对话查询', 8000, { empty: true });
       const permitted = conversationScopes(scopes);
       limit = integer(limit, '检索条数', 1, 100);
@@ -2106,6 +2107,7 @@ export function createStore(dbPath) {
       const dateFilter = conversationDateRange(dates), role = dates?.role;
       const tokens = queryTokens(query);
       let matches = conversationState(permitted).turns.filter(turn => turn.id !== excludeMessageId
+        && (actor === undefined || turn.actor === actor)
         && (role !== 'assistant' || !turn.assistantHidden && Boolean(turn.assistant.trim()))
         && (role !== 'user' || turn.proactive !== true && Boolean(turn.user.trim()))
         && (!dates?.platform || turn.platform === dates.platform)
