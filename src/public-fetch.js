@@ -37,11 +37,76 @@ export function assertPublicUrl(value) {
   return url;
 }
 
+const proxyDnsHosts = new Set(['www.xiaoheihe.cn', 'api.xiaoheihe.cn', 'static.max-c.com', 'static.portal101.cn']);
+const proxyDnsCache = new Map();
+
+async function proxyPublicAddresses(host, signal) {
+  const cached = proxyDnsCache.get(host);
+  signal.throwIfAborted();
+  if (cached?.expiresAt > Date.now()) return cached.addresses;
+  try {
+    const active = AbortSignal.any([signal, AbortSignal.timeout(8000)]);
+    const url = new URL('https://dns.google/resolve');
+    url.searchParams.set('name', host);
+    url.searchParams.set('type', 'A');
+    url.searchParams.set('edns_client_subnet', '0.0.0.0/0');
+    const response = await fetch(url, { method: 'GET', redirect: 'error', signal: active,
+      headers: { Accept: 'application/dns-json' } });
+    if (!response.ok || response.redirected) { await response.body?.cancel(); throw new Error(); }
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      active.throwIfAborted();
+      size += chunk.length;
+      if (size > 16384) throw new Error();
+      chunks.push(chunk);
+    }
+    active.throwIfAborted();
+    const result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+    const name = value => {
+      if (typeof value !== 'string') throw new Error();
+      const normalized = value.toLowerCase().replace(/\.$/, '');
+      if (normalized.length > 253 || !normalized.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) throw new Error();
+      return normalized;
+    };
+    if (result?.Status !== 0 || result.TC !== false || result.CD === true || !Array.isArray(result.Question)
+      || result.Question.length !== 1 || result.Question[0].type !== 1 || name(result.Question[0].name) !== host
+      || !Array.isArray(result.Answer) || !result.Answer.length || result.Answer.length > 64) throw new Error();
+    const records = result.Answer.filter(record => record && [1, 5].includes(record.type));
+    for (const record of records) {
+      name(record.name);
+      if (!Number.isSafeInteger(record.TTL) || record.TTL < 0 || record.TTL > 2147483647
+        || (record.type === 1 && (isIP(record.data) !== 4 || !isPublicAddress(record.data)))) throw new Error();
+    }
+    const visited = new Set(), ttls = [];
+    let current = host;
+    for (let depth = 0; depth < 8; depth++) {
+      if (visited.has(current)) throw new Error();
+      visited.add(current);
+      const entries = records.filter(record => name(record.name) === current);
+      const aliases = entries.filter(record => record.type === 5), addresses = entries.filter(record => record.type === 1);
+      if (addresses.length && !aliases.length) {
+        const values = [...new Set(addresses.map(record => record.data))].map(address => ({ address, family: 4 }));
+        const ttl = Math.min(60, ...ttls, ...addresses.map(record => record.TTL));
+        if (ttl > 0) proxyDnsCache.set(host, { expiresAt: Date.now() + ttl * 1000, addresses: values });
+        return values;
+      }
+      if (aliases.length !== 1 || addresses.length) throw new Error();
+      ttls.push(aliases[0].TTL);
+      current = name(aliases[0].data);
+    }
+    throw new Error();
+  } catch {
+    throw new Error('域名无法取得经过核验的公网地址。');
+  }
+}
+
 // DNS is resolved once per hop and pinned to the actual connection, including browser subresources.
-export async function fetchPublicResource(value, { signal, maxBytes = 2 * 1024 * 1024, timeoutMs = 20000, maxRedirects = 3, allowUrl, headers = {} } = {}) {
+export async function fetchPublicResource(value, { signal, maxBytes = 2 * 1024 * 1024, timeoutMs = 20000, maxRedirects = 3, allowUrl, headers = {}, proxyDns = false } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 20 * 1024 * 1024) throw new Error('下载大小限制无效。');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new Error('下载时限无效。');
   if (!Number.isInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 3) throw new Error('跳转次数限制无效。');
+  if (typeof proxyDns !== 'boolean') throw new Error('代理 DNS 选项无效。');
   const initialOrigin = assertPublicUrl(value).origin;
   const controller = new AbortController();
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -60,12 +125,17 @@ export async function fetchPublicResource(value, { signal, maxBytes = 2 * 1024 *
     const url = assertPublicUrl(input);
     if (allowUrl && allowUrl(url) !== true) throw new Error('地址超出允许访问的范围。');
     const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '');
-    const addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await lookup(host, { all: true, verbatim: true });
+    let addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await lookup(host, { all: true, verbatim: true });
     combined.throwIfAborted();
+    if (proxyDns && proxyDnsHosts.has(host) && addresses.length
+      && addresses.every(item => isIP(item.address) === 4 && /^198\.(?:18|19)\./.test(item.address))) {
+      addresses = await proxyPublicAddresses(host, combined);
+      combined.throwIfAborted();
+    }
     if (!addresses.length || addresses.some(item => !isPublicAddress(item.address))) throw new Error('域名指向本机、内网或保留地址。');
     const target = addresses.find(item => item.family === 4) || addresses[0];
     const safeHeaders = Object.fromEntries(Object.entries(headers).filter(([key]) => !/^(host|connection|content-length|transfer-encoding|authorization|proxy-authorization|cookie|accept-encoding)$/i.test(key) && !(key.toLowerCase() === 'referer' && url.origin !== initialOrigin)));
-    const response = await new Promise((resolve, reject) => {
+    const connect = () => new Promise((resolve, reject) => {
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol, hostname: host, port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: url.pathname + url.search, method: 'GET', agent: false, family: target.family,
@@ -76,6 +146,13 @@ export async function fetchPublicResource(value, { signal, maxBytes = 2 * 1024 *
       req.once('error', reject);
       req.end();
     });
+    let response;
+    try { response = await connect(); }
+    catch (error) {
+      // A reset before response headers carries no body and is safe to retry once.
+      if (!proxyDns || !proxyDnsHosts.has(host) || error.code !== 'ECONNRESET' || combined.aborted) throw error;
+      response = await connect();
+    }
     try {
       const status = response.statusCode;
       if ([301, 302, 303, 307, 308].includes(status)) {

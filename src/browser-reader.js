@@ -28,9 +28,9 @@ async function visit(url, signal, extract) {
   signal?.throwIfAborted();
   const controller = new AbortController();
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-  const timer = setTimeout(() => controller.abort(), 50000);
+  const timer = setTimeout(() => controller.abort(), 90000);
   let browser, context, page, requests = 0, bytesRead = 0, verificationRequired = false;
-  let downloads = Promise.resolve();
+  const downloads = new Set(); let reservedBytes = 0;
   const stop = () => { browser?.close().catch(() => {}); };
   combined.addEventListener('abort', stop, { once: true });
   const target = new URL(url);
@@ -38,6 +38,10 @@ async function visit(url, signal, extract) {
   const allowResource = candidate => {
     if (candidate.protocol !== 'https:' || candidate.username || candidate.password || candidate.port) return false;
     if (candidate.hostname === 'www.xiaoheihe.cn') return candidate.href === target.href;
+    if (candidate.hostname === 'static.portal101.cn') {
+      return candidate.pathname === '/dist/web/v3.0.0/fp.min.js'
+        && (!candidate.search || /^\?t=\d{1,10}$/.test(candidate.search));
+    }
     if (candidate.hostname === 'static.max-c.com') {
       return ['/static/heybox/webapp/', '/web/npm/', '/web/packages/hb-font/'].some(prefix => candidate.pathname.startsWith(prefix));
     }
@@ -75,33 +79,36 @@ async function visit(url, signal, extract) {
         || ++requests > MAX_REQUESTS || bytesRead >= MAX_TOTAL_BYTES) {
         return route.abort().catch(() => {});
       }
-      // Serialize the bounded resource downloads so the total limit also covers
-      // bytes in flight, instead of allowing every concurrent script its own budget.
-      const previous = downloads;
-      let release;
-      downloads = new Promise(resolve => { release = resolve; });
-      await previous;
+      // Reserve each in-flight download inside the same total budget.
+      while (!combined.aborted && downloads.size >= 3) await Promise.race(downloads);
+      const budget = Math.min(4 * 1024 * 1024, MAX_TOTAL_BYTES - bytesRead - reservedBytes);
+      if (combined.aborted || budget <= 0) return route.abort().catch(() => {});
+      reservedBytes += budget;
+      let reservation = budget, release;
+      const downloading = new Promise(resolve => { release = resolve; });
+      downloads.add(downloading);
       try {
         if (combined.aborted || bytesRead >= MAX_TOTAL_BYTES) return route.abort().catch(() => {});
         const original = await request.allHeaders();
         const headers = Object.fromEntries(['accept', 'accept-language', 'user-agent', 'origin', 'referer']
           .filter(key => original[key]).map(key => [key, original[key]]));
         const resource = await fetchPublicResource(candidate.href, {
-          signal: combined, timeoutMs: 12000, maxBytes: Math.min(4 * 1024 * 1024, MAX_TOTAL_BYTES - bytesRead),
-          maxRedirects: 0, allowUrl: allowResource, headers,
+          signal: combined, timeoutMs: 12000, maxBytes: budget,
+          maxRedirects: 0, allowUrl: allowResource, headers, proxyDns: true,
         });
+        reservedBytes -= reservation; reservation = 0;
         bytesRead += resource.bytes.length;
         if (combined.aborted || bytesRead > MAX_TOTAL_BYTES) return route.abort().catch(() => {});
         const responseHeaders = Object.fromEntries(Object.entries(resource.headers).map(([key, value]) => [key, String(value)]));
         await route.fulfill({ status: resource.status, headers: responseHeaders, body: resource.bytes });
       } catch { await route.abort().catch(() => {}); }
-      finally { release(); }
+      finally { reservedBytes -= reservation; downloads.delete(downloading); release(); }
     });
     page = await context.newPage();
     context.on('page', opened => { if (opened !== page) opened.close().catch(() => {}); });
     page.on('dialog', dialog => dialog.dismiss().catch(() => {}));
     page.on('download', download => download.cancel().catch(() => {}));
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     const result = await extract(page);
     combined.throwIfAborted();
     return result;
@@ -124,7 +131,7 @@ async function visit(url, signal, extract) {
 
 export async function discoverHeyboxPosts({ signal } = {}) {
   return visit(HOME, signal, async page => {
-    await page.waitForSelector(POST_LIST, { state: 'attached', timeout: 20000 });
+    await page.waitForSelector(POST_LIST, { state: 'attached', timeout: 75000 });
     const candidates = await page.locator(POST_LIST).evaluateAll(nodes => nodes.slice(0, 40).map(node => ({
       url: node.href,
       title: node.querySelector('.bbs-content__title')?.innerText?.replace(/\s+/g, ' ').trim().slice(0, 500) || '',
@@ -147,7 +154,7 @@ export async function readHeyboxPost(value, { signal, maxText = MAX_TEXT } = {})
   if (!Number.isSafeInteger(maxText) || maxText < 1 || maxText > 1000000) throw new Error('正文长度限制无效。');
   const url = postUrl(value);
   return visit(url, signal, async page => {
-    await page.waitForSelector(POST_BODY, { state: 'attached', timeout: 20000 });
+    await page.waitForSelector(POST_BODY, { state: 'attached', timeout: 75000 });
     const article = await page.evaluate(({ selector, maxText }) => {
       const body = document.querySelector(selector);
       const title = document.querySelector('.hb-bbs-link__content .section-title__content')?.innerText || '';

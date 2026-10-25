@@ -46,7 +46,7 @@ Windows 使用 PowerShell 时可执行 `npm.cmd ci --ignore-scripts`。
 npm run browser:install
 ```
 
-这会安装 Chromium headless shell，不使用你的日常浏览器账号。聊天中读取小黑盒公开帖子也需要这个浏览器。Windows PowerShell 可用 `npm.cmd run browser:install`；Linux 还需系统依赖，见[部署说明](docs/deployment.md#自主浏览器安装)。仅聊天和普通网页阅读不需要下载浏览器。
+这会安装 Chromium headless shell，不使用你的日常浏览器账号。小黑盒官网依赖固定的浏览器识别组件（static.portal101.cn），匿名阅读窗口也可能生成并向小黑盒或识别服务传送设备、浏览器特征。窗口独立且不复用日常浏览器登录；这不授权登录、发帖或回复。小黑盒阅读器遇到代理 DNS 的虚拟地址时，会向 Google 公共 DNS 查询固定官网域名的真实公网地址，再固定连接并校验 TLS；不发送聊天内容或登录态。聊天中读取小黑盒公开帖子也需要这个浏览器。Windows PowerShell 可用 `npm.cmd run browser:install`；Linux 还需系统依赖，见[部署说明](docs/deployment.md#自主浏览器安装)。仅聊天和普通网页阅读不需要下载浏览器。
 
 - **Windows**：双击 `start.cmd` 后台启动，核心进程异常退出后会退避恢复；双击 `stop.cmd` 同时停止核心与监管，不会因此重新拉起。可配置[当前用户登录后自动启动](docs/deployment.md#windows-安装与运行)。
 - **Linux**：执行 `bash scripts/start.sh` 后台启动，执行 `bash scripts/stop.sh` 停止。

@@ -346,6 +346,10 @@ sudo systemctl status persona-agent --no-pager
 sudo -u persona-agent env PLAYWRIGHT_BROWSERS_PATH=/var/cache/persona-agent-browsers /usr/bin/node --input-type=module -e "import { chromium } from 'playwright'; const browser = await chromium.launch({ headless: true, chromiumSandbox: true }); await browser.close();"
 ```
 
+小黑盒官网依赖固定的浏览器识别组件（static.portal101.cn），匿名阅读窗口也可能生成并向小黑盒或识别服务传送设备、浏览器特征。窗口独立且不复用日常浏览器登录；这不授权登录、发帖或回复。
+
+小黑盒阅读器仅对固定官网及静态资源域名兼容代理 DNS 的 `198.18.0.0/15` 虚拟地址：通过 [Google 公共 DNS](https://developers.google.com/speed/public-dns/docs/doh/json) 获取并核对真实公网 A 记录，再固定连接；查询仅包含域名，屏蔽客户端子网。普通网页、图片和其他域名仍沿用原来的地址检查。内网结果、混合异常结果、重定向和不完整 DNS 答案不会被采用。资源下载最多并发 3 个，共用 100 项资源、20 MiB 总正文和 90 秒整体时限。固定站点的连接在收到响应头前被重置时，最多额外重连一次，共用原有单项下载时限。遇到网站访问验证时停止；列表可见不代表每篇正文均可匿名读取，未成功取得的正文不会记作已读。
+
 这只检查浏览器能否启动。服务启动后，再在后台手动发起一次小黑盒活动，核对实际结果；站点登录或验证码限制仍可能使访问失败。
 
 查看初始化码与日志、停止和重启服务：
