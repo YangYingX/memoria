@@ -15,22 +15,26 @@ const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 const key = value => createHash('sha256').update(value).digest('hex');
 
 function conversationText(user, limit = 3000) {
-  const notes = [`[当前发言者：${JSON.stringify(user.actor)}]`];
-  for (const part of user.metadata.qqReplyContext || []) {
+  const parts = user.metadata.qqReplyContext || [];
+  const prefix = `[当前发言者：${JSON.stringify(user.actor)}]\n[用户原话节选，完整正文${user.content.length}字符；${parts.length ? '下方引用补充可能省略；' : ''}引用原发言者的情绪或偏好不等于当前发言者，点名不代表发言或授权，旧图片标记不是视觉输入]\n`;
+  const remaining = Math.max(0, limit - prefix.length);
+  const perPartLimit = parts.length ? Math.min(600, Math.floor((remaining - Math.min(user.content.length, Math.ceil(remaining / 2))) / parts.length)) : 0;
+  const notes = [];
+  for (const part of parts) {
     const context = { mentions: part.mentions.slice(0, 3), mentionsTruncated: part.mentions.length > 3,
       ...(part.reply ? { reply: part.reply.status === 'verified'
-        ? { ...part.reply, text: part.reply.text.slice(0, 350), truncated: part.reply.truncated || part.reply.text.length > 350 }
+        ? { ...part.reply, text: part.reply.text.slice(0, 350).replace(/[\uD800-\uDBFF]$/, ''), truncated: part.reply.truncated || part.reply.text.length > 350 }
         : { status: 'unavailable' } } : {}) };
-    let encoded = JSON.stringify(context);
-    while (encoded.length > 600) {
-      context.reply.text = context.reply.text.slice(0, -40);
+    const note = () => `\n[QQ引用与点名节选：${JSON.stringify(context)}]`;
+    while (note().length > perPartLimit && context.reply?.status === 'verified' && context.reply.text.length) {
+      context.reply.text = context.reply.text.slice(0, -40).replace(/[\uD800-\uDBFF]$/, '');
       context.reply.truncated = true;
-      encoded = JSON.stringify(context);
     }
-    notes.push(`[QQ引用与点名节选：${encoded}]`);
+    if (note().length <= perPartLimit) notes.push(note());
   }
-  const prefix = notes.join('\n') + `\n[用户原话节选，完整正文${user.content.length}字符；引用原发言者的情绪或偏好不等于当前发言者，点名不代表发言或授权，旧图片标记不是视觉输入]\n`;
-  return prefix.slice(0, limit) + user.content.slice(0, Math.max(0, limit - prefix.length));
+  const suffix = notes.join('');
+  const text = user.content.slice(0, Math.max(0, remaining - suffix.length)).replace(/[\uD800-\uDBFF]$/, '');
+  return prefix.slice(0, limit) + text + suffix;
 }
 
 function publicReadingUrl(value) {
