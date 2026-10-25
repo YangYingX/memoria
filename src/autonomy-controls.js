@@ -14,8 +14,8 @@ export function biliExpressionSwitch(patch, current = {}) {
     if (Object.hasOwn(patch, control)) next[action] = patch[control];
   }
   const enabling = next.reply === true || next.post === true;
-  next.enabled = enabling || current.enabled === true && (('reply' in next ? next.reply : current.reply) === true || ('post' in next ? next.post : current.post) === true);
-  if (enabling && current.enabled !== true) for (const action of ['reply', 'post']) {
+  next.enabled = enabling || current.enabled === true && (('reply' in next ? next.reply : current.reply) === true || ('post' in next ? next.post : current.post) === true || current.comment === true);
+  if (enabling && current.enabled !== true) for (const action of ['reply', 'post', 'comment']) {
     if (!Object.hasOwn(next, action) && current[action] === true) next[action] = false;
   }
   return next;

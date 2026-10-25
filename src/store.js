@@ -18,6 +18,7 @@ import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControl
 import { defaultAutonomySettings } from './autonomy.js';
 import { defaultBookSettings } from './book-jobs.js';
 import { defaultExpressionSettings } from './self-expression.js';
+import { biliVideoUrl } from './bili-reading.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -1011,10 +1012,10 @@ export function createStore(dbPath) {
     try {
       const header = get(`SELECT id, metadata, created_at FROM events WHERE id = ? AND type = 'self_expression'
         AND scope = 'owner' AND actor = 'scheduler' AND json_extract(metadata, '$.platform') = 'bilibili'
-        AND json_extract(metadata, '$.outcome') = 'success' AND json_extract(metadata, '$.action') IN ('post','reply')`, id);
+        AND json_extract(metadata, '$.outcome') = 'success' AND json_extract(metadata, '$.action') IN ('post','reply','comment')`, id);
       if (!header) return null;
       const metadata = JSON.parse(header.metadata), action = metadata.action;
-      if (action === 'post' ? metadata.confirmation !== 'dynamic_receipt' : metadata.confirmation !== 'reply_receipt') return null;
+      if (metadata.confirmation !== { post: 'dynamic_receipt', reply: 'reply_receipt', comment: 'comment_receipt' }[action]) return null;
       const event = eventRow(get('SELECT * FROM events WHERE id = ?', id));
       if (!event.content.trim() || event.content.length > (action === 'post' ? 800 : 200)) return null;
       let url, sourceMessageId, proof;
@@ -1036,6 +1037,46 @@ export function createStore(dbPath) {
         if (attempts.length !== 1) return null;
         sourceMessageId = assistant.id;
         proof = [assistant, item.key, item.accountId, item.scope, item.notice, item.sourceEventId, item.messageId, item.replyId, attempts[0].id];
+      } else if (action === 'comment') {
+        if (typeof metadata.bvid !== 'string' || !/^BV[0-9A-Za-z]{10}$/.test(metadata.bvid)
+          || typeof metadata.replyId !== 'string' || biliSocialId(metadata.replyId) !== metadata.replyId
+          || typeof metadata.targetUrl !== 'string' || biliVideoUrl(metadata.targetUrl) !== metadata.targetUrl) return null;
+        url = metadata.targetUrl;
+        const target = new URL(url);
+        if (target.pathname.split('/')[2] !== metadata.bvid) return null;
+        const readingId = identifier(metadata.sourceEventId, '阅读经历 ID'), memoryId = identifier(metadata.sourceMemoryId, '阅读记忆 ID');
+        const reading = eventRow(get("SELECT * FROM events WHERE id = ? AND type = 'reading' AND scope = 'owner' AND actor = 'scheduler'", readingId));
+        const original = memoryRow(get(`SELECT * FROM memories WHERE id = ? AND scope = 'owner' AND category = 'reading'
+          AND source_type = 'webpage' AND deleted_at IS NULL AND updated_at = created_at
+          AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.memory_id = memories.id)
+          AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.memory_id = memories.id)`, memoryId));
+        const evidence = reading?.metadata.evidence;
+        if (!reading || !original || reading.sourceRef !== url || original.sourceRef !== url || original.content !== reading.content
+          || original.createdAt !== reading.createdAt || reading.metadata.memoryId !== original.id || reading.metadata.reusedMemory === true
+          || (reading.metadata.partIndex !== undefined && reading.metadata.partIndex !== 1)
+          || evidence?.sourceKind !== 'bilibili-transcript' || evidence.plugin !== 'dsh-bili-humanism'
+          || evidence.bvid !== metadata.bvid || evidence.videoPart !== Number(target.searchParams.get('p'))
+          || !['A1', 'A2'].includes(evidence.route) || evidence.visual !== false || evidence.audio !== false) return null;
+        const attempts = all(`SELECT * FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
+          AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.action') = 'comment'
+          AND json_extract(metadata, '$.outcome') = 'attempt' AND json_extract(metadata, '$.bvid') = ?
+          AND json_extract(metadata, '$.targetUrl') = ? AND json_extract(metadata, '$.sourceMemoryId') = ?
+          AND json_extract(metadata, '$.sourceEventId') = ?`, metadata.bvid, url, memoryId, readingId).map(eventRow);
+        if (attempts.length !== 1 || Date.parse(reading.createdAt) > Date.parse(attempts[0].createdAt)
+          || Date.parse(attempts[0].createdAt) > Date.parse(event.createdAt)) return null;
+        const successes = all(`SELECT id FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
+          AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.action') = 'comment'
+          AND json_extract(metadata, '$.outcome') = 'success' AND json_extract(metadata, '$.bvid') = ?
+          AND json_extract(metadata, '$.targetUrl') = ? AND json_extract(metadata, '$.sourceMemoryId') = ?
+          AND json_extract(metadata, '$.sourceEventId') = ?`, metadata.bvid, url, memoryId, readingId);
+        if (successes.length !== 1 || successes[0].id !== event.id) return null;
+        const memories = all(`SELECT * FROM memories WHERE scope = 'owner' AND category = 'event' AND source_type = 'self-expression'
+          AND source_ref = ? AND deleted_at IS NULL AND updated_at = created_at
+          AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.memory_id = memories.id)
+          AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.memory_id = memories.id)`, id).map(memoryRow);
+        if (memories.length !== 1 || memories[0].content !== '【B站评论；已取得提交回执，审核与可见性未确认】\n' + event.content + '\n原帖来源：' + url
+          || Date.parse(memories[0].createdAt) < Date.parse(event.createdAt)) return null;
+        proof = [reading, original, attempts[0], memories[0]];
       } else {
         url = 'https://t.bilibili.com/' + biliDynamicId(metadata.dynamicId);
         if (metadata.targetUrl !== url) return null;
@@ -2128,6 +2169,13 @@ export function createStore(dbPath) {
       limit = integer(limit, '消息条数', 1, 1000);
       return all('SELECT * FROM messages WHERE scope = ? ORDER BY created_at DESC, rowid DESC LIMIT ?', scope, limit).reverse().map(messageRow);
     },
+    hasBiliVideoComment(bvid, excludeEventId = '') {
+      if (typeof bvid !== 'string' || !/^BV[0-9A-Za-z]{10}$/.test(bvid)) invalid('B站视频标识无效。');
+      if (excludeEventId !== '') excludeEventId = identifier(excludeEventId, '排除的表达经历 ID');
+      return Boolean(get(`SELECT 1 FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
+        AND id <> ? AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.action') = 'comment'
+        AND json_extract(metadata, '$.bvid') = ? AND json_extract(metadata, '$.outcome') IN ('attempt','pending','unknown','success') LIMIT 1`, excludeEventId, bvid));
+    },
     getOwnExpressionEvidence(id) {
       id = identifier(id, '自己的表达记录 ID');
       const evidence = rawOwnExpressionEvidence(id);
@@ -2142,7 +2190,7 @@ export function createStore(dbPath) {
       const filter = conversationDateRange(dates), tokens = queryTokens(query), state = conversationState(['public']), matches = [];
       const rows = all(`SELECT id, content, created_at FROM events WHERE type = 'self_expression' AND scope = 'owner'
         AND actor = 'scheduler' AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.outcome') = 'success'
-        AND json_extract(metadata, '$.action') IN ('post','reply') ORDER BY created_at DESC, rowid DESC`);
+        AND json_extract(metadata, '$.action') IN ('post','reply','comment') ORDER BY created_at DESC, rowid DESC`);
       for (const row of rows) {
         if (filter && !filter.includes(row.created_at) || query && (!tokens.length || !conversationScore(row.content, tokens))) continue;
         const evidence = rawOwnExpressionEvidence(row.id);

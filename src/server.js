@@ -252,6 +252,11 @@ function makeSelfExpressionJobs() {
           return result.outcome === 'sent' ? { confirmed: true, confirmation: 'dynamic_receipt', dynamicId: result.receipt.dynamicId }
             : result.outcome === 'unknown' ? { unknown: true } : { ok: false };
         }
+        if (action === 'comment') {
+          const result = await biliSocialRuntime.comment({ url: payload.url, text: payload.text, signal, beforeSend });
+          return result.outcome === 'sent' ? { confirmed: true, confirmation: 'comment_receipt', replyId: result.receipt.rpid }
+            : result.outcome === 'unknown' ? { unknown: true } : { ok: false };
+        }
         const notice = store.getBiliNotice(payload.noticeKey);
         if (action !== 'reply' || !notice || notice.state !== 'processing') throw new Error('B站回复来源无法核对。');
         return biliSocialRuntime.reply({ notice: notice.notice, text: payload.text, signal, beforeSend });

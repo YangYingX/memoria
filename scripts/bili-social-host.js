@@ -30,8 +30,11 @@ const start = new Promise((accept, reject) => {
 });
 
 async function main(input) {
-  if (Number(process.versions.node.split('.')[0]) !== 24 || !fields(input, ['type', 'operation', 'hostDirectory', 'pythonPath', 'workspace', 'notice', 'text'])
-    || !['inbox', 'reply', 'post'].includes(input.operation)) throw new Error('INVALID_START');
+  if (Number(process.versions.node.split('.')[0]) !== 24 || !fields(input, ['type', 'operation', 'hostDirectory', 'pythonPath', 'workspace', 'notice', 'video', 'text'])
+    || !['inbox', 'reply', 'post', 'comment'].includes(input.operation)) throw new Error('INVALID_START');
+  if (input.operation === 'comment' && (!fields(input.video, ['bvid']) || Object.keys(input.video).length !== 1
+    || !/^BV[0-9A-Za-z]{10}$/.test(input.video.bvid) || input.notice !== undefined
+    || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 600)) throw new Error('INVALID_START');
   const workspace = realpathSync(input.workspace);
   if (workspace !== realpathSync(process.cwd()) || lstatSync(input.workspace).isSymbolicLink()) throw new Error('INVALID_WORKSPACE');
   const packagePath = join(realpathSync(input.hostDirectory), 'node_modules', 'dsh-bili-subagent');
@@ -64,6 +67,8 @@ async function main(input) {
       MEMORIA_BILI_BROKER_PORT: String(server.address().port), MEMORIA_BILI_BROKER_TOKEN: token, MEMORIA_BILI_DYNAMIC_REPLY: input.notice?.resource === 'dynamic' ? '1' : '0' } });
   const resultPromise = (async () => {
     if (input.operation === 'post') return client.call('bili_send_dynamic', { text: input.text }, { timeoutMs: 110000 });
+    if (input.operation === 'comment') return client.call('bili_reply', {
+      bvid: input.video.bvid, text: input.text, rpid: 0, root: 0 }, { timeoutMs: 110000 });
     if (input.operation === 'reply' && input.notice?.resource === 'dynamic') return client.call('memoria_reply_dynamic', {
       oid: input.notice.oid, resource_type: input.notice.commentType, text: input.text, rpid: input.notice.rpid, root: input.notice.root }, { timeoutMs: 110000 });
     if (input.operation !== 'inbox') return client.call('bili_reply', {

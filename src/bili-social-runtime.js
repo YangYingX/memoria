@@ -6,13 +6,14 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeBiliCredentials } from './bili-credentials.js';
+import { biliVideoUrl } from './bili-reading.js';
 import { biliSocialId, normalizeNotice, biliMentionFeed, biliDynamicId, biliDynamicFeed, biliCommentKey, parseBiliJson } from './bili-social-notice.js';
 
 export const biliSocialPins = Object.freeze({ version: '0.7.7', commit: 'bbe41848137cdfa334bf04ebe7d5d29830390923',
   archive: 'd9d86e16e9fca9ddf34c65f4e56a817de014f98bd8a9665ee608d9148401cf2a',
   client: '7f4c02f597322a69b997666172a74317d3dff3aaac8bb1353b6f97d2e94038b6',
   server: '06d077b95fd12b26802545c4dc690fff81a651c86f53c57c911f22516ee6dd51' });
-const capabilities = Object.freeze({ replies: true, mentions: true, dynamicPosts: true, dynamicReplies: true });
+const capabilities = Object.freeze({ replies: true, mentions: true, dynamicPosts: true, dynamicReplies: true, videoComments: true });
 const hostScript = fileURLToPath(new URL('../scripts/bili-social-host.js', import.meta.url));
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const fields = (value, allowed) => object(value) && Object.keys(value).every(key => allowed.includes(key));
@@ -63,14 +64,21 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     writeFileSync(temporary, JSON.stringify({ paused: true, at: new Date().toISOString() }), { mode: 0o600 });
     renameSync(temporary, pausePath);
   }
-  async function run(operation, { notice, text, signal, beforeSend } = {}) {
+  async function run(operation, { notice, url: videoUrl, text, signal, beforeSend } = {}) {
     if (stopped) throw failure('CANCELLED');
     if (busy) throw failure('BUSY');
     const settings = config();
     if (!settings.enabled) throw failure('CONFIG_INVALID');
     if (paused()) throw failure('PLATFORM_PAUSED');
     const secret = credentials(getCredentials());
-    if (['reply', 'post'].includes(operation)) {
+    let video;
+    if (operation === 'comment') {
+      let url;
+      try { url = typeof videoUrl === 'string' && biliVideoUrl(videoUrl); } catch { throw failure('FAILED'); }
+      if (!url) throw failure('FAILED');
+      video = { bvid: new URL(url).pathname.split('/')[2], aid: null };
+    }
+    if (['reply', 'post', 'comment'].includes(operation)) {
       if (operation === 'reply') notice = normalizeNotice(notice);
       if (typeof text !== 'string' || !text.trim() || text.length > (operation === 'post' ? 800 : 600)
         || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text) || typeof beforeSend !== 'function') throw failure('FAILED');
@@ -109,6 +117,14 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       const response = await fetchJson('https://api.bilibili.com/x/web-interface/nav');
       if (response.body.code !== 0 || String(response.body.data?.mid) !== secret.accountId || response.body.data?.isLogin !== true) throw failure('ACCOUNT_CHANGED');
     }
+    async function verifyVideo() {
+      const { body } = await fetchJson('https://api.bilibili.com/x/web-interface/view?bvid=' + video.bvid);
+      let aid;
+      try { aid = biliSocialId(body.data?.aid); } catch { throw failure('SOURCE_CHANGED'); }
+      if (body.code !== 0 || body.data?.bvid !== video.bvid || (video.aid !== null && aid !== video.aid)
+        || (body.data.state !== undefined && body.data.state !== 0)) throw failure('SOURCE_CHANGED');
+      video.aid = aid;
+    }
     async function verifySource() {
       const root = notice.root === '0' ? notice.rpid : notice.root;
       for (let page = 1; page <= 6; page++) {
@@ -143,9 +159,17 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
           if (['/x/msgfeed/reply', '/x/msgfeed/at'].includes(url.pathname)) dynamicNotices.push(...biliDynamicFeed(url.pathname.endsWith('/at') ? 'at' : 'reply', result.body));
           return url.pathname === '/x/msgfeed/at' ? { ...result, body: biliMentionFeed(result.body) } : result;
         }
-        if (['reply', 'post'].includes(operation) && url.pathname === '/x/web-interface/nav' && !Object.keys(params).length) {
+        if (['reply', 'post', 'comment'].includes(operation) && url.pathname === '/x/web-interface/nav' && !Object.keys(params).length) {
           const result = await fetchJson(url.href);
           if (result.body.code !== 0 || result.body.data?.isLogin !== true || String(result.body.data?.mid) !== secret.accountId) throw failure('ACCOUNT_CHANGED');
+          return result;
+        }
+        if (operation === 'comment' && url.pathname === '/x/web-interface/view' && Object.keys(params).length === 2
+          && params.bvid === video.bvid && params.aid === video.aid) {
+          url.search = new URLSearchParams(params).toString();
+          const result = await fetchJson(url.href);
+          if (result.body.code !== 0 || String(result.body.data?.aid) !== video.aid || result.body.data?.bvid !== video.bvid
+            || (result.body.data.state !== undefined && result.body.data.state !== 0)) throw failure('SOURCE_CHANGED');
           return result;
         }
         if (operation === 'reply' && url.pathname === '/x/web-interface/view' && Object.keys(params).length === 2
@@ -159,7 +183,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       }
       const signingKeys = ['dm_img_list', 'dm_img_str', 'dm_cover_img_str', 'dm_img_inter', 'wts', 'web_location', 'w_rid'];
       const keys = operation === 'post' ? [...signingKeys, 'csrf'] : signingKeys;
-      if (!['reply', 'post'].includes(operation) || request.method !== 'POST' || postRequested
+      if (!['reply', 'post', 'comment'].includes(operation) || request.method !== 'POST' || postRequested
         || Object.keys(params).length !== keys.length || Object.keys(params).some(key => !keys.includes(key))
         || params.dm_img_list !== '[]' || params.dm_img_inter !== '{"ds":[],"wh":[0,0,0],"of":[0,0,0]}'
         || !/^[A-K]{2}$/.test(params.dm_img_str) || !/^[A-K]{2}$/.test(params.dm_cover_img_str)
@@ -169,6 +193,11 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         const expected = { dyn_req: { content: { contents: [{ biz_id: '', type: 1, raw_text: text }] }, scene: 1,
           meta: { app_meta: { from: 'create.dynamic.web', mobi_app: 'web' } }, attach_card: null }, csrf: secret.biliJct, csrf_token: secret.biliJct };
         if (url.pathname !== '/x/dynamic/feed/create/dyn' || request.json !== true || params.csrf !== secret.biliJct || !isDeepStrictEqual(data, expected)) throw failure('FAILED');
+      } else if (operation === 'comment') {
+        const expected = { oid: video.aid, type: '1', message: text, plat: '1', statistics: "{'appId': 100, 'platform': 5}", gaia_source: 'main_web',
+          csrf: secret.biliJct, csrf_token: secret.biliJct };
+        // The pinned SDK omits root/parent for a top-level comment; only the parent adds explicit zeroes.
+        if (url.pathname !== '/x/v2/reply/add' || request.json === true || !isDeepStrictEqual(data, expected)) throw failure('FAILED');
       } else {
         const expected = { oid: notice.resource === 'dynamic' ? notice.oid : notice.aid, type: notice.resource === 'dynamic' ? String(notice.commentType) : '1', message: text, plat: '1', statistics: "{'appId': 100, 'platform': 5}", gaia_source: 'main_web',
           root: notice.root === '0' ? notice.rpid : notice.root, parent: notice.rpid, csrf: secret.biliJct, csrf_token: secret.biliJct };
@@ -176,6 +205,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       }
       postRequested = true;
       await verifyAccount();
+      if (operation === 'comment') await verifyVideo();
       if (operation === 'reply') {
         if (notice.resource === 'dynamic') {
           const { body } = await fetchJson('https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=' + notice.dynamicId);
@@ -191,7 +221,8 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       if (JSON.stringify(credentials(await getCredentials())) !== JSON.stringify(secret) || JSON.stringify(config()) !== JSON.stringify(settings)) throw failure('ACCOUNT_CHANGED');
       posted = true;
       url.search = new URLSearchParams(params).toString();
-      const result = await fetchJson(url.href, { method: 'POST', body: operation === 'post' ? JSON.stringify(data) : new URLSearchParams(data).toString() }, operation === 'post');
+      const result = await fetchJson(url.href, { method: 'POST', body: operation === 'post' ? JSON.stringify(data)
+        : new URLSearchParams(operation === 'comment' ? { ...data, root: '0', parent: '0' } : data).toString() }, operation === 'post');
       if (result.body.code === 0) {
         try { postReceipt = operation === 'post' ? dynamicId(result.body.data?.dyn_id_str ?? result.body.data?.dyn_id)
           : (notice?.resource === 'dynamic' ? biliDynamicId : biliSocialId)(result.body.data?.rpid_str ?? result.body.data?.rpid); } catch {}
@@ -200,6 +231,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     }
     try {
       await verifyAccount();
+      if (operation === 'comment') await verifyVideo();
       active();
       workspace = realpathSync(mkdtempSync(join(tmpdir(), 'memoria-bili-social-')));
       for (const folder of ['home', 'tmp']) mkdirSync(join(workspace, folder), { mode: 0o700 });
@@ -225,7 +257,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
         const aborted = () => rejected(failure('CANCELLED'));
         controller.signal.addEventListener('abort', aborted, { once: true });
         child.once('spawn', () => child.send({ type: 'start', operation, workspace, hostDirectory: settings.hostDirectory, pythonPath: settings.pythonPath,
-          ...(operation === 'reply' ? { notice, text } : operation === 'post' ? { text } : {}) }));
+          ...(operation === 'reply' ? { notice, text } : operation === 'comment' ? { video: { bvid: video.bvid }, text } : operation === 'post' ? { text } : {}) }));
         child.on('error', () => rejected(failure('FAILED')));
         child.stderr.on('data', chunk => { stderr += chunk.length; if (stderr > 65536) rejected(failure('FAILED')); });
         child.on('message', message => {
@@ -263,7 +295,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
       return receipt && receipt === postReceipt && posted ? { outcome: 'sent', receipt: operation === 'post' ? { dynamicId: receipt } : { rpid: receipt } }
         : { outcome: posted ? 'unknown' : 'failed', code: 'UNCONFIRMED' };
     } catch (error) {
-      if (['reply', 'post'].includes(operation)) return { outcome: posted ? 'unknown' : 'failed', code: messages[error?.code] ? error.code : 'FAILED' };
+      if (['reply', 'post', 'comment'].includes(operation)) return { outcome: posted ? 'unknown' : 'failed', code: messages[error?.code] ? error.code : 'FAILED' };
       throw messages[error?.code] ? error : failure('FAILED');
     } finally {
       clearTimeout(timeout); signal?.removeEventListener('abort', abort); controller.abort();
@@ -282,6 +314,7 @@ export function createBiliSocialRuntime({ dataDir, getCredentials }) {
     },
     inbox: options => run('inbox', options),
     reply: options => run('reply', options),
+    comment: options => run('comment', options),
     post: options => run('post', options),
     stop() { stopped = true; cancelCurrent?.(); return drained; },
   };
