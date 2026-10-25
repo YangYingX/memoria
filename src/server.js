@@ -11,6 +11,8 @@ import { runConversation } from './agent.js';
 import { testModel, requestCompletion, defaultOwnerChatReserve, normalizeOwnerChatReserve, defaultModelDailyRequestLimit, normalizeModelDailyRequestLimit, modelBudget } from './model.js';
 import { createBackupJobs, normalizeBackupSettings, publicBackupSettings } from './backup-jobs.js';
 import { parseQQMessage, verifiedQQReply } from './qq-message.js';
+import { parseQQVoice, loadQQVoice } from './qq-voice.js';
+import { createSpeechRuntime } from './speech-runtime.js';
 import { loadQQImages, validateQQImageUrls } from './images.js';
 import { createAutonomyJobs, defaultAutonomySettings, normalizeAutonomySettings, reflectReading } from './autonomy.js';
 import { discoverHeyboxPosts, readHeyboxPost } from './browser-reader.js';
@@ -75,7 +77,7 @@ const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocia
 const defaults = {
   persona: { name: '未央', description: '温和、好奇、坦诚，喜欢了解人的兴趣与日常。保留自己的表达习惯，尊重聊天场合，不虚构经历。' },
   model: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '', ownerChatReserve: defaultOwnerChatReserve, dailyRequestLimit: defaultModelDailyRequestLimit },
-  qq: { enabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit, mergeWindowMs: defaultQQMergeWindow, ...normalizeQQGroupAttentionSettings(), ...normalizeQQReplySettings() },
+  qq: { enabled: false, voiceEnabled: false, apiBaseUrl: 'http://127.0.0.1:3000', accessToken: '', webhookSecret: randomBytes(24).toString('hex'), allowedUsers: [], allowedGroups: [], botId: '', dailyChatLimit: defaultQQChatLimit, mergeWindowMs: defaultQQMergeWindow, ...normalizeQQGroupAttentionSettings(), ...normalizeQQReplySettings() },
   feishu: defaultFeishuSettings,
   reading: { enabled: false, urls: [], intervalMinutes: 60, dailyLimit: 5 },
   autonomy: defaultAutonomySettings,
@@ -157,6 +159,7 @@ let bookConversation = false;
 let communityConversation = false;
 let postInspection = false;
 let receivingBook = '';
+const speechRuntime = createSpeechRuntime({ dataDir });
 function heyboxRuntime() {
   if (process.platform !== 'win32') throw new Error('客户端小黑盒发帖目前需要 Windows 专用 MuMu 设备。');
   let config;
@@ -580,6 +583,7 @@ function publicSettings() {
   modelView.ownerChatReserve = normalizeOwnerChatReserve(model.ownerChatReserve);
   modelView.dailyRequestLimit = normalizeModelDailyRequestLimit(model.dailyRequestLimit);
   const { accessToken, ...qqView } = qq;
+  qqView.voiceEnabled = qq.voiceEnabled === true;
   qqView.dailyChatLimit = normalizeQQChatLimit(qq.dailyChatLimit);
   qqView.mergeWindowMs = normalizeQQMergeWindow(qq.mergeWindowMs);
   Object.assign(qqView, normalizeQQGroupAttentionSettings(qq));
@@ -602,9 +606,10 @@ function saveSettings(input) {
       return [...new Set(list.map(String))];
     };
     if (typeof q.enabled !== 'boolean') throw new Error('QQ 开关无效。');
+    if (q.voiceEnabled !== undefined && typeof q.voiceEnabled !== 'boolean') throw new Error('QQ 语音开关无效。');
     if (q.botId && !/^\d{1,20}$/.test(String(q.botId))) throw new Error('机器人 QQ 号格式无效。');
     if (q.enabled && !q.botId) throw new Error('启用 QQ 前须填写机器人 QQ 号。');
-    next.qq = { enabled: q.enabled, apiBaseUrl: endpoint(q.apiBaseUrl), botId: String(q.botId || ''), accessToken: q.accessToken ? text(q.accessToken, 'OneBot Token', 1000) : previous.accessToken, webhookSecret: q.webhookSecret ? text(q.webhookSecret, 'Webhook Secret', 200, 24) : previous.webhookSecret, allowedUsers: ids(q.allowedUsers || []), allowedGroups: ids(q.allowedGroups || []), dailyChatLimit: normalizeQQChatLimit(q.dailyChatLimit === undefined ? previous.dailyChatLimit : q.dailyChatLimit), mergeWindowMs: normalizeQQMergeWindow(q.mergeWindowMs === undefined ? previous.mergeWindowMs : q.mergeWindowMs), ...normalizeQQGroupAttentionSettings(q, previous), ...normalizeQQReplySettings(q, previous) };
+    next.qq = { enabled: q.enabled, voiceEnabled: q.voiceEnabled === undefined ? previous.voiceEnabled === true : q.voiceEnabled, apiBaseUrl: endpoint(q.apiBaseUrl), botId: String(q.botId || ''), accessToken: q.accessToken ? text(q.accessToken, 'OneBot Token', 1000) : previous.accessToken, webhookSecret: q.webhookSecret ? text(q.webhookSecret, 'Webhook Secret', 200, 24) : previous.webhookSecret, allowedUsers: ids(q.allowedUsers || []), allowedGroups: ids(q.allowedGroups || []), dailyChatLimit: normalizeQQChatLimit(q.dailyChatLimit === undefined ? previous.dailyChatLimit : q.dailyChatLimit), mergeWindowMs: normalizeQQMergeWindow(q.mergeWindowMs === undefined ? previous.mergeWindowMs : q.mergeWindowMs), ...normalizeQQGroupAttentionSettings(q, previous), ...normalizeQQReplySettings(q, previous) };
   }
   if (input.reading) {
     const r = input.reading;
@@ -694,7 +699,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
       } : undefined;
       const collectExpression = origin ? input => { options.signal?.throwIfAborted(); options.assertActive?.(); return store.saveExpression({ ...input, scope, origin, actor }); } : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, qqDisplayName: options.qqDisplayName, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqVoice: options.qqVoice, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, qqDisplayName: options.qqDisplayName, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
         ...(dshAvailable ? { memoryAgent: async (query, excludeMessageId) => {
           options.signal?.throwIfAborted(); options.assertActive?.();
           const recalled = await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal,
@@ -896,7 +901,7 @@ async function runQQBatch(items, { signal }) {
       finally { qqQuoteChecks--; }
       assertActive();
       if (quotedFrame?.reply?.status === 'verified' && quotedFrame.reply.actor === 'agent') ambient = false;
-      else if (!store.getSetting('model').apiKey || !qqGroupAttention.reserve({ groupId: context.target.group_id, config: context.config }).allowed) return;
+      else if (first.voice || !store.getSetting('model').apiKey || !qqGroupAttention.reserve({ groupId: context.target.group_id, config: context.config }).allowed) return;
     }
     if (ambient && !store.getSetting('model').apiKey) return;
     if (!reserveQQChat()) return;
@@ -904,6 +909,24 @@ async function runQQBatch(items, { signal }) {
       sending = true;
       await send('收到了图片，但尚未配置支持图片的模型。请创建人在后台配置模型后重试。');
       return;
+    }
+    let voiceText, qqVoice;
+    if (first.voice) {
+      if (items.length !== 1) throw new Error('语音不能与其他消息合并。');
+      const unavailable = first.voice.unsupported ? first.voice.reason
+        : context.config.voiceEnabled !== true ? '我现在还不能处理语音，请先用文字交流；创建人可在后台开启本地语音识别。'
+        : !store.getSetting('model').apiKey ? '收到了语音，但还没有配置聊天模型，请先用文字交流。'
+        : !(context.scope === 'owner' && context.actor === 'owner' ? modelBudget(store).ownerRemaining : modelBudget(store).sharedRemaining) ? '当前可用模型额度已用完，这条语音没有转写，请稍后再发。'
+        : !speechRuntime.status().ready ? '本地语音识别还没有准备好，请先用文字交流；创建人可在后台查看状态。' : '';
+      if (unavailable) { sending = true; await send(unavailable); return; }
+      const audio = await loadQQVoice({ voice: first.voice, config: context.config, signal, assertActive });
+      assertActive();
+      const transcript = await speechRuntime.transcribe(audio.wav, { signal, assertActive });
+      assertActive();
+      if (typeof transcript.text !== 'string' || !transcript.text.trim()) { sending = true; await send('这条语音没有识别出清楚的文字，可以再说一次，或用文字发给我。'); return; }
+      voiceText = (first.text ? first.text + '\n\n' : '') + '【QQ语音转写，可能有误；栖忆未保存录音，协议端缓存由其管理，不代表精确键入原话】\n' + transcript.text.trim();
+      if (voiceText.length > 8000) throw new Error('语音转写与附文超过聊天长度限制。');
+      qqVoice = { schemaVersion: 1, audioSeconds: audio.audioSeconds };
     }
     let offset = 0;
     const sources = items.map(item => {
@@ -919,8 +942,8 @@ async function runQQBatch(items, { signal }) {
       if (item.replyId !== undefined) quoteRead = true;
       if (frame) qqReplyContext.push({ startOffset: sources[index].startOffset, endOffset: sources[index].endOffset, ...frame });
     }
-    const result = await chat(context.scope, items.map(item => item.text).join('\n'), context.actor, first.imageUrls, context.origin,
-      { signal, assertActive, qqBatchSources: items.length > 1 ? sources : undefined,
+    const result = await chat(context.scope, voiceText ?? items.map(item => item.text).join('\n'), context.actor, first.imageUrls, context.origin,
+      { signal, assertActive, qqVoice, qqBatchSources: items.length > 1 ? sources : undefined,
         qqReplyContext: qqReplyContext.length ? qqReplyContext : undefined, qqDisplayName: items.at(-1).qqDisplayName,
         ...(context.scope === 'owner' && context.account?.personId === 'owner' ? { conversationOrigin: {
           version: 1, platform: 'qq', accountId: context.account.id, botId: context.config.botId, userId: context.account.userId } } : {}),
@@ -937,7 +960,9 @@ async function runQQBatch(items, { signal }) {
   } catch (error) {
     if (signal.aborted || isQQContextCanceled(error)) return;
     try { assertActive(); } catch { return; }
-    if (!ambient && !sending) await send(first.imageUrls.length
+    if (!ambient && !sending) await send(first.voice
+      ? '这次语音没有处理成功，可以用文字发给我。创建人可在后台核对语音识别和协议端状态。'
+      : first.imageUrls.length
       ? '这次图片没有处理成功，请稍后重发。创建人可在后台查看原因，并确认所用模型支持图片。'
       : '本次消息未能处理完成，请稍后重发。创建人可在本机后台查看原因。');
     throw error;
@@ -962,15 +987,16 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
   let ambient = false, quoteCandidate = false;
   const parsed = parseQQMessage(event), { message, imageUrls } = parsed;
   const bookFile = parseQQBookFile(event);
+  const voice = privateFileNotice ? undefined : parseQQVoice(event);
   let platformMessageId;
   if (!privateFileNotice) {
     if ((typeof event.message_id !== 'string' && !Number.isSafeInteger(event.message_id))
       || !/^(?:0|-?[1-9]\d{0,19})$/.test(String(event.message_id))) return;
     platformMessageId = String(event.message_id);
-    if (!bookFile && !store.claimDelivery(`qq:${selfId}:${event.message_type}:${groupId}:${platformMessageId}`)) return;
+    if ((!bookFile || voice) && !store.claimDelivery(`qq:${selfId}:${event.message_type}:${groupId}:${platformMessageId}`)) return;
   }
   const binding = message.match(/^(?:绑定|bind)\s+([A-Za-z0-9_-]+)$/);
-  if (event.message_type === 'private' && binding && !imageUrls.length && !bookFile) {
+  if (event.message_type === 'private' && binding && !imageUrls.length && !bookFile && !voice) {
     qqChatBatch.seal(conversation);
     if (pendingBinding && pendingBinding.expires > Date.now() && sameSecret(createHash('sha256').update(binding[1]).digest('hex'), pendingBinding.hash)) {
       proactiveJobs.cancel();
@@ -993,7 +1019,9 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
   let context = captureQQContext({ store, config, userId, groupId, getEpoch: () => qqEpoch });
   if (!context) return;
   const { account, scope, target, origin } = context;
-  if ((!message && !imageUrls.length && !bookFile) || message.length > 8000 || message.includes('\0')) { qqChatBatch.seal(conversation); return; }
+  if ((!message && !imageUrls.length && !bookFile && !voice) || message.length > 8000 || message.includes('\0')) { qqChatBatch.seal(conversation); return; }
+  // Voice is processed only in private or directly addressed group messages.
+  if (voice && ambient && (parsed.replyId === undefined || bookFile)) { qqChatBatch.seal(conversation); return; }
   if (ambient) {
     try { validateQQImageUrls(imageUrls); }
     catch { qqChatBatch.seal(conversation); return; }
@@ -1005,7 +1033,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
   // Group context never inherits the owner's private scope, even when the owner speaks.
   if (scope === 'owner' && account?.personId === 'owner') proactiveJobs.cancel();
   const heyboxBinding = message.match(/^绑定小黑盒\s+(.+)$/u);
-  if (heyboxBinding && !imageUrls.length && !bookFile && event.message_type === 'private' && account?.personId === 'owner') {
+  if (heyboxBinding && !imageUrls.length && !bookFile && !voice && event.message_type === 'private' && account?.personId === 'owner') {
     qqChatBatch.seal(conversation);
     let reply;
     try {
@@ -1017,7 +1045,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     return;
   }
   const bilibiliBinding = message.match(/^绑定(?:B站|哔哩哔哩)\s+(.+)$/iu);
-  if (bilibiliBinding && !imageUrls.length && !bookFile && event.message_type === 'private' && account?.personId === 'owner') {
+  if (bilibiliBinding && !imageUrls.length && !bookFile && !voice && event.message_type === 'private' && account?.personId === 'owner') {
     qqChatBatch.seal(conversation);
     let reply;
     try {
@@ -1028,7 +1056,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     if (context) await sendQQ(config, target, reply, [], origin, { beforeSend: context.assertActive });
     return;
   }
-  if (bookFile) {
+  if (bookFile && !voice) {
     qqChatBatch.seal(conversation);
     if (scope !== 'owner' || account?.personId !== 'owner') return;
     const send = reply => sendQQ(config, target, reply, [], origin, { beforeSend: context.assertActive });
@@ -1093,10 +1121,10 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     }
     return;
   }
-  const mergeable = Boolean(message) && !imageUrls.length && (segments.length
+  const mergeable = Boolean(message) && !imageUrls.length && !voice && (segments.length
     ? segments.every(segment => segment?.type === 'text' || (groupId && segment?.type === 'at' && String(segment.data?.qq) === selfId))
     : !/\[CQ:/i.test(String(event.raw_message || '')));
-  if (!qqChatBatch.enqueue({ conversation, mergeKey: `${context.mergeKey}:${ambient ? 'ambient' : 'addressed'}`, context, text: message, imageUrls,
+  if (!qqChatBatch.enqueue({ conversation, mergeKey: `${context.mergeKey}:${ambient ? 'ambient' : 'addressed'}`, context, text: message, imageUrls, voice,
     ambient, quoteCandidate, mergeable, qqDisplayName: parsed.displayName, mentions: parsed.mentions, replyId: parsed.replyId, replyUnavailable: parsed.replyUnavailable,
     windowMs: normalizeQQMergeWindow(config.mergeWindowMs), platformMessageId, receivedAt: new Date().toISOString() })) {
     if (!ambient) await sendQQ(config, target, '当前聊天有较多消息等待处理，请稍后再发。', [], origin, { beforeSend: context.assertActive });
@@ -1172,7 +1200,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/books/file' ? Math.ceil(BOOK_FILE_MAX_BYTES / 3) * 4 + 4096 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), speechStatus: speechRuntime.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
       if (path === '/api/mate/reset' && req.method === 'POST') {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) return json(res, 400, { error: '重置陪伴节奏不接受额外参数。' });
         if (proactiveJobs.status().busy || mateRuntime.status().busy) return json(res, 409, { error: '请等待当前主动私聊判断完成后重置节奏。' });
@@ -1400,5 +1428,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });

@@ -1,5 +1,11 @@
 # Third-party notices
 
+## Optional local speech input
+
+The local speech adapter runs the external `@deepseek-ai/dsh-experimental-speech-to-text-sensevoice` worker, pinned to `0.2.1-rc.2` (MIT), with `sherpa-onnx-node` `1.13.8` (Apache-2.0). These runtime packages are installed separately and are not copied into this repository. See the [official DSH provider](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/experimental/speech-to-text-sensevoice) and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
+
+SenseVoiceSmall recognition weights are subject to the [FunASR Model License 1.1](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE); the [official model card](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) links that agreement. Silero VAD is [MIT licensed](https://github.com/snakers4/silero-vad/blob/master/LICENSE). Pinned ONNX files and tokens are downloaded separately from the [sherpa conversion repository](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17) and the VAD repository; weights, caches and audio are not distributed with this source. The model licenses must not be confused with this project's Apache-2.0 license or the DSH code license.
+
 Memoria (栖忆) is licensed under Apache-2.0. Copyright 2026 Memoria contributors.
 
 Direct dependencies:

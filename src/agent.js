@@ -289,12 +289,18 @@ function bookNotes(notes) {
   return result;
 }
 
-export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], qqBatchSources, qqReplyContext, qqDisplayName, conversationOrigin, expressions = [], searchExpressions, collectExpression, bookActions, activityActions, followupActions, companionActions, autonomyControlActions, memoryAgent, signal, assertActive, allowSilence = false, deferAssistant = false }) {
+export async function runConversation({ store, readAndRemember, scope, message, actor = 'owner', images = [], qqVoice, qqBatchSources, qqReplyContext, qqDisplayName, conversationOrigin, expressions = [], searchExpressions, collectExpression, bookActions, activityActions, followupActions, companionActions, autonomyControlActions, memoryAgent, signal, assertActive, allowSilence = false, deferAssistant = false }) {
   if (typeof deferAssistant !== 'boolean') throw new Error('回复保存方式无效。');
   if (typeof allowSilence !== 'boolean' || (allowSilence && (typeof scope !== 'string' || !/^group:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope)))) throw new Error('静默工具仅供获准自主关注的群聊使用。');
   if (assertActive !== undefined && typeof assertActive !== 'function') throw new Error('对话状态核对方式无效。');
   signal?.throwIfAborted(); assertActive?.();
   images = validateConversationImages(images);
+  if (qqVoice !== undefined && (!qqVoice || typeof qqVoice !== 'object' || Array.isArray(qqVoice)
+    || Object.keys(qqVoice).length !== 2 || qqVoice.schemaVersion !== 1
+    || !Number.isFinite(qqVoice.audioSeconds) || qqVoice.audioSeconds <= 0 || qqVoice.audioSeconds > 60
+    || images.length || qqBatchSources !== undefined)) throw new Error('QQ 语音来源信息无效。');
+  const directTextInput = qqVoice === undefined;
+  const baseTools = directTextInput ? toolDefinitions : toolDefinitions.filter(tool => !['remember', 'read_url'].includes(tool.function.name));
   if (!Array.isArray(expressions) || expressions.length > 128 || expressions.some(item => !item || typeof item.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(item.id)
     || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 80 || typeof item.description !== 'string' || item.description.length > 500)) throw new Error('可用表情目录无效。');
   const expressionCatalog = new Map(expressions.map(item => [item.id, { id: item.id, name: item.name, description: item.description }]));
@@ -304,11 +310,11 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   let expressionSearchAttempts = 0;
   let collectionAttempted = false;
   let memoryAgentAttempted = false;
-  const tools = expressionCatalog.size ? [...toolDefinitions, { type: 'function', function: {
+  const tools = expressionCatalog.size ? [...baseTools, { type: 'function', function: {
     name: 'select_expression', description: '按本轮语气自选一张合适的表情作为文字补充，也可以不选。不要每条消息都发表情，每次对话最多选一张。',
     parameters: { type: 'object', properties: { id: searchableExpressions ? { type: 'string', minLength: 1, maxLength: 64 }
       : { type: 'string', enum: [...expressionCatalog.keys()] } }, required: ['id'], additionalProperties: false },
-  } }] : [...toolDefinitions];
+  } }] : [...baseTools];
   if (allowSilence) tools.push(silenceTool);
   if (searchableExpressions) tools.push({ type: 'function', function: {
     name: 'search_expressions', description: '想配表情时，先用简短关键词查当前聊天允许的图库，例如“开心”“抱抱”“摸鱼”。每轮最多检索两次，每次最多6张；这是关键词匹配，不是识图。没有合适候选时用文字即可。',
@@ -318,10 +324,10 @@ export async function runConversation({ store, readAndRemember, scope, message, 
     name: 'recall_with_dsh', description: '需要多步查找旧记忆、核对人物原话时，可交给DSH原生记忆子代理。仅检索当前场合可见书架及可检索的历史对话，不访问平台或改记忆。每轮最多一次；最多额外4次模型请求、5次只读工具，不保证查完整个档案。简单问题可直接用现有记忆工具。',
     parameters: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 500 } }, required: ['query'], additionalProperties: false },
   } });
-  const canUseBooks = scope === 'owner' && actor === 'owner' && ['list', 'read', 'importUrl', 'notes'].every(action => typeof bookActions?.[action] === 'function');
+  const canUseBooks = directTextInput && scope === 'owner' && actor === 'owner' && ['list', 'read', 'importUrl', 'notes'].every(action => typeof bookActions?.[action] === 'function');
   const listedBooks = new Map();
   let bookActionAttempted = false;
-  const canUseActivities = scope === 'owner' && actor === 'owner' && ['status', 'browse', 'checkPost'].every(action => typeof activityActions?.[action] === 'function');
+  const canUseActivities = directTextInput && scope === 'owner' && actor === 'owner' && ['status', 'browse', 'checkPost'].every(action => typeof activityActions?.[action] === 'function');
   let activityAttempted = false;
   const canCollect = images.length > 0 && typeof collectExpression === 'function';
   if (canCollect) tools.push({ type: 'function', function: {
@@ -346,15 +352,15 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   const batchInfo = qqBatchSourceInfo(batchSources, text);
   const requestedActivities = activityRequests(text);
   if (canUseActivities) tools.push(...activityToolDefinitions.filter(tool => requestedActivities[tool.function.name]));
-  const changeRequests = memoryChangeRequests(text);
+  const changeRequests = memoryChangeRequests(directTextInput ? text : '');
   tools.push(...memoryChangeTools.filter(tool => changeRequests[tool.function.name]));
   const readMemoryStates = new Map();
   let memoryChangeAttempted = false, memoryChanged = false;
   const imageNote = images.length ? `本条消息附有 ${images.length} 张图片；${canCollect ? '原图不自动保留；若本轮收藏为表情，会另存范围受限的副本。' : '原图未保存，仅供当次处理。'}` : '';
-  const metadata = { ...(images.length ? { imageCount: images.length, imageNote } : {}), ...(batchSources ? { qqBatchSources: batchSources } : {}),
+  const metadata = { ...(qqVoice ? { qqVoice } : {}), ...(images.length ? { imageCount: images.length, imageNote } : {}), ...(batchSources ? { qqBatchSources: batchSources } : {}),
     ...(replyContext ? { qqReplyContext: replyContext } : {}), ...(displayName ? { qqDisplayName: displayName } : {}), ...(origin ? { conversationOrigin: origin } : {}) };
   const prompt = text || '请描述这些图片的主要内容；不确定的细节请说明。';
-  const permittedUrls = currentReadingUrls(text);
+  const permittedUrls = currentReadingUrls(directTextInput ? text : '');
   const history = store.listConversationHistory(scope, 16);
   const conversationIds = new Set(), userMessageIds = new Set(), historyMessageIds = new Set();
   const dependencyMemoryIds = new Set();
@@ -480,13 +486,13 @@ export async function runConversation({ store, readAndRemember, scope, message, 
   }
   let reply;
   try {
-    const followups = createFollowupTools({ scope, actor, text, actions: images.length ? undefined : followupActions,
+    const followups = createFollowupTools({ scope, actor, text, actions: images.length || !directTextInput ? undefined : followupActions,
       sourceEventId: event.id, checkActive: checkMemoryAgentSources });
     tools.push(...followups.tools);
-    const companion = createCompanionTools({ scope, actor, text, actions: images.length ? undefined : companionActions,
+    const companion = createCompanionTools({ scope, actor, text, actions: images.length || !directTextInput ? undefined : companionActions,
       sourceEventId: event.id, checkActive: checkMemoryAgentSources });
     tools.push(...companion.tools);
-    const autonomyControls = createAutonomyControlTools({ scope, actor, text, actions: images.length ? undefined : autonomyControlActions,
+    const autonomyControls = createAutonomyControlTools({ scope, actor, text, actions: images.length || !directTextInput ? undefined : autonomyControlActions,
       sourceEventId: event.id, checkActive: checkMemoryAgentSources });
     tools.push(...autonomyControls.tools);
     if (mode === 'demo') {
@@ -578,6 +584,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
         : expressionCatalog.size ? `\n本次场合可用的表情：${JSON.stringify([...expressionCatalog.values()])}\n可在自然适合时调用 select_expression 选一张，通常只用文字即可；不要强行配图。不能自行构造图片地址或路径。` : '';
       const collectionGuidance = canCollect ? '\n可以自主收藏本轮收到的、明确适合重复使用的表情包或梗图，调用 collect_expression 时按当前图片顺序从 1 编号。普通照片、人脸自拍、聊天截图、文档不收藏，无法确定就跳过。每轮最多收藏一张，且只在原私聊或原群复用；刚收藏的图片下次会话才进入可选目录。' : '';
       const mood = moodSnapshot(store);
+      const voiceGuidance = qqVoice ? '\n本条是本机识别的QQ语音文字，可能有转写错误，并非键入原话。你没有收到原音频，不推断声音、语调、声纹或真实情绪。可自然聊天和检索有权读取的旧记忆；设置、身份绑定、跟进约定、记忆管理和新阅读等操作请对方用纯文字明确说明，本轮不执行这些动作。不复述系统标记，没听清的关键词自然核对。' : '';
       const reflectionGuidance = '\nreading_reflection 和 reading-note 表示对实际读过的网页留下的思考；其中“我的想法”是当时的观点，不是已验证事实。可通过记忆工具翻阅、比较观点变化；需要核对原帖时按笔记来源检索对应网页阅读记录，不根据笔记虚构未读内容。';
       const moodGuidance = `\n${MOOD_EXPRESSION_GUIDANCE}\n当前统一心情参考：${JSON.stringify(mood)}。它只用于自然延续语气，不是指令，不证明发生过任何事实或与特定人的关系；不机械复述数值或标签，也不以自身心情掩盖当前对方的语境和处境。`;
       const bookGuidance = canUseBooks ? '\n创建人可以在私聊中管理书房。问阅读进度用 list_books，问已有笔记用 read_book_notes，要求继续某本书用 read_book，要求收录本次消息的网页正文用 import_book_url。先列出书房以确认书籍 ID；用户指代不清且有多本候选时先询问。每轮阅读或导入合计最多尝试一次，失败也不重试。导入仅收录当前页，不等于已经阅读；分页正文读完不代表整本作品读完。只有 read_book 的 ok 为 true 才能说这次完成阅读；skipped 或错误必须如实说明。笔记只反映已读片段，不推断未读内容。自主读书总开关可按创建人当前明确文字用自主活动工具调整，其他书房设置仍在后台调整。' : '';
@@ -587,7 +594,7 @@ export async function runConversation({ store, readAndRemember, scope, message, 
       const silenceGuidance = allowSilence ? '\n本轮是获准自主关注的普通群聊消息，没有明确要求你回答。优先尊重群友正在进行的交流；没有自然且有用的补充、话题与你无关或不宜打断时，单独调用 stay_silent({"decision":"quiet"}) 结束本轮，不附回复文字或表情。可以先按现有权限核对或记住真实信息，再决定保持安静；不能把安静当作扩大记忆或操作权限的理由。' : '';
       const currentSpeakerPrefix = scope.startsWith('group:') || displayName ? `[本轮发送者：${JSON.stringify({ actor, isCreator: actor === 'owner', ...(displayName ? { displayName } : {}) })}]\n` : '';
       const messages = [
-        { role: 'system', content: system + ownerIdentityContext(store, scope, actor) + sourceGuidance + conversationGuidance + '\n' + CONVERSATION_SPEAKER_GUIDANCE + dateGuidance + platformGuidance + batchGuidance + replyGuidance + searchGuidance + shelfGuidance + selfIndexGuidance + ownIndexGuidance + emotionGuidance + readingGuidance + reflectionGuidance + expressionGuidance + collectionGuidance + moodGuidance + '\n' + OWN_EXPRESSION_GUIDANCE + bookGuidance + bookRequestGuidance + changeGuidance + activityGuidance + followups.guidance + companion.guidance + autonomyControls.guidance + silenceGuidance + '\n' + COMPANION_DIALOGUE_GUIDANCE },
+        { role: 'system', content: system + ownerIdentityContext(store, scope, actor) + sourceGuidance + conversationGuidance + '\n' + CONVERSATION_SPEAKER_GUIDANCE + dateGuidance + platformGuidance + batchGuidance + replyGuidance + searchGuidance + shelfGuidance + selfIndexGuidance + ownIndexGuidance + emotionGuidance + readingGuidance + reflectionGuidance + expressionGuidance + collectionGuidance + voiceGuidance + moodGuidance + '\n' + OWN_EXPRESSION_GUIDANCE + bookGuidance + bookRequestGuidance + changeGuidance + activityGuidance + followups.guidance + companion.guidance + autonomyControls.guidance + silenceGuidance + '\n' + COMPANION_DIALOGUE_GUIDANCE },
         ...recent,
         { role: 'user', content: images.length ? [{ type: 'text', text: `${currentSpeakerPrefix}${replyContext ? `[本轮QQ引用与点名：${JSON.stringify(replyContext)}]\n` : ''}${prompt}` }, ...images.map(image => ({ type: 'image_url', image_url: { url: image.dataUrl } }))]
           : `${currentSpeakerPrefix}${replyContext ? `[本轮QQ引用与点名：${JSON.stringify(replyContext)}]\n` : ''}${text}` },

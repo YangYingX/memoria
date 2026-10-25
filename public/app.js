@@ -444,6 +444,9 @@ function fillSettings() {
   $('model-clear-api-key').checked = false;
   $('model-key-status').textContent = model.hasApiKey ? '已配置密钥。留空保存会保留当前密钥。' : '尚未配置密钥，目前使用离线演示。';
   $('qq-enabled').checked = qq.enabled;
+  $('qq-voice-enabled').checked = qq.voiceEnabled === true;
+  const speech = state.data?.speechStatus || {};
+  $('qq-voice-status').textContent = speech.error || (speech.ready ? (speech.busy ? '本地语音正在识别中。' : '本地语音资源已准备好，模型按需加载。') : speech.configured && !speech.enabled ? '本地语音运行层已关闭，请按部署说明启用。' : '本地语音资源尚未准备，请按部署说明执行准备命令。');
   $('qq-chat-limit').value = qq.dailyChatLimit ?? 200;
   $('qq-merge-window').value = qq.mergeWindowMs ?? 700;
   $('qq-group-reply-chance').value = qq.groupReplyChance ?? 0;
@@ -1141,7 +1144,7 @@ $('settings-form').addEventListener('submit', event => {
         chatMemory: { enabled: $('chat-memory-enabled').checked, intervalMinutes: Number($('chat-memory-interval').value), dailyLimit: Number($('chat-memory-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },
         model: { baseUrl: $('model-base-url').value.trim(), model: $('model-name').value.trim(), apiKey: $('model-api-key').value.trim(), clearApiKey: $('model-clear-api-key').checked, dailyRequestLimit: Number($('model-daily-request-limit').value), ownerChatReserve: Number($('model-owner-reserve').value) },
-        qq: { enabled: $('qq-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value), mergeWindowMs: Number($('qq-merge-window').value), groupReplyChance: Number($('qq-group-reply-chance').value), groupReplyCooldownSeconds: Number($('qq-group-reply-cooldown').value), replySplitEnabled: $('qq-reply-split').checked, replyDelayMs: Number($('qq-reply-delay').value) },
+        qq: { enabled: $('qq-enabled').checked, voiceEnabled: $('qq-voice-enabled').checked, apiBaseUrl: $('qq-api-url').value.trim(), botId: $('qq-bot-id').value.trim(), accessToken: $('qq-access-token').value.trim(), webhookSecret: $('qq-webhook-secret').value.trim(), allowedUsers: lines('qq-users'), allowedGroups: lines('qq-groups'), dailyChatLimit: Number($('qq-chat-limit').value), mergeWindowMs: Number($('qq-merge-window').value), groupReplyChance: Number($('qq-group-reply-chance').value), groupReplyCooldownSeconds: Number($('qq-group-reply-cooldown').value), replySplitEnabled: $('qq-reply-split').checked, replyDelayMs: Number($('qq-reply-delay').value) },
         feishu: { enabled: $('feishu-enabled').checked, botId: $('feishu-bot-id').value.trim(), expectedFingerprint: $('feishu-fingerprint').value.trim(), allowedUsers: lines('feishu-users'), allowedGroups: lines('feishu-groups'), dailyChatLimit: Number($('feishu-chat-limit').value) },
         reading: { enabled: $('reading-enabled').checked, urls: lines('reading-urls'), intervalMinutes: Number($('reading-interval').value), dailyLimit: Number($('reading-limit').value) },
         autonomy: { enabled: $('autonomy-enabled').checked, sources: ['heybox', 'bilibili'].filter(source => $('autonomy-source-' + source).checked), interests: $('autonomy-interests').value.trim(), dailyMin: Number($('autonomy-daily-min').value), dailyMax: Number($('autonomy-daily-max').value), startHour: Number($('autonomy-start-hour').value), endHour: Number($('autonomy-end-hour').value), timeZone: $('autonomy-time-zone').value.trim() },

@@ -10,7 +10,7 @@ class QQContextCanceled extends Error {
 export function isQQContextCanceled(error) { return error instanceof QQContextCanceled; }
 
 export function qqConfigSignature(config) {
-  return JSON.stringify({ enabled: config.enabled, botId: config.botId, apiBaseUrl: config.apiBaseUrl,
+  return JSON.stringify({ enabled: config.enabled, voiceEnabled: config.voiceEnabled === true, botId: config.botId, apiBaseUrl: config.apiBaseUrl,
     accessToken: config.accessToken, webhookSecret: config.webhookSecret,
     allowedUsers: config.allowedUsers, allowedGroups: config.allowedGroups,
     dailyChatLimit: normalizeQQChatLimit(config.dailyChatLimit), mergeWindowMs: normalizeQQMergeWindow(config.mergeWindowMs),
