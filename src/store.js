@@ -1746,6 +1746,19 @@ export function createStore(dbPath) {
       const parts = readingParts(original, originalEvent);
       return parts === null ? null : { memory, source: quote(source), parts: [{ memory: original, source: quote(originalEvent), parts }] };
     },
+    hasConversationMemorySource(id, scope, actor) {
+      id = identifier(id, '记忆 ID');
+      scope = scopeValue(scope);
+      actor = text(actor, '参与者', 160);
+      return Boolean(get(`SELECT 1 FROM memories m
+        JOIN events e ON e.id = m.source_ref AND e.scope = m.scope AND e.type = 'message'
+        JOIN messages u ON u.id = json_extract(e.metadata, '$.messageId') AND u.scope = e.scope
+          AND u.actor = e.actor AND u.role = 'user' AND u.content = e.content
+        WHERE m.id = ? AND m.scope = ? AND e.actor = ? AND m.deleted_at IS NULL AND m.source_type = 'conversation'
+          AND json_type(e.metadata, '$.messageId') = 'text'
+          AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.memory_id = m.id)
+          AND NOT EXISTS (SELECT 1 FROM conversation_blocks b WHERE b.scope = e.scope AND b.event_id = e.id)`, id, scope, actor));
+    },
     getMemorySource(id, scopes) {
       id = identifier(id, '记忆 ID');
       if (!Array.isArray(scopes) || scopes.length > 100) invalid('来源查询须提供最多 100 个明确的可见范围。');

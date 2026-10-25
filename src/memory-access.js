@@ -18,14 +18,15 @@ export function companionShelfMemories(store, scope, actor, excludedIds = []) {
     || (typeof scope === 'string' && /^person:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope));
   const group = typeof scope === 'string' && /^group:[a-zA-Z0-9][a-zA-Z0-9_.:@-]{0,127}$/.test(scope);
   if ((!privateScope && !group) || typeof actor !== 'string' || !actor.trim() || actor.length > 160) return [];
-  const excluded = new Set(excludedIds), counts = privateScope ? { person: 0, interest: 0, emotion: 0, 'self-view': 0 } : { emotion: 0 }, result = [];
+  const excluded = new Set(excludedIds), counts = privateScope ? { person: 0, interest: 0, emotion: 0, 'self-view': 0 } : { person: 0, interest: 0, emotion: 0 }, result = [];
   for (const memory of store.listMemories({ scope })) {
     if (excluded.has(memory.id) || !Object.hasOwn(counts, memory.category) || counts[memory.category] >= 2) continue;
+    if (group && ['person', 'interest'].includes(memory.category) && !store.hasConversationMemorySource(memory.id, scope, actor)) continue;
     if (memory.category === 'emotion' && store.getEmotionMemoryEvidence(memory.id, [scope])?.actor !== actor) continue;
     if (memory.category === 'self-view' && !store.getSelfViewMemoryEvidence(memory.id, [scope])) continue;
     result.push(memory);
     counts[memory.category]++;
-    if (result.length === (privateScope ? 8 : 2)) break;
+    if (result.length === (privateScope ? 8 : 6)) break;
   }
   return result;
 }
