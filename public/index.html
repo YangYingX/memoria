@@ -82,10 +82,10 @@
           <div class="page-heading"><div><p class="eyebrow">04 / BOOK ROOM</p><h1 id="books-title">一起，把一本书慢慢读完。</h1><p class="muted">日常可以在已绑定的 QQ 私聊发送 TXT 或 EPUB，直接聊阅读进度和笔记。这里用于查看与管理。</p></div><button id="refresh-books" class="button secondary" type="button">刷新书房 ↻</button></div>
           <section class="panel padded autonomy-panel" aria-labelledby="book-rhythm-title">
             <h2 id="book-rhythm-title">她的读书时光</h2><p id="book-schedule-summary" class="muted">正在读取安排…</p>
-            <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次阅读</dt><dd id="book-next">等待安排</dd></div><div><dt>今日阅读尝试</dt><dd id="book-count">0 次</dd></div><div><dt>最近结果</dt><dd id="book-outcome">还没有记录</dd></div></dl>
+            <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次读书机会</dt><dd id="book-next">等待安排</dd></div><div><dt>今日读书机会</dt><dd id="book-count">0 次</dd></div><div><dt>最近结果</dt><dd id="book-outcome">还没有记录</dd></div></dl>
             <p id="book-last" class="caption" hidden></p><p id="book-error" class="connection-result error" role="status" hidden></p>
             <div class="autonomy-actions"><button id="book-run" class="button secondary" type="button">现在读一小段 <span>↗</span></button><button class="text-button" type="button" data-goto="settings">调整读书节奏 <span>↗</span></button><button class="text-button" type="button" data-goto="memories">去记忆书架看笔记 <span>↗</span></button></div>
-            <p class="caption autonomy-note">需要先保存并启用读书设置、配置对话模型。现在试读也计入当天次数，失败同样计次。笔记仅创建人可见，成功保存后才推进阅读位置。</p>
+            <p class="caption autonomy-note">配置模型并开启自主读书后，由她在日常时隙自己决定。也可以在 QQ 私聊传书、指定续读或问笔记；这里可临时试读，共用每日次数。笔记仅创建人可见，成功保存后才推进阅读位置。</p>
           </section>
           <div class="book-import-grid">
             <form id="book-file-form" class="panel padded"><h2>带一本书进来</h2><label>TXT 或 EPUB 文件<input id="book-file" type="file" accept=".txt,.epub,text/plain,application/epub+zip" required><small>文件不超过 3 MiB；提取后的文字不超过 3 MiB、100 万字符。TXT 使用 UTF-8 编码。</small></label><label>书名<input id="book-file-title" maxlength="200" placeholder="留空使用电子书书名或文件名"></label><p class="caption">书架最多保存 10 本，正文合计不超过 5 MiB。EPUB 只保存文字，不保留图片与排版；不支持正文加密或扫描图片书。导入不调用模型。</p><button class="button primary" type="submit">导入书籍 <span>↑</span></button><p id="book-file-result" class="caption book-import-result" role="status"></p></form>
@@ -193,10 +193,11 @@
             </div></section>
             <section id="book-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">08</span><h2>读书节奏</h2><p class="muted">把长篇阅读分成日常的小片刻，读到哪里就记到哪里。</p></div><div class="settings-fields">
               <label class="check-label"><input id="books-enabled" type="checkbox">启用自主读书（聊天指令仍可单独触发）</label>
-              <div class="field-row"><label>每天最多读几次<input id="books-daily-limit" type="number" min="1" max="6" required></label><label>每次阅读长度（字符）<input id="books-chunk-chars" type="number" min="1000" max="6000" step="100" required></label></div>
+              <label class="check-label"><input id="books-discover-enabled" type="checkbox">允许她从公共文库自己找书</label>
+              <div class="field-row"><label>每天最多几次读书机会<input id="books-daily-limit" type="number" min="1" max="6" required></label><label>每次阅读长度（字符）<input id="books-chunk-chars" type="number" min="1000" max="6000" step="100" required></label></div>
               <div class="field-row"><label>活跃时段开始（整点）<input id="books-start-hour" type="number" min="0" max="23" required></label><label>活跃时段结束（整点）<input id="books-end-hour" type="number" min="1" max="24" required></label></div>
               <label>读书时区<input id="books-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"></label>
-              <p class="caption">在活跃时段随机安排，从尚未读完的书中选择一本。聊天中要求阅读无需开启此开关，与定时阅读共用每日次数和单次长度；每次使用对话模型写一条笔记。导入文件本身不消耗模型调用，错过的安排不会集中补读。</p>
+              <p class="caption">在活跃时段随机安排，结合人格、心情、兴趣与旧笔记，决定续读、找新书或安静一会；安静和失败也占用本次机会，不反复判断。自主找书使用公共文库目录，不把私聊和私人笔记作为对外搜索词。每次最多一次选书、一次笔记模型调用，实际读过才推进进度。聊天中指定书籍直接续读，无需开启此开关，仍共用每日读书次数；错过的安排不会集中补读。</p>
             </div></section>
             <section id="proactive-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">09</span><h2>主动私聊</h2><p class="muted">延续你们的近况与旧话题，也可以分享自己的见闻，选一个合适的时机开口。</p></div><div class="settings-fields">
               <label class="check-label"><input id="proactive-enabled" type="checkbox">允许她主动私聊我</label>

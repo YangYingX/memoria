@@ -272,7 +272,7 @@ async function loadBooks() {
     let source;
     try { const url = new URL(book.sourceRef); if (url.protocol === 'https:' && !url.username && !url.password) source = url; } catch {}
     if (source) {
-      const link = node('a', `来源：${source.hostname} · 当前页`, 'book-source'); link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link);
+      const link = node('a', `来源：${source.hostname}`, 'book-source'); link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; card.append(link);
     } else card.append(node('p', '来源：本地文本', 'book-source'));
     card.append(node('p', book.lastReadAt ? `最近读到这里：${date(book.lastReadAt)}` : `导入时间：${date(book.createdAt)}`, 'caption'));
     const remove = node('button', '移出书房', 'text-button book-remove'); remove.type = 'button';
@@ -293,19 +293,19 @@ function renderBookStatus(status = {}) {
   const limit = inDay && Number.isFinite(status.target) ? Math.min(status.target, config.dailyLimit || 2) : config.dailyLimit || 2;
   const hour = value => `${String(value ?? 0).padStart(2, '0')}:00`;
   $('book-schedule-summary').textContent = config.enabled
-    ? `每天最多 ${config.dailyLimit} 次，每次约 ${config.chunkChars} 字符，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
+    ? `每天最多 ${config.dailyLimit} 次读书机会，单次约 ${config.chunkChars} 字符，可选择安静，随机安排在 ${hour(config.startHour)}–${hour(config.endHour)}（${config.timeZone}）。`
     : '自主读书尚未启用。仍可在 QQ 私聊让她读一小段，或在这里手动阅读；每日次数共用。';
   const unread = state.books.some(book => book.currentOffset < book.totalChars);
   let next = config.enabled ? '等待安排' : '启用后安排';
-  if (config.enabled && !unread) next = state.books.length ? '书房里的内容已读完' : '添加书籍后安排';
+  if (config.enabled && !unread && config.discoverEnabled === false) next = state.books.length ? '书房里的内容已读完' : '添加书籍后安排';
   else if (config.enabled && inDay) next = status.nextRunAt && count < limit
     ? new Date(status.nextRunAt).toLocaleString('zh-CN', { timeZone: config.timeZone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) : '今天暂无后续安排';
   $('book-next').textContent = next;
   $('book-count').textContent = `${count} / ${limit} 次`;
-  const outcomes = { success: '一段阅读完成', reading: '正在阅读…', empty: '暂无未读内容', missed: '错过的安排已跳过', error: '未能完成', cancelled: '已取消', busy: '稍后再读' };
-  $('book-outcome').textContent = status.busy ? '正在阅读并写笔记…' : outcomes[status.lastOutcome] || '还没有记录';
+  const outcomes = { choosing: '正在选书…', quiet: '这次想安静一会', success: '一段阅读完成', reading: '正在阅读…', empty: '暂无未读内容', missed: '错过的安排已跳过', error: '未能完成', cancelled: '已取消', busy: '稍后再读' };
+  $('book-outcome').textContent = status.busy ? '正在选书、阅读或写笔记…' : outcomes[status.lastOutcome] || '还没有记录';
   $('book-last').hidden = !status.lastAttempt;
-  $('book-last').textContent = status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}${status.lastTitle ? ` · 《${status.lastTitle}》` : ''}` : '';
+  $('book-last').textContent = status.lastAttempt ? `最近尝试：${date(status.lastAttempt)}${status.lastTitle && ['success', 'reading'].includes(status.lastOutcome) ? ` · 《${status.lastTitle}》` : ''}` : '';
   $('book-error').hidden = !status.lastError; $('book-error').textContent = status.lastError || '';
   $('book-run').disabled = Boolean(status.busy || !unread || count >= limit || !state.data?.settings.model.hasApiKey);
 }
@@ -515,6 +515,7 @@ function fillSettings() {
   $('self-expression-bilibili-daily-limit').value = expressionBili.dailyLimit ?? 80;
   $('self-expression-bilibili-inbox-minutes').value = expressionBili.inboxIntervalMinutes ?? 3;
   $('books-enabled').checked = Boolean(books.enabled);
+  $('books-discover-enabled').checked = books.discoverEnabled !== false;
   $('books-daily-limit').value = books.dailyLimit ?? 2;
   $('books-chunk-chars').value = books.chunkChars ?? 3000;
   $('books-start-hour').value = books.startHour ?? 9;
@@ -1160,7 +1161,7 @@ $('settings-form').addEventListener('submit', event => {
         drawing: { provider: $('drawing-provider').value, baseUrl: $('drawing-base-url').value.trim(), model: $('drawing-model').value.trim(), apiKey: $('drawing-api-key').value.trim(), clearApiKey: $('drawing-clear-api-key').checked, dailyLimit: Number($('drawing-daily-limit').value), weeklyLimit: Number($('drawing-weekly-limit').value) },
         selfExpression: { enabled: $('self-expression-enabled').checked, desire: Number($('self-expression-desire').value), dailyLimit: Number($('self-expression-daily-limit').value), cooldownMinutes: Number($('self-expression-cooldown').value), startHour: Number($('self-expression-start-hour').value), endHour: Number($('self-expression-end-hour').value), timeZone: $('self-expression-time-zone').value.trim(), avatarIntervalDays: Number($('self-expression-avatar-days').value), platforms: { qq: { enabled: $('self-expression-qq-enabled').checked, post: $('self-expression-qq-post').checked, signature: $('self-expression-qq-signature').checked, avatar: $('self-expression-qq-avatar').checked, dailyLimit: Number($('self-expression-qq-daily-limit').value), qzoneVisibility: Number($('self-expression-qq-visibility').value) }, heybox: { enabled: $('self-expression-heybox-enabled').checked, post: $('self-expression-heybox-post').checked, comment: $('self-expression-heybox-comment').checked, reply: $('self-expression-heybox-reply').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-heybox-daily-limit').value), topic: $('self-expression-heybox-topic').value.trim() }, bilibili: { enabled: $('self-expression-bilibili-enabled').checked, post: $('self-expression-bilibili-post').checked, comment: $('self-expression-bilibili-comment').checked, reply: $('self-expression-bilibili-reply').checked, signature: false, avatar: false, dailyLimit: Number($('self-expression-bilibili-daily-limit').value), inboxIntervalMinutes: Number($('self-expression-bilibili-inbox-minutes').value) } } },
         proactive: { enabled: $('proactive-enabled').checked, desire: Number($('proactive-desire').value), dailyLimit: Number($('proactive-daily-limit').value), cooldownMinutes: Number($('proactive-cooldown').value), idleMinutes: Number($('proactive-idle').value), startHour: Number($('proactive-start-hour').value), endHour: Number($('proactive-end-hour').value), timeZone: $('proactive-time-zone').value.trim() },
-        books: { enabled: $('books-enabled').checked, dailyLimit: Number($('books-daily-limit').value), chunkChars: Number($('books-chunk-chars').value), startHour: Number($('books-start-hour').value), endHour: Number($('books-end-hour').value), timeZone: $('books-time-zone').value.trim() },
+        books: { enabled: $('books-enabled').checked, discoverEnabled: $('books-discover-enabled').checked, dailyLimit: Number($('books-daily-limit').value), chunkChars: Number($('books-chunk-chars').value), startHour: Number($('books-start-hour').value), endHour: Number($('books-end-hour').value), timeZone: $('books-time-zone').value.trim() },
       } });
       await loadState({ fill: true });
       $('settings-result').textContent = `设置已保存 · ${date(new Date().toISOString())}`;

@@ -3205,6 +3205,34 @@ export function createStore(dbPath) {
         return bookMetadata(book);
       });
     },
+    hasBookSource(sourceRef) {
+      sourceRef = text(sourceRef, '自动收书来源', LIMITS.sourceRef);
+      try {
+        const url = assertPublicUrl(sourceRef);
+        if (url.protocol !== 'https:') invalid('自动收书来源须使用公开 HTTPS 地址。');
+        sourceRef = url.href;
+      } catch { invalid('自动收书来源须为不含凭据的公开 HTTPS 地址。'); }
+      return Boolean(get('SELECT 1 FROM books WHERE source_ref = ? LIMIT 1', sourceRef)
+        || get("SELECT 1 FROM events WHERE type = 'book_discovery' AND scope = 'owner' AND actor = 'scheduler' AND source_ref = ? LIMIT 1", sourceRef)
+        || api.hasDelivery(`book-source:${createHash('sha256').update(sourceRef).digest('hex')}`));
+    },
+    addDiscoveredBook(input) {
+      const fields = bookFields(input);
+      if (input.id !== undefined) invalid('自动收书不能指定已有书籍 ID。');
+      if (!fields.sourceRef) invalid('自动收书须提供公开 HTTPS 来源。');
+      return transaction(() => {
+        if (api.hasBookSource(fields.sourceRef)
+          || !api.claimDelivery(`book-source:${createHash('sha256').update(fields.sourceRef).digest('hex')}`)) return null;
+        bookCapacity([...all('SELECT * FROM books WHERE deleted_at IS NULL').map(bookRow), fields]);
+        const now = new Date().toISOString();
+        const book = { id: randomUUID(), ...fields, currentOffset: 0, createdAt: now, lastReadAt: null, deletedAt: null };
+        insertBook(book);
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'book_discovery', scope: 'owner', actor: 'scheduler',
+          content: `自主收录公开书籍《${book.title}》，尚未完成阅读。`, sourceRef: book.sourceRef,
+          metadata: { bookId: book.id, title: book.title, coverage: 'source_text' } }), createdAt: now });
+        return bookMetadata(book);
+      });
+    },
     listBooks() {
       return all('SELECT * FROM books WHERE deleted_at IS NULL ORDER BY created_at, rowid').map(bookRow).map(bookMetadata);
     },

@@ -20,6 +20,8 @@ import { getExpressionCatalog, getExpressionPreviews, readExpressionImage, build
 import { defaultDrawingSettings, normalizeDrawingSettings, publicDrawingSettings } from './drawing-settings.js';
 import { defaultExpressionSettings, normalizeExpressionSettings, publicExpressionSettings, createSelfExpressionJobs, expressionPlatforms } from './self-expression.js';
 import { defaultBookSettings, normalizeBookSettings, createBookJobs } from './book-jobs.js';
+import { chooseBookActivity } from './book-choice.js';
+import { createPublicBookLibrary } from './book-library.js';
 import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { parseBookFile, BOOK_FILE_MAX_BYTES } from './book-files.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
@@ -353,8 +355,12 @@ function makeSelfExpressionJobs() {
 }
 selfExpressionJobs = makeSelfExpressionJobs();
 
+const publicBookLibrary = createPublicBookLibrary();
 function makeBookJobs() {
   return createBookJobs({ store,
+    discover: ({ signal }) => publicBookLibrary.discover({ interests: (store.getSetting('autonomy', {}).interests || '').replace(/\s+/g, ' ').trim(), signal }),
+    load: (candidate, options) => publicBookLibrary.load(candidate, options),
+    decide: options => chooseBookActivity({ ...options, store }),
     summarize: async ({ signal, ...passage }) => {
       const persona = store.getSetting('persona');
       const result = await requestCompletion({ store, signal, maxTokens: 700, messages: [
@@ -640,7 +646,7 @@ function publicSettings() {
   qqView.mergeWindowMs = normalizeQQMergeWindow(qq.mergeWindowMs);
   Object.assign(qqView, normalizeQQGroupAttentionSettings(qq));
   Object.assign(qqView, normalizeQQReplySettings(qq));
-  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, feishu: normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)), reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: store.getSetting('books'), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), chatMemory: normalizeChatMemorySettings(store.getSetting('chatMemory')), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
+  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, feishu: normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)), reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: normalizeBookSettings({}, store.getSetting('books')), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), chatMemory: normalizeChatMemorySettings(store.getSetting('chatMemory')), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
 function saveSettings(input) {
@@ -685,7 +691,8 @@ function saveSettings(input) {
   if (input.chatMemory) next.chatMemory = normalizeChatMemorySettings(input.chatMemory, store.getSetting('chatMemory'));
   if (next.autonomy && JSON.stringify(next.autonomy) !== JSON.stringify(store.getSetting('autonomy'))) autonomyJobs.cancel();
   if (['selfExpression', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) selfExpressionJobs.cancel();
-  if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) bookJobs.cancel();
+  if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))
+    || next.autonomy && next.autonomy.interests !== store.getSetting('autonomy', {}).interests) bookJobs.cancel();
   if (['proactive', 'qq', 'feishu', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) proactiveJobs.cancel();
   if (['mood', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) moodJobs.cancel();
   if (Object.entries(next).some(([key, value]) => JSON.stringify(value) !== JSON.stringify(store.getSetting(key)))) chatMemoryJobs.cancel();

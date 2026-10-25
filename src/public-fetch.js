@@ -37,7 +37,7 @@ export function assertPublicUrl(value) {
   return url;
 }
 
-const proxyDnsHosts = new Set(['www.xiaoheihe.cn', 'api.xiaoheihe.cn', 'static.max-c.com', 'static.portal101.cn']);
+const proxyDnsHosts = new Set(['www.xiaoheihe.cn', 'api.xiaoheihe.cn', 'static.max-c.com', 'static.portal101.cn', 'zh.wikisource.org']);
 const proxyDnsCache = new Map();
 
 async function proxyPublicAddresses(host, signal) {
@@ -150,7 +150,7 @@ export async function fetchPublicResource(value, { signal, maxBytes = 2 * 1024 *
     try { response = await connect(); }
     catch (error) {
       // A reset before response headers carries no body and is safe to retry once.
-      if (!proxyDns || !proxyDnsHosts.has(host) || error.code !== 'ECONNRESET' || combined.aborted) throw error;
+      if (host === 'zh.wikisource.org' || !proxyDns || !proxyDnsHosts.has(host) || error.code !== 'ECONNRESET' || combined.aborted) throw error;
       response = await connect();
     }
     try {

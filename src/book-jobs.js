@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
 const DAY_MS = 86400000;
-export const defaultBookSettings = { enabled: false, dailyLimit: 2, chunkChars: 3000, startHour: 9, endHour: 23, timeZone: 'Asia/Shanghai' };
+export const defaultBookSettings = { enabled: false, discoverEnabled: true, dailyLimit: 2, chunkChars: 3000, startHour: 9, endHour: 23, timeZone: 'Asia/Shanghai' };
 
 export function normalizeBookSettings(input = {}, previous = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('读书设置格式无效。');
   const config = Object.fromEntries(Object.entries(defaultBookSettings).map(([key, fallback]) => [key, Object.hasOwn(input, key) ? input[key] : previous?.[key] ?? fallback]));
   if (typeof config.enabled !== 'boolean') throw new Error('读书开关须为布尔值。');
+  if (typeof config.discoverEnabled !== 'boolean') throw new Error('自主找书开关须为布尔值。');
   if (!Number.isInteger(config.dailyLimit) || config.dailyLimit < 1 || config.dailyLimit > 6) throw new Error('每天读书次数须为 1 至 6。');
   if (!Number.isInteger(config.chunkChars) || config.chunkChars < 1000 || config.chunkChars > 6000) throw new Error('每次阅读长度须为 1000 至 6000 字。');
   if (!Number.isInteger(config.startHour) || !Number.isInteger(config.endHour) || config.startHour < 0 || config.endHour > 24 || config.startHour >= config.endHour) throw new Error('读书时段须为同一天内的整点，开始时间应早于结束时间。');
@@ -41,7 +42,36 @@ function chunkEnd(text, start, length) {
   return end;
 }
 
-export function createBookJobs({ store, summarize, isBusy = () => false, clock = Date.now, random = Math.random }) {
+function catalogCandidates(value) {
+  if (!Array.isArray(value) || value.length > 10) throw new Error('公共书目须为最多 10 条的数组。');
+  const ids = new Set(), sources = new Set();
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || Object.keys(item).some(key => !['id', 'title', 'author', 'sourceRef', 'description'].includes(key))) throw new Error('公共书目格式无效。');
+    const clean = {};
+    for (const [key, limit] of [['id', 128], ['title', 200], ['author', 200], ['sourceRef', 2048], ['description', 1000]]) {
+      const text = item[key] ?? (['author', 'description'].includes(key) ? '' : null);
+      if (typeof text !== 'string' || (!text.trim() && !['author', 'description'].includes(key)) || text.length > limit
+        || !text.isWellFormed() || /[\u0000-\u001f\u007f]/.test(text)) throw new Error('公共书目字段无效。');
+      clean[key] = text;
+    }
+    if (ids.has(clean.id) || sources.has(clean.sourceRef)) throw new Error('公共书目标识或来源重复。');
+    ids.add(clean.id); sources.add(clean.sourceRef);
+    return clean;
+  });
+}
+
+function bookDecision(value, books, candidates) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('选书决定格式无效。');
+  if (value.action === 'quiet' && Object.keys(value).length === 1) return value;
+  if (value.action === 'read' && Object.keys(value).length === 2 && Object.hasOwn(value, 'bookId')
+    && books.some(book => book.id === value.bookId)) return value;
+  if (value.action === 'discover' && Object.keys(value).length === 2 && Object.hasOwn(value, 'candidateId')
+    && candidates.some(candidate => candidate.id === value.candidateId)) return value;
+  throw new Error('选书只能使用本轮书籍或公共书目标识。');
+}
+
+export function createBookJobs({ store, summarize, decide, discover, load, isBusy = () => false, clock = Date.now, random = Math.random }) {
   let busy = false, stopped = false, controller, activeRun, foregroundPending;
   let lastState = store.getSetting('bookStatus', {});
   const now = () => Number(clock());
@@ -95,22 +125,25 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
       if (hour < config.startHour || hour >= config.endHour) return { ...status(), skipped: 'outside_hours' };
       if (!state.daySlots.length || Date.parse(state.daySlots[0]) > time) return { ...status(), skipped: 'not_due' };
     }
-    const unread = store.listBooks().filter(book => book.currentOffset < book.totalChars && (!bookId || book.id === bookId));
-    if (!unread.length) {
+    const selecting = !force && typeof decide === 'function';
+    const unread = store.listBooks().filter(book => book.currentOffset < book.totalChars && (!bookId || book.id === bookId)).slice(0, 10);
+    if (!selecting && !unread.length) {
       if (force || (state.daySlots[0] && Date.parse(state.daySlots[0]) <= time)) state.daySlots.shift();
       save({ ...state, nextRunAt: state.daySlots[0] || '', lastOutcome: 'empty', lastError: '' });
       return { ...status(), skipped: 'no_unread_books' };
     }
-    const book = store.getBook(unread[Math.floor(draw() * unread.length)].id);
-    if (!book) return { ...status(), skipped: 'no_unread_books' };
-    const startOffset = book.currentOffset, endOffset = chunkEnd(book.text, startOffset, config.chunkChars);
-    const excerpt = book.text.slice(startOffset, endOffset);
-    const previousNotes = store.listBookReadingNotes(book.id, startOffset);
-    const notesSignature = JSON.stringify(previousNotes);
+    const sources = (selecting ? unread : unread.length ? [unread[Math.floor(draw() * unread.length)]] : []).map(item => {
+      const book = store.getBook(item.id);
+      return { book, previousNotes: store.listBookReadingNotes(book.id, book.currentOffset).slice(0, 3) };
+    });
+    const books = sources.map(({ book, previousNotes }) => ({ id: book.id, title: book.title, sourceRef: book.sourceRef,
+      currentOffset: book.currentOffset, totalChars: book.text.length, previousNotes }));
+    const sourceSignature = () => JSON.stringify({ persona: store.getSetting('persona', {}), model: store.getSetting('model', {}),
+      interests: store.getSetting('autonomy', {}).interests, moodState: store.getSetting('moodState', {}) });
+    const inputSignature = sourceSignature();
     signal?.throwIfAborted(); assertActive?.();
     state.daySlots.shift(); state.attempts += 1; state.nextRunAt = state.daySlots[0] || '';
-    state.lastAttempt = new Date(time).toISOString(); state.lastOutcome = 'reading'; state.lastError = '';
-    state.lastBookId = book.id; state.lastTitle = book.title; state.lastStartOffset = startOffset; state.lastEndOffset = endOffset;
+    state.lastAttempt = new Date(time).toISOString(); state.lastOutcome = 'choosing'; state.lastError = ''; state.lastCatalogError = '';
     save(state); busy = true;
     const activeController = controller = new AbortController();
     let finish;
@@ -120,20 +153,67 @@ export function createBookJobs({ store, summarize, isBusy = () => false, clock =
     if (signal?.aborted) abort();
     const sameDay = () => !stopped && store.getSetting('bookStatus', {}).dayId === state.dayId;
     const current = () => {
-      try { signal?.throwIfAborted(); assertActive?.(); } catch { return false; }
-      if (!sameDay() || activeController.signal.aborted || now() < Date.parse(state.dayStartAt) || now() >= Date.parse(state.dayEndAt)
-        || JSON.stringify(settings()) !== state.configSignature) return false;
-      const latest = store.getBook(book.id);
-      return latest && latest.currentOffset === startOffset && latest.text === book.text && latest.title === book.title && latest.sourceRef === book.sourceRef
-        && JSON.stringify(store.listBookReadingNotes(book.id, startOffset)) === notesSignature;
+      try {
+        signal?.throwIfAborted(); assertActive?.();
+        if (!sameDay() || activeController.signal.aborted || now() < Date.parse(state.dayStartAt) || now() >= Date.parse(state.dayEndAt)
+          || isBusy() || !store.getSetting('admin') || JSON.stringify(settings()) !== state.configSignature || sourceSignature() !== inputSignature) return false;
+        return sources.every(source => {
+          const latest = store.getBook(source.book.id);
+          return latest && JSON.stringify(latest) === JSON.stringify(source.book)
+            && JSON.stringify(store.listBookReadingNotes(source.book.id, source.book.currentOffset).slice(0, 3)) === JSON.stringify(source.previousNotes);
+        });
+      } catch { return false; }
     };
     try {
+      let book, previousNotes, candidates = [];
+      if (selecting) {
+        if (config.discoverEnabled && typeof discover === 'function' && typeof load === 'function') {
+          try {
+            candidates = catalogCandidates(await discover({ signal: activeController.signal })).filter(candidate => !store.hasBookSource(candidate.sourceRef));
+          } catch (error) {
+            if (!current()) throw new Error('读书已取消。');
+            state.lastCatalogError = String(error.message || '公共书目暂不可用。').replace(/\0/g, '').slice(0, 300);
+            if (!books.length) throw error;
+          }
+          if (!current()) throw new Error('读书已取消。');
+        }
+        if (books.length || candidates.length) {
+          const decision = bookDecision(await decide({ books: structuredClone(books), candidates: structuredClone(candidates), signal: activeController.signal }), books, candidates);
+          if (!current()) throw new Error('读书已取消。');
+          state.lastDecision = decision.action;
+          if (decision.action === 'quiet') {
+            save({ ...state, lastOutcome: 'quiet', lastError: '' });
+            return { ...status(), busy: false };
+          }
+          if (decision.action === 'discover') {
+            const candidate = candidates.find(item => item.id === decision.candidateId);
+            if (store.hasBookSource(candidate.sourceRef)) throw new Error('该公开书籍已经收录或已被移除。');
+            const loaded = await load(structuredClone(candidate), { signal: activeController.signal });
+            if (!current()) throw new Error('读书已取消。');
+            if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded) || Object.keys(loaded).some(key => !['title', 'text', 'sourceRef'].includes(key))
+              || loaded.sourceRef !== candidate.sourceRef) throw new Error('公开书籍正文与本轮选定来源不一致。');
+            if (store.hasBookSource(candidate.sourceRef)) throw new Error('该公开书籍已经收录或已被移除。');
+            const imported = store.addDiscoveredBook(loaded);
+            if (!imported) throw new Error('该公开书籍已经收录或已被移除。');
+            state.lastImportedBookId = imported.id; save(state);
+            book = store.getBook(imported.id);
+            if (!book) throw new Error('新收录书籍已被移除。');
+            previousNotes = store.listBookReadingNotes(book.id, book.currentOffset).slice(0, 3);
+            sources.push({ book, previousNotes });
+          } else ({ book, previousNotes } = sources.find(source => source.book.id === decision.bookId));
+        }
+      } else if (sources.length) ({ book, previousNotes } = sources[0]);
+      if (!book) {
+        save({ ...state, lastOutcome: 'empty', lastError: '' });
+        return { ...status(), busy: false, skipped: 'no_unread_books' };
+      }
+      if (!current()) throw new Error('读书已取消。');
+      const startOffset = book.currentOffset, endOffset = chunkEnd(book.text, startOffset, config.chunkChars);
+      const excerpt = book.text.slice(startOffset, endOffset);
+      state.lastOutcome = 'reading'; state.lastBookId = book.id; state.lastTitle = book.title;
+      state.lastStartOffset = startOffset; state.lastEndOffset = endOffset; save(state);
       const note = await summarize({ title: book.title, excerpt, startOffset, endOffset, sourceRef: book.sourceRef, previousNotes, signal: activeController.signal });
       if (!current()) throw new Error('读书已取消。');
-      if (isBusy()) {
-        save({ ...state, lastOutcome: 'busy', lastError: '' });
-        return { ...status(), busy: false, skipped: 'busy' };
-      }
       if (typeof note !== 'string' || !note.trim() || note.length > 4000 || note.includes('\0')) throw new Error('读书笔记须为 1–4000 字的有效文本。');
       const reading = store.recordBookReading({ bookId: book.id, startOffset, endOffset, note, previousNotes });
       save({ ...state, lastOutcome: 'success', lastSuccess: new Date(now()).toISOString(), lastMemoryId: reading.memory.id, lastError: '' });
