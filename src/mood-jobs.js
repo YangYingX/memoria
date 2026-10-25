@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { biliVideoUrl } from './bili-reading.js';
+import { modelBudget } from './model.js';
 import { normalizeMoodSettings, defaultMoodSettings, moodSnapshot, validateMoodDelta, applyMoodDelta } from './mood.js';
 
 const DAY_MS = 86400000;
@@ -181,6 +182,8 @@ export function createMoodJobs({ store, evaluate, isBusy = () => false, clock = 
     if (force !== true && currentState.lastAttemptAt && time - Date.parse(currentState.lastAttemptAt) < config.intervalMinutes * 60000) {
       return { ...status(), skipped: 'not_due' };
     }
+    const budget = modelBudget(store);
+    if (!budget.sharedRemaining) return { ...status(), skipped: budget.ownerRemaining ? 'model_reserved' : 'model_daily_limit' };
     const selected = select(time, currentState);
     if (!selected) return { ...status(), skipped: 'no_new_input' };
     const expectedState = JSON.parse(JSON.stringify(store.getSetting('moodState', null)));

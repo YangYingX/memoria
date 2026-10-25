@@ -35,6 +35,7 @@ import { createHeyboxAccount } from './heybox-account.js';
 import { browseBiliVideos } from './bili-browse.js';
 import { defaultMoodSettings, normalizeMoodSettings, moodSnapshot } from './mood.js';
 import { createMoodJobs } from './mood-jobs.js';
+import { createDshModelAccess } from './dsh-model.js';
 import { createChatMemoryJobs, defaultChatMemorySettings, normalizeChatMemorySettings, CHAT_MEMORY_INSTRUCTIONS } from './chat-memory-jobs.js';
 import { createQQChatBudget, defaultQQChatLimit, normalizeQQChatLimit } from './qq-chat-budget.js';
 import { createQQChatBatch, defaultQQMergeWindow, normalizeQQMergeWindow } from './qq-chat-batch.js';
@@ -432,13 +433,30 @@ proactiveJobs = makeProactiveJobs();
 
 function makeMoodJobs() {
   return createMoodJobs({ store,
-    evaluate: ({ scope, kind, text, reply, signal, background }) => dshRuntime.execute({ scope, actor: scope === 'owner' ? 'owner' : 'scheduler',
-      name: 'evaluate_mood', args: { input: { kind, text, ...(kind === 'conversation' ? { reply } : {}) } }, signal,
-      priority: background ? 'background' : 'normal', ...(background ? { onYield: () => moodJobs.cancel({ backgroundOnly: true }) } : {}) }),
+    evaluate: async ({ scope, kind, text, reply, signal, background }) => {
+      const engine = dshRuntime.status();
+      if (engine.error) throw new Error(engine.error);
+      const configuration = () => existsSync(join(dataDir, 'dsh-runtime.json'))
+        ? createHash('sha256').update(readFileSync(join(dataDir, 'dsh-runtime.json'))).digest('hex') : null;
+      const expected = configuration();
+      const assertActive = () => {
+        signal?.throwIfAborted();
+        if (closing || configuration() !== expected) throw new Error('心情评估的运行层配置已变化，本次结果未应用。');
+      };
+      assertActive();
+      const input = { kind, text, ...(kind === 'conversation' ? { reply } : {}) };
+      if (engine.enabled) return dshRuntime.execute({ scope, actor: scope === 'owner' ? 'owner' : 'scheduler',
+        name: 'evaluate_mood', args: { input }, signal, assertActive,
+        priority: background ? 'background' : 'normal', ...(background ? { onYield: () => moodJobs.cancel({ backgroundOnly: true }) } : {}) });
+      const complete = createDshModelAccess({ store, signal, purpose: 'mood' });
+      const result = await complete({ messages: [{ role: 'user', content: JSON.stringify({ input, mood: moodSnapshot(store) }) }], maxTokens: 300 });
+      assertActive();
+      return JSON.parse(result.text);
+    },
     isBusy: () => activeMutation > 0 || qqBusy() || readingBusy || backupJobs.status().busy || autonomyJobs.status().busy
       || selfExpressionJobs.status().busy || bookJobs.status().busy || proactiveJobs.status().busy || dshRuntime.status().busy
       || chatMemoryJobs?.status().busy
-      || !store.getSetting('admin') || !store.getSetting('model').apiKey || !dshRuntime.status().enabled,
+      || !store.getSetting('admin') || !store.getSetting('model').apiKey || Boolean(dshRuntime.status().error),
   });
 }
 moodJobs = makeMoodJobs();

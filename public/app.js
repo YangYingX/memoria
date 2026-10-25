@@ -591,7 +591,7 @@ function renderMoodStatus() {
   $('mood-outcome').textContent = status.busy ? '正在评估…' : outcomes[status.lastOutcome] || '尚无评估记录；初始状态为平静。';
   $('mood-error').hidden = !status.lastError;
   $('mood-error').textContent = status.lastError || '';
-  $('mood-run').disabled = Boolean(status.busy || !config.enabled || !state.data?.dshStatus?.enabled || !state.data?.settings.model.hasApiKey);
+  $('mood-run').disabled = Boolean(status.busy || !config.enabled || state.data?.dshStatus?.error || !state.data?.settings.model.hasApiKey);
 }
 
 function renderChatMemoryStatus() {
@@ -964,7 +964,7 @@ $('refresh-mood').addEventListener('click', () => action($('refresh-mood'), () =
 $('mood-run').addEventListener('click', () => action($('mood-run'), async () => {
   const result = await api('/api/mood/run', { method: 'POST', data: {} });
   await Promise.all([loadState(), loadEvents()]);
-  const notices = { disabled: '请先保存并启用心情评估。', busy: '她正在处理其他事情，稍后再评估。', daily_limit: '今日评估次数已用完。', no_new_input: '没有新的可评估资料。', no_input: '没有新的可评估资料。', cancelled: '本次评估已取消。', low_confidence: '这次判断把握不足，保留原状态。', unchanged: '没有新的明显变化，心境继续自然回稳。' };
+  const notices = { disabled: '请先保存并启用心情评估。', busy: '她正在处理其他事情，稍后再评估。', daily_limit: '今日评估次数已用完。', model_daily_limit: '今日模型额度已用完，待评估交流会保留至原有效期。', model_reserved: '共享模型额度已用完，剩余额度留给创建人私聊；待评估交流会保留至原有效期。', no_new_input: '没有新的可评估资料。', no_input: '没有新的可评估资料。', cancelled: '本次评估已取消。', low_confidence: '这次判断把握不足，保留原状态。', unchanged: '没有新的明显变化，心境继续自然回稳。' };
   toast(notices[result.status?.skipped || result.status?.lastOutcome] || result.status?.lastError || '评估已结束，状态见上方。');
 }));
 $('mate-reset').addEventListener('click', () => action($('mate-reset'), async () => {
