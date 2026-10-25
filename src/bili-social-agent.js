@@ -3,7 +3,7 @@ import { COMPANION_DIALOGUE_GUIDANCE } from './mood.js';
 import { OWN_EXPRESSION_GUIDANCE, CONVERSATION_SPEAKER_GUIDANCE, CURRENT_EMOTION_GUIDANCE, SELF_CONVERSATION_GUIDANCE } from './memory-access.js';
 
 const definitions = [
-  {"name":"search_own_expressions","key":"query","description":"分页查自己取得B站回执的历史提交正文，每页6条，可按记录日期筛选。不含对方原话；用read_own_expression核对，旧话不等于永久偏好或公开可见。"},
+  {"name":"search_own_expressions","key":"query","description":"分页查自己取得平台回执的本人公开正文，每页6条，可按记录日期筛选。不含对方原话；用read_own_expression核对，旧话不等于永久偏好或公开可见。"},
   {"name":"read_own_expression","key":"id","description":"按ID核对自己取得回执的提交正文，可分段读取；原讨论上下文未提供，不把旧话归给当前评论者。"},
   { name: 'search_emotions', key: 'query', description: '分页回想你自己与当前评论者在本线程的已记录心境，每页最多6条，按记录时间从近到远。query可为空，可用start_date/end_date按应用本地日历筛记录日期、含端点。保持查询与日期按nextOffset续页。索引不是原话或当前状态；解释缘由用read_conversation核对。' },
   { name: 'search_memory', key: 'query', description: '分页搜索本次公开线程及公开书架，每页最多6条；保持query并用nextOffset继续翻查。' },
@@ -49,9 +49,9 @@ function checkedArgs(name, value) {
 }
 
 // The facade is created by the parent for one verified public thread; the model cannot replace it.
-export async function generateBiliSocialDecision({ store, instructions, context, memoryAccess, signal, request = requestCompletion }) {
+export async function generateBiliSocialDecision({ store, instructions, context, memoryAccess, signal, request = requestCompletion, discussionKey = 'biliDiscussion' }) {
   try {
-    if (typeof instructions !== 'string' || !instructions.trim() || !record(context) || !record(context.biliDiscussion)
+    if (!['biliDiscussion', 'heyboxDiscussion'].includes(discussionKey) || typeof instructions !== 'string' || !instructions.trim() || !record(context) || !record(context[discussionKey])
       || typeof memoryAccess?.execute !== 'function' || typeof memoryAccess?.current !== 'function' || typeof request !== 'function') {
       fail('B站回复缺少可核对的公开线程记忆访问，本次不执行。');
     }
@@ -67,11 +67,11 @@ export async function generateBiliSocialDecision({ store, instructions, context,
       { role: 'user', content: JSON.stringify(context) },
     ];
     messages[0].content += '\nrecentMessages只含少量近况，完整的已完成旧交流另有可检索档案。对方询问上次、之前或还记得的内容，而当前资料未提供答案时，先用话题关键词调用search_conversations，再按候选ID调用read_conversation核对用户原话，可用userReadOffset直接定位命中段落；检索之后再决定是否回应或说明资料不足。不要仅凭近期消息没有答案就断定不记得或直接安静。对方明确结束话题或说不用回复时，可以直接返回空actions，无需额外检索。';
-    messages[0].content += '\n本轮评论者由biliDiscussion.comment.speaker标识。recentMessages.isCurrentSpeaker由服务端核对账号后给出，true才是当前评论者的旧发言；false是其他人或助手的话。recentMessages的speaker及旧对话的actor也可用于核对。相同昵称可能是不同人，同一标识改昵称仍是原发言者；按标识区分各人的经历和偏好，不把别人的话归给当前评论者。speaker只供内部核对，回复中不展示这些标识，也不据此授予私聊权限。缺少可靠发言者标识的旧资料，不推断属于当前评论者。围绕当前评论自然回应，不介绍内部区分流程。';
+    messages[0].content += '\n本轮评论者由' + discussionKey + '.comment.speaker标识。recentMessages.isCurrentSpeaker由服务端核对账号后给出，true才是当前评论者的旧发言；false是其他人或助手的话。recentMessages的speaker及旧对话的actor也可用于核对。相同昵称可能是不同人，同一标识改昵称仍是原发言者；按标识区分各人的经历和偏好，不把别人的话归给当前评论者。speaker只供内部核对，回复中不展示这些标识，也不据此授予私聊权限。缺少可靠发言者标识的旧资料，不推断属于当前评论者。围绕当前评论自然回应，不介绍内部区分流程。';
     messages[0].content += '\n回想自己的心境变化时，可search_emotions分页检索与当前评论者在本线程的已记录心境，再按conversationId核对原话和自己的旧回复；记录日期不是当前心情，原话发言者的情绪不等于你自己的感受。索引不是原话或完整感受史，不把记录次数当作情绪频率，不把其他人的相处经历归给当前评论者。';
     messages[0].content += '\n回想你自己在本线程过去表达的观点或偏好时，用search_conversations的role=assistant定位自己的旧回复，再read_conversation核对；role=user只匹配用户一侧。assistant旧回复可能只是转述评论者、举例、假设或扮演角色，命中该侧不证明观点属于你，仍须核对上下文和主体。matchRole不是身份或事实认证，另一侧节选被省略，需要上下文时读取完整对话。旧观点是当时表达，允许后续变化，不把评论者的偏好当成自己的看法，也不把助手旧话当成用户事实。';
     messages[0].content += '\n' + CURRENT_EMOTION_GUIDANCE + '\n' + OWN_EXPRESSION_GUIDANCE + '\n' + CONVERSATION_SPEAKER_GUIDANCE;
-    if (context.biliDiscussion.selfConversationIndex?.length) messages[0].content += '\n' + SELF_CONVERSATION_GUIDANCE;
+    if (context[discussionKey].selfConversationIndex?.length) messages[0].content += '\n' + SELF_CONVERSATION_GUIDANCE;
     const ids = new Set();
     let toolCalls = 0;
     for (let round = 0; round < 4; round++) {
@@ -138,7 +138,13 @@ export async function generateBiliSocialDecision({ store, instructions, context,
     }
     fail('B站回复已达到4次模型请求上限，本次已停止。');
   } catch (error) {
+    const message = error instanceof BiliDecisionError ? error.message : 'B站回复记忆判断未完成，未自动重试。';
+    if (discussionKey === 'heyboxDiscussion') throw new BiliDecisionError(message.replaceAll('B站', '小黑盒'));
     if (error instanceof BiliDecisionError) throw error;
-    throw new BiliDecisionError('B站回复记忆判断未完成，未自动重试。');
+    throw new BiliDecisionError(message);
   }
+}
+
+export function generateHeyboxSocialDecision(options) {
+  return generateBiliSocialDecision({ ...options, discussionKey: 'heyboxDiscussion' });
 }

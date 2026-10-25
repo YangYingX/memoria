@@ -18,6 +18,8 @@ import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControl
 import { defaultAutonomySettings } from './autonomy.js';
 import { defaultBookSettings } from './book-jobs.js';
 import { defaultExpressionSettings } from './self-expression.js';
+import { HEYBOX_REPLY_STATES, HEYBOX_REPLY_TERMINAL, heyboxId, heyboxKey, normalizeHeyboxThread, normalizeHeyboxComment,
+  heyboxThreadKey, heyboxThreadIdentityKey, heyboxThreadHash, heyboxThreadScope, heyboxCommentKey, heyboxCommentHash, heyboxCommentActor, normalizeHeyboxConfirmation } from './heybox-thread.js';
 import { biliVideoUrl } from './bili-reading.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
@@ -194,6 +196,35 @@ function eventFields(input) {
     if (type !== 'message' || input.scope !== 'owner' || input.actor !== 'owner') invalid('私聊来源只能关联创建人原始消息。');
     metadata.conversationOrigin = normalizeConversationOrigin(metadata.conversationOrigin);
   }
+  if (type === 'heybox_thread') {
+    if (Object.keys(metadata).some(key => !['version', 'key', 'thread', 'hash', 'state'].includes(key)) || metadata.version !== 1
+      || !['registered', 'invalidated'].includes(metadata.state)) invalid('小黑盒线程事件无效。');
+    metadata.thread = normalizeHeyboxThread(metadata.thread);
+    if (metadata.key !== heyboxThreadKey(metadata.thread) || metadata.hash !== heyboxThreadHash(metadata.thread) || input.sourceRef !== metadata.key
+      || input.scope !== heyboxThreadScope(metadata.thread) || input.actor !== 'scheduler') invalid('小黑盒线程来源不一致。');
+  }
+  if (Object.hasOwn(metadata, 'heyboxComment')) {
+    const source = metadata.heyboxComment;
+    record(source, '小黑盒评论来源');
+    if (Object.keys(source).length !== 8 || Object.keys(source).some(key => !['version', 'key', 'threadKey', 'threadEventId', 'accountId', 'postId', 'comment', 'hash'].includes(key))
+      || source.version !== 1) invalid('小黑盒评论来源字段无效。');
+    source.accountId = heyboxId(source.accountId); source.postId = heyboxId(source.postId); source.comment = normalizeHeyboxComment(source.comment);
+    identifier(source.threadEventId, '小黑盒线程注册 ID');
+    if (source.threadKey !== heyboxThreadIdentityKey(source.accountId, source.postId) || source.key !== heyboxCommentKey(source, source.comment)
+      || source.hash !== heyboxCommentHash(source, source.comment) || type !== 'message' || input.scope !== heyboxThreadScope(source)
+      || input.actor !== heyboxCommentActor(source.comment) || content !== source.comment.text || input.sourceRef !== source.key) invalid('小黑盒评论正文、来源或身份不一致。');
+    identifier(metadata.messageId, '小黑盒评论原消息 ID');
+  }
+  if (type === 'heybox_reply') {
+    if (Object.keys(metadata).some(key => !['version', 'key', 'sourceEventId', 'sourceHash', 'state', 'confirmation', 'replyId', 'replyHash', 'replyDependenciesHash'].includes(key))
+      || metadata.version !== 1 || !HEYBOX_REPLY_STATES.includes(metadata.state) || metadata.state === 'received' || input.actor !== 'scheduler'
+      || input.sourceRef !== metadata.key || !/^group:heybox:[1-9]\d{0,19}:[1-9]\d{0,19}$/.test(input.scope)) invalid('小黑盒回复状态事件无效。');
+    heyboxKey(metadata.key); heyboxKey(metadata.sourceHash); identifier(metadata.sourceEventId, '小黑盒评论来源 ID');
+    if (metadata.state === 'sent') {
+      heyboxKey(metadata.replyHash); heyboxKey(metadata.replyDependenciesHash);
+      Object.assign(metadata, normalizeHeyboxConfirmation({ confirmation: metadata.confirmation, ...(metadata.replyId === undefined ? {} : { replyId: metadata.replyId }) }));
+    } else if (metadata.confirmation !== undefined || metadata.replyId !== undefined || metadata.replyHash !== undefined || metadata.replyDependenciesHash !== undefined) invalid('未确认的小黑盒回复不能保存成功凭据。');
+  }
   if (Object.hasOwn(metadata, 'qqBatchSources')) {
     if (type !== 'message') invalid('QQ 合并消息来源只能保存在消息经历中。');
     metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
@@ -243,6 +274,7 @@ function messageFields(input) {
     if (input.role !== 'user') invalid('QQ 合并消息来源只能保存在用户消息中。');
     metadata.qqBatchSources = normalizeQQBatchSources(metadata.qqBatchSources, content);
   }
+  if (Object.hasOwn(metadata, 'heyboxCommentKey') && (input.role !== 'user' || !/^[a-f0-9]{64}$/.test(metadata.heyboxCommentKey))) invalid('小黑盒评论只能关联有效用户消息。');
   if (Object.hasOwn(metadata, 'biliNoticeKey') && (input.role !== 'user' || !/^[a-f0-9]{64}$/.test(metadata.biliNoticeKey))) invalid('B站通知只能关联有效用户消息。');
   return {
     scope: scopeValue(input.scope),
@@ -702,6 +734,151 @@ export function createStore(dbPath) {
     return item && !biliClaimed('history', item.key) && Date.parse(item.notice.at) >= now - 7 * 86400000
       && Date.parse(item.notice.at) <= now + 5 * 60000 && item.notice.mid !== item.accountId;
   }
+  const heyboxClaimed = (kind, key) => Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', `heybox-${kind}:${key}`));
+  const claimHeybox = (kind, key, now) => Boolean(run('INSERT INTO deliveries VALUES (?, ?) ON CONFLICT(key) DO NOTHING', `heybox-${kind}:${key}`, now).changes);
+  const heyboxDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  function heyboxThreadRecord(key, current = true, registrationId = '', allowHistory = false) {
+    const row = registrationId ? get("SELECT * FROM events WHERE id = ? AND type = 'heybox_thread' AND source_ref = ?", registrationId, key)
+      : get("SELECT * FROM events WHERE type = 'heybox_thread' AND source_ref = ? ORDER BY rowid DESC LIMIT 1", key);
+    if (!row) return null;
+    const registration = eventRow(row), fields = eventFields(registration), entry = fields.metadata, thread = entry.thread;
+    const sourceRow = get('SELECT * FROM events WHERE id = ?', thread.sourceEventId), memory = memoryRow(get('SELECT * FROM memories WHERE id = ?', thread.sourceMemoryId));
+    const source = sourceRow ? eventRow(sourceRow) : null, meta = source?.metadata;
+    const matchingOrigin = source?.type === 'self_expression' && meta?.action === 'post' && memory?.sourceType === 'self-expression'
+      || source?.type === 'heybox_post' && meta?.action === 'inspect' && memory?.sourceType === 'heybox-post';
+    const valid = entry.state === 'registered' && !heyboxClaimed('thread-invalidated', key) && (allowHistory || !heyboxClaimed('thread-history', registration.id))
+      && matchingOrigin && source.scope === 'owner' && source.actor === 'scheduler'
+      && meta?.platform === 'heybox' && meta.outcome === 'success' && meta.confirmed === true && meta.confirmation === 'published_view'
+      && meta.accountId === thread.accountId && meta.postId === thread.postId && meta.url === thread.url && meta.title === thread.title
+      && memory && !memory.deletedAt && memory.scope === 'owner' && memory.category === 'event' && memory.sourceRef === source.id
+      && (source.type === 'heybox_post' ? source.sourceRef === thread.url && memory.content === source.content
+        : memory.content === '【小黑盒自主动态；客户端已确认】\n' + source.content) && memory.updatedAt === memory.createdAt
+      && !get('SELECT 1 FROM revisions WHERE memory_id = ?', memory.id) && !get('SELECT 1 FROM tombstones WHERE memory_id = ?', memory.id)
+      && !get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', source.scope, source.id);
+    if (current && !valid) return null;
+    return { key, ...thread, scope: fields.scope, registrationEventId: registration.id, registeredAt: registration.createdAt,
+      state: entry.state, postText: source?.content || '', sourceHash: heyboxDigest({ registration, source, memory }) };
+  }
+  function discoverableHeyboxThread(accountId, postId) {
+    const key = heyboxThreadIdentityKey(accountId, postId);
+    if (heyboxClaimed('thread-invalidated', key)) return false;
+    const previous = heyboxThreadRecord(key, false);
+    return !previous || previous.state === 'registered' && heyboxClaimed('thread-history', previous.registrationEventId)
+      && Boolean(heyboxThreadRecord(key, true, previous.registrationEventId, true));
+  }
+  function heyboxRecord(key) {
+    const rows = all("SELECT * FROM events WHERE type = 'message' AND source_ref = ? AND json_type(metadata, '$.heyboxComment') = 'object'", key);
+    if (rows.length !== 1) return null;
+    const row = rows[0];
+    const source = eventRow(row), fields = eventFields(source), original = fields.metadata.heyboxComment;
+    const incomingRow = get('SELECT * FROM messages WHERE id = ?', fields.metadata.messageId), incoming = incomingRow ? messageRow(incomingRow) : null;
+    if (!incoming || incoming.role !== 'user' || incoming.scope !== fields.scope || incoming.actor !== fields.actor || incoming.content !== fields.content
+      || incoming.metadata.heyboxCommentKey !== key) return null;
+    const sourceHash = heyboxDigest({ source: { ...source, ...fields }, message: incoming });
+    const lastRow = get("SELECT * FROM events WHERE type = 'heybox_reply' AND source_ref = ? ORDER BY rowid DESC LIMIT 1", key);
+    let state = 'received', updatedAt = source.createdAt, confirmation;
+    if (lastRow) {
+      const outcome = eventRow(lastRow), checked = eventFields(outcome);
+      if (checked.metadata.sourceEventId !== source.id || checked.metadata.sourceHash !== sourceHash || outcome.scope !== source.scope) state = 'invalidated';
+      else { state = checked.metadata.state; updatedAt = outcome.createdAt; if (state === 'sent') confirmation = { ...normalizeHeyboxConfirmation({ confirmation: checked.metadata.confirmation, ...(checked.metadata.replyId ? { replyId: checked.metadata.replyId } : {}) }), replyHash: checked.metadata.replyHash, replyDependenciesHash: checked.metadata.replyDependenciesHash }; }
+    }
+    if (!HEYBOX_REPLY_TERMINAL.includes(state) && heyboxClaimed('history', key)) state = state === 'sending' || heyboxClaimed('send', key) ? 'unknown' : 'interrupted';
+    else if (state === 'received' && heyboxClaimed('send', key)) state = 'unknown';
+    else if (state === 'received' && heyboxClaimed('decision', key)) state = 'interrupted';
+    return { key, threadKey: original.threadKey, threadEventId: original.threadEventId, accountId: original.accountId, postId: original.postId,
+      scope: fields.scope, actor: fields.actor, comment: original.comment, sourceEventId: source.id, sourceHash, messageId: incoming.id,
+      receivedAt: source.createdAt, updatedAt, state, ...(confirmation || {}) };
+  }
+  function readableHeybox(item, now = Date.now()) {
+    if (!item || item.state === 'invalidated' || item.comment.authorId === item.accountId || !Number.isFinite(Date.parse(item.receivedAt)) || Date.parse(item.receivedAt) > now
+      || get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', item.scope, item.sourceEventId)) return false;
+    const thread = heyboxThreadRecord(item.threadKey);
+    const original = thread && heyboxThreadRecord(item.threadKey, true, item.threadEventId, true);
+    return Boolean(original && thread.accountId === item.accountId && thread.postId === item.postId
+      && original.accountId === item.accountId && original.postId === item.postId && original.scope === item.scope);
+  }
+  function currentHeybox(item, now = Date.now()) {
+    if (!readableHeybox(item, now) || heyboxClaimed('history', item.key) || Date.parse(item.receivedAt) < now - 7 * 86400000) return false;
+    const thread = heyboxThreadRecord(item.threadKey);
+    return Boolean(thread.registrationEventId === item.threadEventId && heyboxClaimed('baseline', thread.registrationEventId));
+  }
+  function receiveHeyboxSource(threadKey, comment, now) {
+    const thread = heyboxThreadRecord(threadKey);
+    if (!thread || comment.authorId === thread.accountId) return { inserted: false, record: null, skipped: 'unavailable_or_self' };
+    const key = heyboxCommentKey(thread, comment), previous = heyboxRecord(key);
+    if (previous) {
+      if (heyboxCommentHash(thread, previous.comment) !== heyboxCommentHash(thread, comment)) {
+        insertConversationBlock(previous.scope, previous.sourceEventId, now); claimHeybox('decision', key, now);
+        withdrawHeyboxCopies(previous, now);
+        if (!HEYBOX_REPLY_TERMINAL.includes(previous.state)) appendHeyboxState(previous, previous.state === 'sending' || heyboxClaimed('send', key) ? 'unknown' : 'invalidated', now);
+        return { inserted: false, record: null, skipped: 'changed' };
+      }
+      return { inserted: false, record: currentHeybox(previous) ? previous : null, skipped: 'duplicate' };
+    }
+    if (get("SELECT 1 FROM events WHERE type = 'message' AND source_ref = ? AND json_type(metadata, '$.heyboxComment') = 'object'", key)
+      || heyboxClaimed('history', key) || heyboxClaimed('decision', key) || heyboxClaimed('send', key)) return { inserted: false, record: null, skipped: 'history' };
+    if (heyboxSources(thread.accountId).map(row => heyboxRecord(row.key)).filter(item => item && !HEYBOX_REPLY_TERMINAL.includes(item.state) && currentHeybox(item)).length >= 20) return { inserted: false, record: null, skipped: 'queue_full' };
+    const messageId = randomUUID(), source = { version: 1, key, threadKey, threadEventId: thread.registrationEventId, accountId: thread.accountId,
+      postId: thread.postId, comment, hash: heyboxCommentHash(thread, comment) };
+    insertMessage({ id: messageId, ...messageFields({ scope: thread.scope, actor: heyboxCommentActor(comment), role: 'user', content: comment.text, metadata: { heyboxCommentKey: key } }), createdAt: now });
+    insertEvent({ id: randomUUID(), ...eventFields({ type: 'message', scope: thread.scope, actor: heyboxCommentActor(comment), content: comment.text, sourceRef: key,
+      metadata: { messageId, heyboxComment: source } }), createdAt: now });
+    return { inserted: true, record: heyboxRecord(key) };
+  }
+  function appendHeyboxState(item, state, now, confirmation) {
+    insertEvent({ id: randomUUID(), ...eventFields({ type: 'heybox_reply', scope: item.scope, actor: 'scheduler', sourceRef: item.key,
+      content: `小黑盒公开回复状态：${state}。`, metadata: { version: 1, key: item.key, sourceEventId: item.sourceEventId, sourceHash: item.sourceHash, state, ...(confirmation || {}) } }), createdAt: now });
+    return { ...item, state, updatedAt: now, ...(confirmation || {}) };
+  }
+  function heyboxSources(accountId) {
+    return all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_extract(metadata, '$.heyboxComment.accountId') = ? ORDER BY rowid", accountId);
+  }
+  function heyboxArchivedReplyId(item) {
+    const rows = all(`SELECT * FROM messages WHERE scope = ? AND role = 'assistant' AND actor = 'agent'
+      AND json_extract(metadata, '$.sourceCommentKey') = ?`, item.scope, item.key).map(messageRow);
+    const reply = rows[0];
+    return rows.length === 1 && reply.metadata.mode === 'live' && reply.metadata.platform === 'heybox'
+      && reply.metadata.replyTo === item.messageId && reply.metadata.confirmation === item.confirmation && reply.metadata.replyId === item.replyId
+      && reply.metadata.replyHash === item.replyHash && item.replyHash === heyboxDigest(reply.content)
+      && reply.metadata.replyDependenciesHash === item.replyDependenciesHash ? reply.id : null;
+  }
+  function withdrawHeyboxCopies(item, now, exceptMemoryId = '') {
+    for (const row of all("SELECT * FROM memories WHERE scope = ? AND source_type = 'conversation' AND source_ref = ? AND deleted_at IS NULL", item.scope, item.sourceEventId)) {
+      const memory = memoryRow(row);
+      if (memory.id === exceptMemoryId) continue;
+      const deletedAt = memory.updatedAt > now ? memory.updatedAt : now;
+      addRevision(memory, deletedAt);
+      run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', deletedAt, deletedAt, memory.id);
+      run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = MAX(tombstones.deleted_at, excluded.deleted_at)', memory.id, deletedAt);
+    }
+  }
+  function invalidateHeyboxSources(memory, now) {
+    const threads = all("SELECT DISTINCT source_ref AS key FROM events WHERE type = 'heybox_thread' AND json_extract(metadata, '$.thread.sourceMemoryId') = ?", memory.id);
+    const keys = new Set();
+    for (const { key } of threads) {
+      claimHeybox('thread-invalidated', key, now);
+      const thread = heyboxThreadRecord(key, false);
+      if (!thread) continue;
+      if (thread.state !== 'invalidated') {
+        const { accountId, postId, url, title, sourceEventId, sourceMemoryId } = thread;
+        const dto = { accountId, postId, url, title, sourceEventId, sourceMemoryId };
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'heybox_thread', scope: thread.scope, actor: 'scheduler', sourceRef: key,
+          content: '小黑盒线程来源已更正或忘记。', metadata: { version: 1, key, thread: dto, hash: heyboxThreadHash(dto), state: 'invalidated' } }), createdAt: now });
+      }
+      for (const row of all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_extract(metadata, '$.heyboxComment.threadKey') = ?", key)) keys.add(row.key);
+    }
+    if (memory.sourceType === 'conversation') {
+      const row = get("SELECT source_ref AS key FROM events WHERE id = ? AND type = 'message' AND json_type(metadata, '$.heyboxComment') = 'object'", memory.sourceRef);
+      if (row) keys.add(row.key);
+    }
+    for (const key of keys) {
+      const item = heyboxRecord(key);
+      if (!item) continue;
+      insertConversationBlock(item.scope, item.sourceEventId, now); claimHeybox('decision', key, now);
+      withdrawHeyboxCopies(item, now, memory.id);
+      if (!HEYBOX_REPLY_TERMINAL.includes(item.state)) appendHeyboxState(item, item.state === 'sending' || heyboxClaimed('send', key) ? 'unknown' : 'invalidated', now);
+    }
+  }
   function companionContacts() {
     const rows = all(`WITH sources AS (SELECT u.id, MIN(e.rowid) AS event_order FROM events e JOIN messages u
       ON json_type(e.metadata, '$.messageId') = 'text' AND json_extract(e.metadata, '$.messageId') = u.id
@@ -1007,9 +1184,51 @@ export function createStore(dbPath) {
     }
     return { content: content.slice(bestOffset, bestOffset + 1200), offset: bestOffset };
   }
-  // Only fixed Bilibili submission proofs qualify. No caller can nominate a private scope.
+  function rawHeyboxOwnExpressionEvidence(id) {
+    try {
+      const row = get(`SELECT * FROM events WHERE id = ? AND type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
+        AND json_extract(metadata, '$.platform') = 'heybox' AND json_extract(metadata, '$.action') = 'reply'
+        AND json_extract(metadata, '$.outcome') = 'success'`, id);
+      if (!row) return null;
+      const event = eventRow(row), metadata = event.metadata, key = heyboxKey(metadata.targetKey);
+      if (metadata.confirmation !== 'reply_receipt' || typeof metadata.replyId !== 'string' || heyboxId(metadata.replyId) !== metadata.replyId
+        || !event.content.trim() || event.content.length > 200) return null;
+      const item = heyboxRecord(key);
+      if (!item || item.state !== 'sent' || item.confirmation !== 'reply_receipt' || item.replyId !== metadata.replyId
+        || (!heyboxClaimed('send', key) && !heyboxClaimed('history', key))
+        || get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', item.scope, item.sourceEventId)) return null;
+      const thread = heyboxThreadRecord(item.threadKey, true, item.threadEventId, true);
+      if (!thread || thread.accountId !== item.accountId || thread.postId !== item.postId || metadata.targetUrl !== thread.url) return null;
+      const assistantId = heyboxArchivedReplyId(item), assistantRow = assistantId && get('SELECT * FROM messages WHERE id = ?', assistantId);
+      if (!assistantRow) return null;
+      const assistant = messageRow(assistantRow);
+      if (assistant.content !== event.content || Date.parse(assistant.createdAt) > Date.parse(event.createdAt)) return null;
+      const attempts = all(`SELECT * FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler' AND source_ref = ?
+        AND json_extract(metadata, '$.platform') = 'heybox' AND json_extract(metadata, '$.action') = 'reply'
+        AND json_extract(metadata, '$.outcome') = 'attempt' AND json_extract(metadata, '$.commentKey') = ?
+        AND json_extract(metadata, '$.targetKey') = ? AND json_extract(metadata, '$.targetUrl') = ?`, key, key, key, thread.url).map(eventRow);
+      const sent = all(`SELECT * FROM events WHERE type = 'heybox_reply' AND scope = ? AND source_ref = ?
+        AND json_extract(metadata, '$.state') = 'sent'`, item.scope, key).map(eventRow);
+      const successes = all(`SELECT id FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
+        AND json_extract(metadata, '$.platform') = 'heybox' AND json_extract(metadata, '$.action') = 'reply'
+        AND json_extract(metadata, '$.outcome') = 'success' AND json_extract(metadata, '$.targetKey') = ?`, key);
+      if (attempts.length !== 1 || sent.length !== 1 || successes.length !== 1 || successes[0].id !== event.id
+        || Date.parse(attempts[0].createdAt) > Date.parse(assistant.createdAt) || Date.parse(sent[0].createdAt) > Date.parse(event.createdAt)) return null;
+      const registration = eventRow(get('SELECT * FROM events WHERE id = ?', thread.registrationEventId));
+      const post = eventRow(get('SELECT * FROM events WHERE id = ?', thread.sourceEventId));
+      const memory = memoryRow(get('SELECT * FROM memories WHERE id = ?', thread.sourceMemoryId));
+      const source = eventRow(get('SELECT * FROM events WHERE id = ?', item.sourceEventId));
+      const incoming = messageRow(get('SELECT * FROM messages WHERE id = ?', item.messageId));
+      const signature = heyboxDigest([event, item, registration, post, memory, source, incoming, attempts[0], sent[0], assistant]);
+      return { id: event.id, platform: 'heybox', action: 'reply', author: 'assistant', recordedAt: event.createdAt,
+        url: thread.url, content: event.content, title: '', submissionReceiptOnly: true, originalContextIncluded: false,
+        signature, sourceMessageId: assistant.id };
+    } catch { return null; }
+  }
+  // Only receipt-bound public expressions qualify. No caller can nominate a private scope.
   function rawOwnExpressionEvidence(id) {
     try {
+      if (get("SELECT 1 FROM events WHERE id = ? AND json_extract(metadata, '$.platform') = 'heybox'", id)) return rawHeyboxOwnExpressionEvidence(id);
       const header = get(`SELECT id, metadata, created_at FROM events WHERE id = ? AND type = 'self_expression'
         AND scope = 'owner' AND actor = 'scheduler' AND json_extract(metadata, '$.platform') = 'bilibili'
         AND json_extract(metadata, '$.outcome') = 'success' AND json_extract(metadata, '$.action') IN ('post','reply','comment')`, id);
@@ -1850,6 +2069,8 @@ export function createStore(dbPath) {
         LEFT JOIN messages u ON u.role = 'user' AND u.scope = e.scope AND u.actor = e.actor AND u.content = e.content
           AND json_type(e.metadata, '$.messageId') = 'text' AND u.id = json_extract(e.metadata, '$.messageId')
         WHERE m.id = ? AND m.deleted_at IS NULL AND m.source_type = 'conversation' AND e.type = 'message'
+          AND NOT (json_type(e.metadata, '$.heyboxComment') IS 'object' AND EXISTS (
+            SELECT 1 FROM conversation_blocks b WHERE b.scope = e.scope AND b.event_id = e.id))
           AND m.scope IN (${permitted.map(() => '?').join(',')})`, id, ...permitted);
       if (!source) return null;
       const { sourceMetadata, userMetadata, sourceBlocked, messageId, messageScope, messageActor, ...quote } = source, metadata = JSON.parse(sourceMetadata);
@@ -1878,6 +2099,8 @@ export function createStore(dbPath) {
           blockConversationSource(previous, now);
           blockConversationSource(memory, now);
           invalidateFollowups(id, now, [previous, memory]);
+          invalidateHeyboxSources(previous, now);
+          if (memory.sourceRef !== previous.sourceRef || memory.sourceType !== previous.sourceType) invalidateHeyboxSources(memory, now);
           run('UPDATE memories SET title = ?, content = ?, category = ?, scope = ?, source_type = ?, source_ref = ?, updated_at = ? WHERE id = ?', memory.title, memory.content, memory.category, memory.scope, memory.sourceType, memory.sourceRef, memory.updatedAt, id);
           retractDependentNotes([previous], now);
         } else insertMemory(memory);
@@ -2037,6 +2260,7 @@ export function createStore(dbPath) {
         addRevision(previous, now);
         blockConversationSource(previous, now);
         invalidateFollowups(id, now, [previous]);
+        invalidateHeyboxSources(previous, now);
         run('UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id);
         run('INSERT INTO tombstones VALUES (?, ?) ON CONFLICT(memory_id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now);
         retractDependentNotes([previous], now);
@@ -2189,8 +2413,9 @@ export function createStore(dbPath) {
       limit = integer(limit, '表达检索条数', 1, 6); offset = integer(offset, '表达检索位置', 0, Number.MAX_SAFE_INTEGER);
       const filter = conversationDateRange(dates), tokens = queryTokens(query), state = conversationState(['public']), matches = [];
       const rows = all(`SELECT id, content, created_at FROM events WHERE type = 'self_expression' AND scope = 'owner'
-        AND actor = 'scheduler' AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.outcome') = 'success'
-        AND json_extract(metadata, '$.action') IN ('post','reply','comment') ORDER BY created_at DESC, rowid DESC`);
+        AND actor = 'scheduler' AND json_extract(metadata, '$.outcome') = 'success'
+        AND ((json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.action') IN ('post','reply','comment'))
+          OR (json_extract(metadata, '$.platform') = 'heybox' AND json_extract(metadata, '$.action') = 'reply')) ORDER BY created_at DESC, rowid DESC`);
       for (const row of rows) {
         if (filter && !filter.includes(row.created_at) || query && (!tokens.length || !conversationScore(row.content, tokens))) continue;
         const evidence = rawOwnExpressionEvidence(row.id);
@@ -2302,6 +2527,244 @@ export function createStore(dbPath) {
     },
     hasDelivery(key) {
       return Boolean(get('SELECT 1 FROM deliveries WHERE key = ?', text(key, '消息去重标识', 256)));
+    },
+    registerHeyboxThread(input) {
+      const thread = normalizeHeyboxThread(input), key = heyboxThreadKey(thread), now = new Date().toISOString();
+      return transaction(() => {
+        const existing = heyboxThreadRecord(key);
+        if (existing && heyboxThreadHash(Object.fromEntries(['accountId', 'postId', 'url', 'title', 'sourceEventId', 'sourceMemoryId'].map(field => [field, existing[field]]))) === heyboxThreadHash(thread)) return existing;
+        if (!discoverableHeyboxThread(thread.accountId, thread.postId)) invalid('小黑盒线程已登记或来源已更正、删除或屏蔽，不能自动重新收录。');
+        const previous = !existing && heyboxThreadRecord(key, false);
+        if (previous && (previous.sourceEventId === thread.sourceEventId || previous.sourceMemoryId === thread.sourceMemoryId)) invalid('小黑盒历史线程需要重新核验并保存新的本人帖子来源。');
+        const registration = { id: randomUUID(), ...eventFields({ type: 'heybox_thread', scope: heyboxThreadScope(thread), actor: 'scheduler', sourceRef: key,
+          content: '已登记核验通过的小黑盒本人帖子。', metadata: { version: 1, key, thread, hash: heyboxThreadHash(thread), state: 'registered' } }), createdAt: now };
+        insertEvent(registration);
+        const saved = heyboxThreadRecord(key);
+        if (!saved) invalid('小黑盒本人帖子缺少当前有效的账号、发布回读或书架来源。');
+        return saved;
+      });
+    },
+    canDiscoverHeyboxThread(accountId, postId) { return discoverableHeyboxThread(heyboxId(accountId), heyboxId(postId)); },
+    getHeyboxThread(key) { return heyboxThreadRecord(heyboxKey(key)); },
+    listHeyboxThreads(accountId, options = {}) {
+      accountId = heyboxId(accountId); record(options, '小黑盒线程列表');
+      if (Object.keys(options).some(key => key !== 'limit')) invalid('小黑盒线程列表参数无效。');
+      const limit = integer(options.limit ?? 20, '小黑盒线程条数', 1, 20);
+      return all("SELECT DISTINCT source_ref AS key FROM events WHERE type = 'heybox_thread' AND json_extract(metadata, '$.thread.accountId') = ? ORDER BY rowid DESC", accountId)
+        .map(row => heyboxThreadRecord(row.key)).filter(Boolean).slice(0, limit);
+    },
+    completeHeyboxBaseline(key, options) {
+      key = heyboxKey(key); record(options, '小黑盒首次评论基线');
+      if (Object.keys(options).length !== 2 || Object.keys(options).some(field => !['accountId', 'comments'].includes(field))
+        || !Array.isArray(options.comments) || options.comments.length > 20) invalid('小黑盒首次评论基线参数无效。');
+      const accountId = heyboxId(options.accountId), comments = options.comments.map(normalizeHeyboxComment), now = new Date().toISOString();
+      if (new Set(comments.map(comment => comment.commentId)).size !== comments.length) invalid('小黑盒首次评论基线包含重复真实编号。');
+      return transaction(() => {
+        const thread = heyboxThreadRecord(key);
+        if (!thread || thread.accountId !== accountId) invalid('小黑盒本人帖子或基线账号无法核对。');
+        if (!claimHeybox('baseline', thread.registrationEventId, now)) return { initialized: false };
+        for (const comment of comments) {
+          const received = receiveHeyboxSource(key, comment, now), item = received.record;
+          if (item?.state === 'received' && item.threadEventId === thread.registrationEventId) {
+            claimHeybox('decision', item.key, now); appendHeyboxState(item, 'quiet', now);
+          }
+        }
+        return { initialized: true };
+      });
+    },
+    receiveHeyboxComment(input) {
+      record(input, '小黑盒评论入站');
+      if (Object.keys(input).length !== 2 || Object.keys(input).some(key => !['threadKey', 'comment'].includes(key))) invalid('小黑盒评论入站参数无效。');
+      const threadKey = heyboxKey(input.threadKey), comment = normalizeHeyboxComment(input.comment), now = new Date().toISOString();
+      return transaction(() => {
+        const thread = heyboxThreadRecord(threadKey);
+        if (!thread || !heyboxClaimed('baseline', thread.registrationEventId)) return { inserted: false, record: null, skipped: 'baseline_required' };
+        return receiveHeyboxSource(threadKey, comment, now);
+      });
+    },
+    getHeyboxComment(key) { const item = heyboxRecord(heyboxKey(key)); return currentHeybox(item) ? item : null; },
+    getHeyboxReplyContext(key, options = {}) {
+      key = heyboxKey(key); record(options, '小黑盒同话题上下文');
+      if (Object.keys(options).some(field => field !== 'limit')) invalid('小黑盒同话题上下文参数无效。');
+      const limit = integer(options.limit ?? 6, '小黑盒同话题消息数', 1, 6), target = heyboxRecord(key);
+      if (!currentHeybox(target)) return null;
+      const state = conversationState([target.scope]), messages = new Map(state.messages.map(item => [item.id, item]));
+      const keys = new Set(all(`SELECT source_ref AS key FROM events WHERE type = 'message' AND scope = ?
+        AND json_extract(metadata, '$.heyboxComment.comment.rootId') = ?`, target.scope, target.comment.rootId).map(item => item.key));
+      const cache = new Map();
+      const evidence = message => {
+        if (!message) return null;
+        if (cache.has(message.id)) return cache.get(message.id);
+        let found = null;
+        const sourceKey = message.role === 'user' ? message.metadata.heyboxCommentKey : message.metadata.sourceCommentKey;
+        if (keys.has(sourceKey)) {
+          const item = heyboxRecord(sourceKey), source = item && eventRow(get('SELECT * FROM events WHERE id = ?', item.sourceEventId));
+          if (item && source && item.scope === target.scope && item.accountId === target.accountId && item.postId === target.postId
+            && item.comment.rootId === target.comment.rootId && readableHeybox(item)) {
+            if (message.role === 'user' && message.id === item.messageId && !state.blockedUsers.has(message.id)) {
+              found = { kind: 'peer', actor: item.actor, platformId: item.comment.commentId, message, source, sourceHash: item.sourceHash };
+            } else if (message.role === 'assistant' && message.actor === 'agent' && message.metadata.platform === 'heybox' && message.metadata.mode === 'live'
+              && message.metadata.replyTo === item.messageId && item.state === 'sent' && item.confirmation === 'reply_receipt'
+              && message.metadata.confirmation === item.confirmation && message.metadata.replyId === item.replyId
+              && message.metadata.replyHash === item.replyHash && item.replyHash === heyboxDigest(message.content)
+              && message.metadata.replyDependenciesHash === item.replyDependenciesHash && !state.hiddenAssistants.has(message.id)
+              && state.messages.filter(other => other.role === 'assistant' && other.metadata.sourceCommentKey === sourceKey).length === 1) {
+              found = { kind: 'self', actor: `heybox:${item.accountId}`, platformId: item.replyId, message, source, sourceHash: item.sourceHash,
+                receipt: { confirmation: item.confirmation, replyId: item.replyId, replyHash: item.replyHash, replyDependenciesHash: item.replyDependenciesHash } };
+            }
+          }
+        }
+        cache.set(message.id, found);
+        return found;
+      };
+      const ancestor = id => {
+        const row = get(`SELECT json_extract(metadata, '$.messageId') AS messageId FROM events WHERE type = 'message' AND scope = ?
+          AND json_extract(metadata, '$.heyboxComment.comment.commentId') = ? LIMIT 1`, target.scope, id);
+        const peer = evidence(messages.get(row?.messageId));
+        const own = state.messages.filter(item => item.role === 'assistant' && item.metadata.replyId === id).map(evidence).filter(Boolean);
+        return Number(Boolean(peer)) + own.length === 1 ? peer || own[0] : null;
+      };
+      const recent = [];
+      for (const message of state.messages) {
+        if (message.id === target.messageId || message.metadata.sourceCommentKey === target.key) continue;
+        const item = evidence(message);
+        if (item) recent.push(item);
+        if (recent.length === limit) break;
+      }
+      return { root: ancestor(target.comment.rootId), parent: target.comment.parentId === '0' ? null : ancestor(target.comment.parentId), recent: recent.reverse() };
+    },
+    listHeyboxComments(accountId, options = {}) {
+      accountId = heyboxId(accountId); record(options, '小黑盒待处理评论');
+      if (Object.keys(options).some(key => key !== 'limit')) invalid('小黑盒评论列表参数无效。');
+      const limit = integer(options.limit ?? 20, '小黑盒评论条数', 1, 20);
+      return heyboxSources(accountId).map(row => heyboxRecord(row.key)).filter(item => item?.state === 'received' && currentHeybox(item)).slice(0, limit);
+    },
+    beginHeyboxReply(key, options) {
+      key = heyboxKey(key); record(options, '小黑盒判断账号');
+      if (Object.keys(options).length !== 1 || Object.keys(options)[0] !== 'accountId') invalid('小黑盒判断账号参数无效。');
+      const accountId = heyboxId(options.accountId), now = new Date().toISOString();
+      return transaction(() => {
+        const item = heyboxRecord(key);
+        if (!item || item.accountId !== accountId || item.state !== 'received' || !currentHeybox(item) || !claimHeybox('decision', key, now)) return null;
+        return appendHeyboxState(item, 'processing', now);
+      });
+    },
+    beginHeyboxSend(key, options) {
+      key = heyboxKey(key); record(options, '小黑盒发送领取');
+      if (Object.keys(options).some(key => !['accountId', 'dayId', 'now'].includes(key))) invalid('小黑盒发送领取参数无效。');
+      const accountId = heyboxId(options.accountId), dayId = identifier(options.dayId, '公共表达当日 ID'), now = followupClock(options.now ?? Date.now()), time = Date.parse(now);
+      return transaction(() => {
+        const item = heyboxRecord(key), config = api.getSetting('selfExpression', {}), budget = api.getSetting('selfExpressionStatus', {}), platform = config.platforms?.heybox, counts = budget.platformAttempts?.heybox || {};
+        if (!item || item.accountId !== accountId || item.state !== 'processing' || !currentHeybox(item, time) || !heyboxClaimed('decision', key) || heyboxClaimed('send', key)
+          || !config.enabled || !platform?.enabled || platform.reply !== true || budget.dayId !== dayId
+          || !Number.isFinite(Date.parse(budget.dayStartAt)) || !Number.isFinite(Date.parse(budget.dayEndAt)) || time < Date.parse(budget.dayStartAt) || time >= Date.parse(budget.dayEndAt)) return null;
+        const limit = integer(config.dailyLimit, '公共表达每日上限', 0, 100), platformLimit = integer(platform.dailyLimit, '小黑盒公开表达每日上限', 0, 100);
+        const attempts = integer(budget.postAttempts, '公共表达次数', 0, Number.MAX_SAFE_INTEGER), publicAttempts = ['post', 'comment', 'reply'].reduce((sum, action) => sum + integer(counts[action] ?? 0, '小黑盒公开表达次数', 0, Number.MAX_SAFE_INTEGER), 0);
+        const unconfirmed = ['post', 'comment', 'reply'].some(action => ['pending', 'unknown', 'error'].includes(budget.outcomes?.heybox?.[action]?.outcome) && Date.parse(budget.outcomes.heybox[action].at) >= Date.parse(budget.dayStartAt));
+        if (attempts >= limit || publicAttempts >= platformLimit || unconfirmed || !claimHeybox('send', key, now)) return null;
+        const target = { targetKey: key, targetUrl: `https://www.xiaoheihe.cn/app/bbs/link/${item.postId}` };
+        api.setSetting('selfExpressionStatus', { ...budget, postAttempts: attempts + 1, platformAttempts: { ...budget.platformAttempts, heybox: { ...counts, reply: (counts.reply || 0) + 1 } },
+          outcomes: { ...budget.outcomes, heybox: { ...budget.outcomes?.heybox, reply: { outcome: 'pending', at: now, ...target } } }, lastOutcome: 'pending' });
+        insertEvent({ id: randomUUID(), ...eventFields({ type: 'self_expression', scope: 'owner', actor: 'scheduler', sourceRef: key, content: '开始执行小黑盒公开回复，本次已计入公共表达额度。',
+          metadata: { action: 'reply', platform: 'heybox', outcome: 'attempt', commentKey: key, ...target } }), createdAt: now });
+        return appendHeyboxState(item, 'sending', now);
+      });
+    },
+    finishHeyboxReply(key, state, options = {}) {
+      key = heyboxKey(key); record(options, '小黑盒回复结果');
+      if (!HEYBOX_REPLY_TERMINAL.includes(state) || Object.keys(options).some(key => !['sourceEventId', 'sourceHash', 'text', 'confirmation', 'replyId', 'now', 'memoryIds', 'conversationIds', 'historyMessageIds', 'userMessageIds', 'memoryVersions', 'ownExpressionVersions', 'archive'].includes(key))) invalid('小黑盒回复结束参数无效。');
+      if (options.archive !== undefined && (state !== 'sent' || typeof options.archive !== 'boolean')) invalid('小黑盒归档许可只用于已确认的回复。');
+      const sourceEventId = identifier(options.sourceEventId, '小黑盒原评论 ID'), sourceHash = heyboxKey(options.sourceHash), now = followupClock(options.now ?? Date.now());
+      const content = state === 'sent' ? text(options.text, '小黑盒已发送回复', 200) : '';
+      const confirmation = state === 'sent' ? { ...normalizeHeyboxConfirmation({ confirmation: options.confirmation, ...(options.replyId === undefined ? {} : { replyId: options.replyId }) }), replyHash: heyboxDigest(content) } : null;
+      if (confirmation && confirmation.confirmation !== 'reply_receipt') invalid('新回复必须取得真实平台回复编号。');
+      if (state !== 'sent' && ['text', 'confirmation', 'replyId'].some(field => options[field] !== undefined)) invalid('未确认的小黑盒回复不能记录成功内容。');
+      const refs = {};
+      for (const field of ['memoryIds', 'conversationIds', 'historyMessageIds']) {
+        const ids = options[field] ?? [];
+        if (!Array.isArray(ids) || ids.length > 100) invalid('小黑盒回复依赖无效。');
+        refs[field] = [...new Set(ids.map(id => identifier(id, '小黑盒回复依赖 ID')))].sort();
+      }
+      if (options.userMessageIds !== undefined) {
+        if (!Array.isArray(options.userMessageIds) || options.userMessageIds.length > 100) invalid('小黑盒用户消息依赖无效。');
+        const ids = [...new Set(options.userMessageIds.map(id => identifier(id, '小黑盒用户消息 ID')))].sort();
+        if (ids.length) refs.userMessageIds = ids;
+      }
+      for (const [field, key] of [['memoryVersions', 'memoryId'], ['ownExpressionVersions', 'expressionId']]) {
+        if (options[field] === undefined) continue;
+        if (!Array.isArray(options[field]) || options[field].length > 100) invalid('小黑盒回复版本依赖无效。');
+        const versions = new Map();
+        for (const version of options[field]) {
+          record(version, '小黑盒回复版本');
+          if (Object.keys(version).length !== 2 || !Object.hasOwn(version, key) || !Object.hasOwn(version, 'signature')
+            || typeof version.signature !== 'string' || !/^[a-f0-9]{64}$/.test(version.signature)) invalid('小黑盒回复版本无效。');
+          const id = identifier(version[key], '小黑盒版本来源 ID');
+          if (key === 'memoryId' && !refs.memoryIds.includes(id) || versions.has(id) && versions.get(id) !== version.signature) invalid('小黑盒回复版本来源不一致。');
+          versions.set(id, version.signature);
+        }
+        if (versions.size) refs[field] = [...versions].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([id, signature]) => ({ [key]: id, signature }));
+      }
+      if (Object.values(refs).reduce((sum, ids) => sum + ids.length, 0) > 100) invalid('小黑盒回复依赖过多。');
+      if (confirmation) confirmation.replyDependenciesHash = heyboxDigest(['heybox-reply-dependencies-v1', refs]);
+      const saved = transaction(() => {
+        const item = heyboxRecord(key);
+        if (!item || item.sourceEventId !== sourceEventId || item.sourceHash !== sourceHash) return null;
+        if (state === 'sent') {
+          if (!heyboxClaimed('send', key) || !['sending', 'unknown', 'sent'].includes(item.state)) return null;
+          if (item.state === 'sent') {
+            if (item.replyHash !== confirmation.replyHash || item.replyDependenciesHash !== confirmation.replyDependenciesHash
+              || item.confirmation !== confirmation.confirmation || item.replyId !== confirmation.replyId) return null;
+            if (options.archive === false) claimHeybox('archive-blocked', key, now);
+            return item;
+          }
+        } else if (HEYBOX_REPLY_TERMINAL.includes(item.state) || (state === 'unknown' ? item.state !== 'sending' : !['received', 'processing'].includes(item.state))) return null;
+        claimHeybox('decision', key, now);
+        if (state === 'sent' && options.archive === false) claimHeybox('archive-blocked', key, now);
+        return appendHeyboxState(item, state, now, confirmation);
+      });
+      if (!saved || state !== 'sent') return saved;
+      if (heyboxClaimed('archive-blocked', key)) return { ...saved, archived: false };
+      if (heyboxClaimed('archive', key)) {
+        const assistantMessageId = heyboxArchivedReplyId(saved);
+        return { ...saved, archived: Boolean(assistantMessageId), ...(assistantMessageId ? { assistantMessageId } : {}) };
+      }
+      if (!currentHeybox(saved)) return { ...saved, archived: false };
+      const thread = heyboxThreadRecord(saved.threadKey), scopes = [saved.scope, 'public'];
+      const memories = refs.memoryIds.map(id => api.getMemory(id));
+      const validRefs = memories.every(memory => memory && !memory.deletedAt && scopes.includes(memory.scope)
+        && (memory.sourceType !== 'conversation' || !get('SELECT 1 FROM conversation_blocks WHERE scope = ? AND event_id = ?', memory.scope, memory.sourceRef)))
+        && refs.conversationIds.every(id => get(`SELECT 1 FROM messages WHERE id = ? AND role = 'user' AND scope IN (?, ?)`, id, ...scopes))
+        && refs.historyMessageIds.every(id => get(`SELECT 1 FROM messages WHERE id = ? AND role = 'assistant' AND scope IN (?, ?)`, id, ...scopes))
+        && (refs.userMessageIds || []).every(id => get(`SELECT 1 FROM messages WHERE id = ? AND role = 'user' AND scope IN (?, ?)`, id, ...scopes))
+        && (refs.memoryVersions || []).every(version => memoryVersionEvidence(version.memoryId, scopes)?.signature === version.signature)
+        && (refs.ownExpressionVersions || []).every(version => api.getOwnExpressionEvidence(version.expressionId)?.signature === version.signature);
+      if (!thread || !validRefs) return { ...saved, archived: false };
+      try {
+        return transaction(() => {
+          if (!claimHeybox('archive', key, now)) return { ...saved, archived: true, assistantMessageId: heyboxArchivedReplyId(saved) };
+          const assistantMessageId = randomUUID();
+          insertMessage({ id: assistantMessageId, ...messageFields({ scope: saved.scope, role: 'assistant', actor: 'agent', content,
+            metadata: { mode: 'live', platform: 'heybox', sourceCommentKey: key, replyTo: saved.messageId,
+              memoryIds: [...new Set([thread.sourceMemoryId, ...refs.memoryIds])], conversationIds: [...new Set([saved.messageId, ...refs.conversationIds])], historyMessageIds: refs.historyMessageIds,
+              ...(refs.userMessageIds ? { userMessageIds: refs.userMessageIds } : {}), ...(refs.memoryVersions ? { memoryVersions: refs.memoryVersions } : {}),
+              ...(refs.ownExpressionVersions ? { ownExpressionVersions: refs.ownExpressionVersions } : {}),
+              ...confirmation } }), createdAt: now });
+          insertMemory({ id: randomUUID(), ...memoryFields({ title: `小黑盒公开交流：${thread.title}`.slice(0, 200), scope: saved.scope, category: 'event',
+            content: `【小黑盒公开评论；已回复并取得客户端或平台确认】\n对方写道：${saved.comment.text}\n来源：${thread.url}`, sourceType: 'conversation', sourceRef: saved.sourceEventId }), createdAt: now, updatedAt: now, deletedAt: null });
+          return { ...saved, archived: true, assistantMessageId };
+        });
+      } catch { return { ...saved, archived: false }; }
+    },
+    recoverHeyboxReplies() {
+      return transaction(() => {
+        const now = new Date().toISOString(); let interrupted = 0, unknown = 0;
+        for (const { key } of all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_type(metadata, '$.heyboxComment') = 'object'")) {
+          const item = heyboxRecord(key);
+          if (item?.state === 'processing') { appendHeyboxState(item, 'interrupted', now); interrupted++; }
+          else if (item?.state === 'sending') { appendHeyboxState(item, 'unknown', now); unknown++; }
+        }
+        return { interrupted, unknown };
+      });
     },
     receiveBiliNotice(input) {
       record(input, 'B站通知');
@@ -3008,9 +3471,18 @@ export function createStore(dbPath) {
         if (revisions.length > 100000 || total > 250000) invalid('保留本机记忆修订后，备份记录超过容量上限。');
         const restoredAt = new Date().toISOString();
         const previousCompanion = api.getSetting('companionState', null);
+        for (const row of all("SELECT DISTINCT source_ref AS key FROM events WHERE type = 'heybox_thread'")) {
+          const previous = heyboxThreadRecord(row.key, false);
+          if (previous && !heyboxThreadRecord(row.key, true, previous.registrationEventId, true)) claimHeybox('thread-invalidated', row.key, restoredAt);
+        }
         // Restored social inbox entries are history, never a renewed permission to publish.
         for (const item of [...all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_type(metadata, '$.biliNotice') = 'object'"),
           ...events.filter(item => item.metadata.biliNotice).map(item => ({ key: item.metadata.biliNotice.key }))]) claimBili('history', biliKey(item.key), restoredAt);
+        for (const item of [...all("SELECT source_ref AS key FROM events WHERE type = 'message' AND json_type(metadata, '$.heyboxComment') = 'object'"),
+          ...events.filter(item => item.metadata.heyboxComment).map(item => ({ key: item.metadata.heyboxComment.key }))]) claimHeybox('history', heyboxKey(item.key), restoredAt);
+        for (const item of [...all("SELECT id FROM events WHERE type = 'heybox_thread'"), ...events.filter(item => item.type === 'heybox_thread')]) {
+          claimHeybox('thread-history', identifier(item.id, '小黑盒线程注册 ID'), restoredAt);
+        }
         // Local terminal records survive even backups that predate the followup or its source memory.
         const mergedFollowups = new Map(followups.map(item => [item.id, item]));
         for (const row of all("SELECT * FROM followups WHERE status IN ('attempted', 'sent', 'unknown', 'cancelled', 'expired', 'invalidated')")) {
@@ -3048,6 +3520,10 @@ export function createStore(dbPath) {
         // This table is never cleared: even backups made before a memory existed cannot undo its block.
         for (const item of conversationBlocks) insertConversationBlock(item.scope, item.eventId, item.blockedAt);
         backfillConversationBlocks();
+        for (const row of all("SELECT DISTINCT source_ref AS key FROM events WHERE type = 'heybox_thread'")) {
+          const previous = heyboxThreadRecord(row.key, false);
+          if (previous && !heyboxThreadRecord(row.key, true, previous.registrationEventId, true)) claimHeybox('thread-invalidated', row.key, restoredAt);
+        }
         // Account mappings remain in the export for review, but must be verified again after restore.
         // In particular, an old backup must not reactivate a revoked owner account.
         for (const [id, deletedAt] of deleted) run('INSERT INTO tombstones VALUES (?, ?)', id, deletedAt);

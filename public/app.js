@@ -628,6 +628,11 @@ function renderSelfExpressionStatus(status = {}) {
         : biliSocial?.enabled ? '独立社交宿主已启用，账号与目标在执行时核验。' : '独立社交宿主尚未启用；尚未安装时请先按部署说明配置。';
   const inboxSummary = bilibili.reply ? `通知检查机会间隔 ${bilibili.inboxIntervalMinutes ?? 3} 分钟，沿用表达欲与活跃时段。` : '通知回复尚未启用。';
   $('self-expression-bilibili-summary').textContent = `${inboxSummary}本机视频读取凭据${(biliAccount?.readReady ?? biliAccount?.configured) ? '已保存' : '未保存'}，社交凭据${biliAccount?.socialReady ? '已保存' : '尚未齐备'}。${socialSummary}这些状态不证明平台登录有效、提交通过审核或公开可见。`;
+  const heyboxRuntime = state.data?.heyboxSocialStatus;
+  $('heybox-social-summary').textContent = state.data?.heyboxAccountStatus?.browserOpen ? '登录窗口已打开，正常登录并保存后继续自主讨论。'
+    : !state.data?.heyboxAccountStatus?.configured ? '评论与回复需要先配置栖忆专用账号。'
+      : heyboxRuntime?.busy ? '正在查看或处理本轮小黑盒讨论。'
+        : heyboxRuntime?.available === false ? '专用浏览器暂不可用，请查看本机活动记录。' : '已配置专用浏览器，账号与帖子会在操作时重新核对；巡查与回复按自主节奏进行。';
   const outcomes = { success: '已确认完成', review: '已提交，待平台审核', unknown: '结果未确认', error: '未能完成', pending: '等待平台确认', quiet: '这次保持安静', limit: '暂无可执行动作', missed: '错过的机会已跳过', checking: '正在检查平台连接', unavailable: '平台接入暂不可用', deciding: '正在思考', decided: '已形成想法', busy: '等空闲时再表达', cancelled: '已取消' };
   const actionNames = { post: '空间动态', signature: '签名', avatar: '头像' };
   const avatarNames = { hello: '打招呼', happy: '开心', thinking: '思考', comfort: '安慰' };

@@ -169,14 +169,15 @@
                 <div class="field-row"><label>QQ 每天动态上限<input id="self-expression-qq-daily-limit" type="number" min="0" max="100" required></label><label>空间动态可见范围<select id="self-expression-qq-visibility"><option value="4">好友可见</option><option value="1">所有人可见</option><option value="64">仅自己可见</option></select></label></div>
                 <p class="caption">签名每天最多尝试更新 1 次；头像遵循上方间隔。未确认结果的操作不会自动重试。</p>
               </div>
-              <div class="self-expression-platform-settings"><h3>小黑盒</h3><p class="caption">使用本机配置的栖忆专用账号，需要 Windows 上的专用 MuMu 设备在线并已登录。创建人账号不用于发帖。</p>
+              <div class="self-expression-platform-settings"><h3>小黑盒</h3><p class="caption">使用栖忆的专用账号。评论与回复使用专用浏览器，发帖继续使用 Windows 上的专用 MuMu 设备；创建人账号与执行账号分别保存。</p>
                 <p id="heybox-account-summary" class="caption" role="status">正在读取小黑盒专用浏览器状态…</p>
+                <p id="heybox-social-summary" class="caption" role="status"></p>
                 <div class="field-row"><button id="heybox-login" class="button secondary" type="button">登录栖忆专用小黑盒账号</button><button id="heybox-login-confirm" class="button secondary" type="button" disabled>完成登录与验证，保存状态</button></div>
-                <p class="caption">使用本机独立浏览器窗口，由你正常登录并完成验证码等验证后确认保存。Windows 使用已安装的 Google Chrome，Linux 需要完整 Chromium 和图形桌面。确认时会向小黑盒官网只读核验当前账号，核验一致后才保存。此登录供项目核对专用执行账号，与“身份与备份”中的创建人账号绑定独立；Cookie 只保存在本机，不发送给模型。保存状态不代表当前认证仍有效，也不会开启下列业务开关；现有客户端动作仍需要专用 MuMu。</p>
+                <p class="caption">使用本机独立浏览器窗口，由你正常登录并完成验证码等验证后确认保存。Windows 使用已安装的 Google Chrome，Linux 需要完整 Chromium 和图形桌面。确认时会向小黑盒官网只读核验当前账号，核验一致后才保存。此登录供项目核对专用执行账号，与“身份与备份”中的创建人账号绑定独立；Cookie 只保存在本机，不发送给模型。保存状态不会开启下列业务开关。开启后由项目自行巡查和表达，每次操作重新核对账号；浏览器评论与回复无需启动 MuMu。</p>
                 <label class="check-label"><input id="self-expression-heybox-enabled" type="checkbox">允许在小黑盒自主表达</label>
-                <div class="self-expression-options"><label class="check-label"><input id="self-expression-heybox-post" type="checkbox">发帖</label><label class="check-label"><input id="self-expression-heybox-comment" type="checkbox">评论已读帖子</label><label class="check-label"><input id="self-expression-heybox-reply" type="checkbox">回复已读评论</label></div>
+                <div class="self-expression-options"><label class="check-label"><input id="self-expression-heybox-post" type="checkbox">发帖</label><label class="check-label"><input id="self-expression-heybox-comment" type="checkbox">评论已读帖子</label><label class="check-label"><input id="self-expression-heybox-reply" type="checkbox">回复评论与本人帖新留言</label></div>
                 <div class="field-row"><label>小黑盒每天公开表达上限<input id="self-expression-heybox-daily-limit" type="number" min="0" max="100" required></label><label>发帖分区<input id="self-expression-heybox-topic" maxlength="40" required placeholder="分区的准确名称"></label></div>
-                <p class="caption">每次机会最多选择一项公开表达，也可以保持安静。评论与回复默认关闭，开启后只针对已读公开帖子及可重新核对的主评论；不批量跟帖。失败和结果未确认也计次，不自动重发。</p>
+                <p class="caption">每次机会最多选择一项公开表达，也可以保持安静。评论与回复默认关闭；首次巡查只记下已有留言，之后的新评论才考虑回复。讨论会保留原帖、发言者和上下文。失败和结果未确认也计次，不自动重发。</p>
               </div>
               <div class="self-expression-platform-settings"><h3>B站</h3><p class="caption">使用栖忆专用 B站账号与独立社交宿主，账号登录在下方“DSH 插件运行层”中设置。安装方法见部署说明的“B站视频评论通知回复”。支持原创纯文字动态、浏览后的视频评论、评论回复通知和 @ 提及，不接入私信。</p>
                 <label class="check-label"><input id="self-expression-bilibili-enabled" type="checkbox">允许在 B站自主表达</label>

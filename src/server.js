@@ -50,7 +50,12 @@ import { createAutonomyControlActions } from './autonomy-controls.js';
 import { readBiliCredentials } from './bili-credentials.js';
 import { createBiliSocialRuntime } from './bili-social-runtime.js';
 import { createBiliSocialDiscussion } from './bili-social.js';
-import { generateBiliSocialDecision } from './bili-social-agent.js';
+import { generateBiliSocialDecision, generateHeyboxSocialDecision } from './bili-social-agent.js';
+import { createHeyboxBrowserRuntime } from './heybox-browser.js';
+import { createHeyboxThreadDiscovery } from './heybox-discovery.js';
+import { createHeyboxSocialDiscussion } from './heybox-social.js';
+import { readHeyboxCredentials } from './heybox-credentials.js';
+import { heyboxCommentKey } from './heybox-thread.js';
 import { defaultFeishuSettings, normalizeFeishuSettings } from './feishu-message.js';
 import { createFeishuChat } from './feishu.js';
 import { createFeishuRuntime } from './feishu-runtime.js';
@@ -71,6 +76,12 @@ const heyboxAccount = createHeyboxAccount({ dataDir, getExpectedAccountId: () =>
   try { return JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')).expectedAccountId; }
   catch { throw new Error('小黑盒专用环境配置无法读取，请核对本机配置后重新确认登录。'); }
 } });
+const heyboxCredentials = () => readHeyboxCredentials({ dataDir });
+const heyboxBrowser = createHeyboxBrowserRuntime({ dataDir, getCredentials: heyboxCredentials });
+const discoverHeyboxThreads = createHeyboxThreadDiscovery({ store, getCredentials: heyboxCredentials, reader: heyboxBrowser });
+const getHeyboxDiscussion = createHeyboxSocialDiscussion({ store, getCredentials: heyboxCredentials,
+  readDiscussion: (url, options) => heyboxBrowser.readDiscussion(url, options),
+  onReplyDelivered: (scope, messageId) => moodJobs?.observeConversation(scope, messageId) });
 const biliSocialRuntime = createBiliSocialRuntime({ dataDir, getCredentials: () => readBiliCredentials({ dataDir, social: true }) });
 const getBiliDiscussion = createBiliSocialDiscussion({ store, runtime: biliSocialRuntime, getCredentials: () => readBiliCredentials({ dataDir, social: true }),
   onReplyDelivered: (scope, messageId) => moodJobs?.observeConversation(scope, messageId) });
@@ -210,28 +221,53 @@ function makeAutonomyJobs() {
 autonomyJobs = makeAutonomyJobs();
 
 function makeSelfExpressionJobs() {
+  const publicDiscussions = new Map();
+  const browserReady = () => {
+    const account = heyboxAccount.status();
+    return heyboxBrowser.status().available === true && account.configured === true && !account.browserOpen;
+  };
+  const mumuReady = async () => {
+    try { const value = await heyboxRuntime().check(); return value.configured === true && value.booted === true && value.heyboxInstalled === true; }
+    catch { return false; }
+  };
   return createSelfExpressionJobs({ store, platforms: expressionPlatforms,
+    getAvailableActions: async (platform, actions, { signal }) => {
+      signal.throwIfAborted();
+      if (platform !== 'heybox') return actions;
+      const web = browserReady(), nativePost = actions.includes('post') && await mumuReady();
+      signal.throwIfAborted();
+      return actions.filter(action => action === 'post' ? nativePost : ['comment', 'reply'].includes(action) && web);
+    },
     canUsePlatform: platform => {
       if (platform === 'qq') return store.getSetting('qq').enabled;
       if (platform === 'bilibili') return biliSocialRuntime.status().enabled && biliAccount.status().socialReady;
+      if (browserReady()) return true;
       try { return Boolean(heyboxRuntime()); } catch { return false; }
     },
     isPlatformReady: async (platform, { signal }) => {
       signal.throwIfAborted();
       if (platform === 'qq') return (await testQQ(signal)).ok === true;
       if (platform === 'bilibili') return biliSocialRuntime.status().ready === true;
-      const state = await heyboxRuntime().check();
+      const ready = browserReady() || await mumuReady();
       signal.throwIfAborted();
-      return state.configured === true && state.booted === true && state.heyboxInstalled === true;
+      return ready;
     },
     getAvatars: platform => platform === 'qq' ? getExpressionCatalog().filter(entry => ['hello', 'happy', 'thinking', 'comfort'].includes(entry.id)) : [],
     getDiscussion: async (reading, { signal }) => {
-      const runtime = heyboxRuntime();
-      await runtime.openHeybox(); signal.throwIfAborted();
-      return runtime.readHeyboxComments(reading.url, { expectedTitle: reading.title, signal });
+      const data = await heyboxBrowser.readDiscussion(reading.url, { signal });
+      signal.throwIfAborted();
+      if (data.title.slice(0, 300) !== reading.title) throw new Error('小黑盒原帖标题已变化，本轮不评论。');
+      const comments = data.comments.slice(0, 6);
+      publicDiscussions.clear();
+      publicDiscussions.set(reading.url, { data, credentialSnapshot: JSON.stringify(heyboxCredentials()),
+        comments: new Map(comments.map(comment => [heyboxCommentKey(data, comment), comment])) });
+      return { url: reading.url, title: reading.title, readAt: data.readAt, truncated: true, postText: data.text,
+        comments: comments.map(comment => ({ key: heyboxCommentKey(data, comment), author: comment.author, text: comment.text })) };
     },
+    getHeyboxDiscussion: async options => { await discoverHeyboxThreads(options); return getHeyboxDiscussion(options); },
     getBiliDiscussion,
     generate: async ({ instructions, signal, memoryAccess, ...context }) => {
+      if (Object.hasOwn(context, 'heyboxDiscussion')) return generateHeyboxSocialDecision({ store, instructions, context, memoryAccess, signal });
       if (Object.hasOwn(context, 'biliDiscussion')) {
         if (typeof memoryAccess?.execute !== 'function' || typeof memoryAccess?.current !== 'function') throw new Error('B站回复缺少可核对的公开线程记忆访问，本次不执行。');
         return generateBiliSocialDecision({ store, instructions, context, memoryAccess, signal });
@@ -265,12 +301,23 @@ function makeSelfExpressionJobs() {
         if (!['post', 'comment', 'reply'].includes(action)) throw new Error('小黑盒当前不支持此表达动作。');
         const settings = normalizeExpressionSettings({}, store.getSetting('selfExpression'), expressionPlatforms);
         if (!settings.enabled || !settings.platforms.heybox.enabled || !settings.platforms.heybox[action]) throw new Error('小黑盒此自主表达动作尚未启用。');
-        const runtime = heyboxRuntime();
-        await runtime.openHeybox(); signal.throwIfAborted();
-        const policy = { signal, dailyLimit: Math.min(settings.dailyLimit, settings.platforms.heybox.dailyLimit), cooldownMinutes: settings.cooldownMinutes, timeZone: settings.timeZone };
-        if (action === 'post') return runtime.publishHeyboxPost({ title: payload.title, text: payload.text, topic: settings.platforms.heybox.topic }, policy);
-        if ((action === 'reply') !== Boolean(payload.replyTo)) throw new Error('评论动作和回复目标不一致。');
-        return runtime.publishHeyboxComment(payload, policy);
+        signal.throwIfAborted();
+        if (action === 'post') {
+          const runtime = heyboxRuntime();
+          await runtime.openHeybox(); signal.throwIfAborted();
+          return runtime.publishHeyboxPost({ title: payload.title, text: payload.text, topic: settings.platforms.heybox.topic },
+            { signal, dailyLimit: Math.min(settings.dailyLimit, settings.platforms.heybox.dailyLimit), cooldownMinutes: settings.cooldownMinutes, timeZone: settings.timeZone });
+        }
+        if (action === 'reply' && payload.comment) return heyboxBrowser.reply({ ...payload, signal, beforeSend });
+        const observed = publicDiscussions.get(payload.url);
+        if (!observed || observed.credentialSnapshot !== JSON.stringify(heyboxCredentials()) || observed.data.title.slice(0, 300) !== payload.title) throw new Error('小黑盒本轮讨论来源已失效。');
+        const data = observed.data;
+        const target = { accountId: data.accountId, postId: data.postId, url: data.url, title: data.title,
+          postText: data.text, postAuthorId: data.authorId, text: payload.text, signal, beforeSend };
+        if (action === 'comment' && !payload.replyTo) return heyboxBrowser.comment(target);
+        const comment = observed.comments.get(payload.replyTo?.key);
+        if (action !== 'reply' || !comment || comment.author !== payload.replyTo.author || comment.text !== payload.replyTo.text) throw new Error('小黑盒评论动作或真实回复目标不一致。');
+        return heyboxBrowser.reply({ ...target, comment });
       }
       const config = store.getSetting('qq');
       if (platform !== 'qq' || !config.enabled) throw new Error('此平台尚未启用。');
@@ -1209,7 +1256,7 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/books/file' ? Math.ceil(BOOK_FILE_MAX_BYTES / 3) * 4 + 4096 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), speechStatus: speechRuntime.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), speechStatus: speechRuntime.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), heyboxSocialStatus: heyboxBrowser.status(), biliSocialStatus: biliSocialRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
       if (path === '/api/mate/reset' && req.method === 'POST') {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) return json(res, 400, { error: '重置陪伴节奏不接受额外参数。' });
         if (proactiveJobs.status().busy || mateRuntime.status().busy) return json(res, 409, { error: '请等待当前主动私聊判断完成后重置节奏。' });
@@ -1218,7 +1265,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (path === '/api/feishu/reconnect' && req.method === 'POST') { feishuChat.disconnect(); await feishuRuntime.restart(); return json(res, 200, { status: feishuChat.status(), connection: feishuRuntime.status() }); }
       if (path === '/api/heybox/account' && req.method === 'GET') return json(res, 200, heyboxAccount.status());
-      if (path === '/api/heybox/login' && req.method === 'POST') return json(res, 200, await heyboxAccount.openLogin());
+      if (path === '/api/heybox/login' && req.method === 'POST') {
+        if (heyboxBrowser.status().busy) return json(res, 409, { error: '小黑盒正在核对或处理本轮讨论，请稍后再打开登录窗口。' });
+        return json(res, 200, await heyboxAccount.openLogin());
+      }
       if (path === '/api/heybox/login/confirm' && req.method === 'POST') return json(res, 200, await heyboxAccount.confirmLogin());
       if (path === '/api/bili/login' && req.method === 'POST') return json(res, 200, await biliAccount.openLogin());
       if (path === '/api/bili/login/confirm' && req.method === 'POST') return json(res, 200, await biliAccount.confirmLogin());
@@ -1437,5 +1487,5 @@ server.listen(port, '127.0.0.1', () => {
   void feishuChat.start().then(() => feishuRuntime.start()).catch(() => {});
   if (!store.getSetting('admin')) console.log(`Setup key file: ${setupKeyPath}`);
 });
-server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
+server.on('error', async error => { console.error(error.code === 'EADDRINUSE' ? `端口 ${port} 已被占用。` : error.message); clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); await Promise.allSettled([qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(), feishuChat.stop(), biliSocialRuntime.stop(), heyboxBrowser.stop()]); await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exitCode = 1; });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { clearInterval(timer); closing = true; pendingOwnerConversation?.cancel(new Error('服务正在关闭，未开始新的对话。')); scheduledReadingController?.abort(); cancelQQ(); backupJobs.stop(); autonomyJobs.stop(); selfExpressionJobs.stop(); bookJobs.stop(); proactiveJobs.stop(); moodJobs.stop(); chatMemoryJobs.stop(); const stopped = Promise.all([qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuChat.stop(), feishuRuntime.stop(), biliSocialRuntime.stop(), heyboxBrowser.stop()]); server.close(async () => { await stopped; await Promise.allSettled([biliAccount.close(), heyboxAccount.close()]); store.close(); process.exit(0); }); setTimeout(() => process.exit(0), 10000).unref(); });
