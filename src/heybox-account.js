@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { closeSync, lstatSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { normalizeHeyboxCredentials, readHeyboxCredentials } from './heybox-credentials.js';
+import { verifyHeyboxSession } from './heybox-session.js';
 
 const HOME = 'https://www.xiaoheihe.cn/app/bbs/home';
 const COOKIE_URLS = [HOME, 'https://api.xiaoheihe.cn/'];
@@ -14,7 +15,7 @@ export function createHeyboxAccount({ dataDir, getExpectedAccountId = () => unde
   const directory = resolve(dataDir);
   const credentialsPath = join(directory, 'heybox-credentials.json');
   const profilePath = join(directory, 'heybox-browser');
-  let context, startPromise, confirmPromise, closePromise, generation = 0;
+  let context, startPromise, confirmPromise, closePromise, verificationController, generation = 0;
 
   function status() {
     let credentials;
@@ -45,6 +46,7 @@ export function createHeyboxAccount({ dataDir, getExpectedAccountId = () => unde
   function close() {
     if (closePromise) return closePromise;
     generation++;
+    verificationController?.abort();
     const pendingStart = startPromise;
     closePromise = (async () => {
       await pendingStart?.catch(() => {});
@@ -102,6 +104,7 @@ export function createHeyboxAccount({ dataDir, getExpectedAccountId = () => unde
     if (confirmPromise) return confirmPromise;
     const pendingStart = startPromise, pendingClose = closePromise, expectedGeneration = generation;
     confirmPromise = (async () => {
+      let verifiedAt, verification;
       try {
         const expectedAccountId = getExpectedAccountId();
         await pendingClose;
@@ -118,14 +121,22 @@ export function createHeyboxAccount({ dataDir, getExpectedAccountId = () => unde
           entries.push(`${item.name}=${item.value}`);
         }
         const credentials = normalizeHeyboxCredentials({ accountId: cookies.find(item => item.name === 'heybox_id')?.value, cookie: entries.join('; ') }, { expectedAccountId });
-        if (context !== opened || generation !== expectedGeneration || closePromise || getExpectedAccountId() !== expectedAccountId) throw new Error('LOGIN_CONTEXT_CHANGED');
+        const assertCurrent = () => {
+          if (context !== opened || generation !== expectedGeneration || closePromise || getExpectedAccountId() !== expectedAccountId) throw new Error('LOGIN_CONTEXT_CHANGED');
+        };
+        assertCurrent();
+        verificationController = verification = new AbortController();
+        const verified = await verifyHeyboxSession(credentials, { expectedAccountId, signal: verification.signal });
+        assertCurrent();
         saveCredentials(credentials, expectedAccountId);
+        verifiedAt = verified.verifiedAt;
       } catch {
         throw new Error('未保存小黑盒专用账号；请在专用窗口完成正常登录和验证，并核对执行账号后重新确认。');
       } finally {
+        if (verificationController === verification) verificationController = undefined;
         await close();
       }
-      return status();
+      return { ...status(), verifiedAt };
     })().finally(() => { confirmPromise = undefined; });
     return confirmPromise;
   }

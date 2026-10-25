@@ -1089,7 +1089,7 @@ $('heybox-login').addEventListener('click', () => action($('heybox-login'), asyn
 $('heybox-login-confirm').addEventListener('click', () => action($('heybox-login-confirm'), async () => {
   try {
     const result = await api('/api/heybox/login/confirm', { method: 'POST', data: {} });
-    toast(result.configured ? '小黑盒专用账号登录状态已保存在本机；有效性仍需后续核对。' : '确认已结束，请核对专用账号配置后重试。', !result.configured);
+    toast(result.configured && result.verifiedAt ? '已核验当前小黑盒专用账号并保存登录状态；核验只代表本次结果。' : '确认已结束，请核对专用账号配置后重试。', !(result.configured && result.verifiedAt));
   } finally { await loadState(); }
 }).finally(() => { $('heybox-login-confirm').disabled = !state.data?.heyboxAccountStatus?.browserOpen; }));
 $('bili-login-confirm').addEventListener('click', () => action($('bili-login-confirm'), async () => {
