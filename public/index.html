@@ -68,11 +68,11 @@
             <div class="section-heading compact-heading"><h2 id="self-expression-title">她的自主表达</h2><button id="refresh-self-expression" class="text-button" type="button">刷新状态 ↻</button></div>
             <p id="self-expression-summary" class="muted">正在读取安排…</p>
             <div class="self-expression-mood"><span class="caption">最近一次表达的状态</span><strong id="self-expression-mood">还没有表达状态</strong><p id="self-expression-reason" class="muted">有想法时，也可以选择安静。</p></div>
-            <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次表达机会</dt><dd id="self-expression-next">等待安排</dd></div><div><dt>今日公开表达尝试</dt><dd id="self-expression-count">0 次</dd></div><div><dt>最近结果</dt><dd id="self-expression-outcome">还没有记录</dd></div></dl>
+            <dl class="autonomy-overview" aria-live="polite"><div><dt>下一次表达机会</dt><dd id="self-expression-next">等待安排</dd></div><div><dt>今日公开操作尝试</dt><dd id="self-expression-count">0 次</dd></div><div><dt>最近结果</dt><dd id="self-expression-outcome">还没有记录</dd></div></dl>
             <p id="self-expression-decisions" class="caption"></p><div id="self-expression-platform-status" class="self-expression-platform-status"></div>
             <div id="self-expression-recent" class="self-expression-recent" hidden></div><p id="self-expression-error" class="connection-result error" role="status" hidden></p>
-            <div class="autonomy-actions"><button id="self-expression-run" class="button secondary" type="button">安排一次表达机会 <span>↗</span></button><button class="text-button" type="button" data-goto="settings">调整表达习惯 <span>↗</span></button></div>
-            <p class="caption autonomy-note">这次机会也受表达欲和次数限制，可能保持安静。内容只来自原创感想与已读公开帖子；不使用私聊、群聊内容或群友图片。</p>
+            <div class="autonomy-actions"><button id="self-expression-run" class="button secondary" type="button">补充一次表达机会 <span>↗</span></button><button class="text-button" type="button" data-goto="settings">调整表达习惯 <span>↗</span></button></div>
+            <p class="caption autonomy-note">她会按情绪、兴趣和已有随机机会自主表达，也可以保持安静。后台主要配置和查看状态，此按钮用于调试或补充，仍受表达欲和次数限制。内容只来自原创感想与已读公开资料；不使用私聊、群聊内容或群友图片。</p>
           </section>
           <div class="reading-grid"><div><form id="read-form" class="panel padded"><h2>今天，读一点什么？</h2><label>网页地址<input id="read-url" type="url" placeholder="https://…" required></label><label>保存到<select id="read-scope"><option value="owner">仅创建人可用的记忆</option><option value="public">公开记忆</option></select></label><p class="caption">支持可直接访问的网页正文。需要登录、交互或播放的内容可能无法读取。</p><button id="read-submit" class="button primary" type="submit">阅读并保存 <span>↗</span></button></form><div class="panel padded reading-status"><p class="eyebrow">READING RHYTHM</p><h3>定时阅读</h3><p id="reading-schedule-summary" class="muted">尚未启用</p><button class="text-button" data-goto="settings">前往设置 <span>↗</span></button></div></div><div id="reading-result" class="panel padded article-preview"><div class="empty-state"><span class="empty-symbol">◎</span><h3>下一段经历，从这里开始。</h3><p>读取成功后，标题、正文摘录和来源会显示在这里，并保存进记忆书架。</p></div></div></div>
           <div class="section-heading"><h2>最近的经历</h2><button id="refresh-events" class="text-button">刷新 ↻</button></div><div id="event-list" class="panel event-list"></div>
@@ -158,15 +158,15 @@
             <section id="self-expression-settings" class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">07</span><h2>自主表达</h2><p class="muted">有自己的表达节奏，也留一些安静的时间。</p></div><div class="settings-fields">
               <label class="check-label"><input id="self-expression-enabled" type="checkbox">启用自主表达</label>
               <label>表达欲（0–100）<input id="self-expression-desire" type="number" min="0" max="100" required><small>每次机会按这个百分比决定是否思考表达；0 表示不主动表达，100 也可以由她选择安静。</small></label>
-              <div class="field-row"><label>每天公开表达总上限（全平台合计）<input id="self-expression-daily-limit" type="number" min="0" max="100" required></label><label>自动表达机会间隔（分钟）<input id="self-expression-cooldown" type="number" min="60" max="1440" required></label></div>
-              <p class="caption">动态、评论和回复共用每日额度，默认 80 次，可自定义为 0–100。每个平台还有自己的上限；设为 0 停止这三类公开表达。尝试失败也计次。</p>
+              <div class="field-row"><label>每天公开操作总上限（全平台合计）<input id="self-expression-daily-limit" type="number" min="0" max="100" required></label><label>自动表达机会间隔（分钟）<input id="self-expression-cooldown" type="number" min="60" max="1440" required></label></div>
+              <p class="caption">发帖、评论、回复、头像、签名、昵称六类公开操作共用每日额度，默认 80 次，可自定义为 0–100。每个平台还有自己的上限；设为 0 不再新增这六类操作。尝试失败和结果未确认也计次。</p>
               <div class="field-row"><label>活跃时段开始（整点）<input id="self-expression-start-hour" type="number" min="0" max="23" required></label><label>活跃时段结束（整点）<input id="self-expression-end-hour" type="number" min="1" max="24" required></label></div>
               <label>表达时区<input id="self-expression-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"></label>
               <label>更换头像的最短间隔（天）<input id="self-expression-avatar-days" type="number" min="7" max="30" required><small>至少间隔 7 天；头像只选已有的人设素材，不使用聊天图片。</small></label>
               <div class="self-expression-platform-settings"><h3>QQ</h3><p class="caption">使用「QQ 接入」中配置的机器人账号。</p>
                 <label class="check-label"><input id="self-expression-qq-enabled" type="checkbox">允许在 QQ 自主表达</label>
                 <div class="self-expression-options"><label class="check-label"><input id="self-expression-qq-post" type="checkbox">发布空间动态</label><label class="check-label"><input id="self-expression-qq-signature" type="checkbox">更新签名</label><label class="check-label"><input id="self-expression-qq-avatar" type="checkbox">更换头像</label></div>
-                <div class="field-row"><label>QQ 每天动态上限<input id="self-expression-qq-daily-limit" type="number" min="0" max="100" required></label><label>空间动态可见范围<select id="self-expression-qq-visibility"><option value="4">好友可见</option><option value="1">所有人可见</option><option value="64">仅自己可见</option></select></label></div>
+                <div class="field-row"><label>QQ 每天公开操作合计上限<input id="self-expression-qq-daily-limit" type="number" min="0" max="100" required></label><label>空间动态可见范围<select id="self-expression-qq-visibility"><option value="4">好友可见</option><option value="1">所有人可见</option><option value="64">仅自己可见</option></select></label></div>
                 <p class="caption">签名每天最多尝试更新 1 次；头像遵循上方间隔。未确认结果的操作不会自动重试。</p>
               </div>
               <div class="self-expression-platform-settings"><h3>小黑盒</h3><p class="caption">使用栖忆的专用账号。评论与回复使用专用浏览器，发帖继续使用 Windows 上的专用 MuMu 设备；创建人账号与执行账号分别保存。</p>
@@ -179,12 +179,16 @@
                 <div class="field-row"><label>小黑盒每天公开表达上限<input id="self-expression-heybox-daily-limit" type="number" min="0" max="100" required></label><label>发帖分区<input id="self-expression-heybox-topic" maxlength="40" required placeholder="分区的准确名称"></label></div>
                 <p class="caption">每次机会最多选择一项公开表达，也可以保持安静。评论与回复默认关闭；首次巡查只记下已有留言，之后的新评论才考虑回复。讨论会保留原帖、发言者和上下文。失败和结果未确认也计次，不自动重发。</p>
               </div>
-              <div class="self-expression-platform-settings"><h3>B站</h3><p class="caption">使用栖忆专用 B站账号与独立社交宿主，账号登录在下方“DSH 插件运行层”中设置。安装方法见部署说明的“B站视频评论通知回复”。支持原创纯文字动态、浏览后的视频评论、评论回复通知和 @ 提及，不接入私信。</p>
+              <div class="self-expression-platform-settings"><h3>B站</h3><p class="caption">使用栖忆专用 B站账号，账号登录在下方“DSH 插件运行层”中设置。动态、视频评论与通知回复需要独立社交宿主；头像、签名与昵称使用项目内置资料通道。安装方法见部署说明，支持评论回复通知和 @ 提及，不接入私信。</p>
                 <label class="check-label"><input id="self-expression-bilibili-enabled" type="checkbox">允许在 B站自主表达</label>
                 <label class="check-label"><input id="self-expression-bilibili-post" type="checkbox">发布原创文字动态</label>
                 <label class="check-label"><input id="self-expression-bilibili-comment" type="checkbox">浏览后自主发表视频评论</label>
                 <label class="check-label"><input id="self-expression-bilibili-reply" type="checkbox">回复评论通知（视频、文字与图文动态，含 @）</label>
-                <label>B站每天动态、评论与回复合计上限<input id="self-expression-bilibili-daily-limit" type="number" min="0" max="100" required></label>
+                <div class="self-expression-options"><label class="check-label"><input id="self-expression-bilibili-avatar" type="checkbox">自主更换头像</label><label class="check-label"><input id="self-expression-bilibili-signature" type="checkbox">自主更新签名</label><label class="check-label"><input id="self-expression-bilibili-nickname" type="checkbox">自主更新昵称（仅明确免费时）</label></div>
+                <p class="caption">三项资料开关新安装默认关闭。创建人也可在聊天中明确说“把B站头像换成开心，签名改为慢慢记录日常，昵称改为栖忆”，同一句可指定多项；头像仅有打招呼、开心、思考、安慰四款自有素材，不使用群友图片。项目将昵称限制为 2–16 字、签名限制为 1–80 字；这些是项目边界，并非平台统一规则。昵称仅在本次核对为允许且免费时自动提交；收费不明、需付费或需本人验证时不继续。</p>
+                <p class="caption">自主签名和昵称每天各最多一次，头像遵循上方项目间隔；昵称应保持稳定。只保存开关不会修改账号资料。资料操作会区分“已更新并回读确认”“已提交，尚未核实生效”和“原本即为本轮所选”。</p>
+                <p id="bili-profile-summary" class="caption" role="status">正在读取资料通道本机状态…</p>
+                <label>B站每天六类公开操作合计上限<input id="self-expression-bilibili-daily-limit" type="number" min="0" max="100" required></label>
                 <label>通知检查机会间隔（分钟）<input id="self-expression-bilibili-inbox-minutes" type="number" min="1" max="60" required></label>
                 <p class="caption">通知检查独立于发动态机会，沿用表达欲和活跃时段；没有新通知不调用模型。回复仍计入共用公开表达额度。</p>
                 <p id="self-expression-bilibili-summary" class="caption">正在读取本机接入状态…</p>

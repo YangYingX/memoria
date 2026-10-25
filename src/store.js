@@ -17,7 +17,8 @@ import { authorizeQQCompanionship } from './proactive-first-contact.js';
 import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControlFields, biliExpressionSwitch } from './autonomy-controls.js';
 import { defaultAutonomySettings } from './autonomy.js';
 import { defaultBookSettings } from './book-jobs.js';
-import { defaultExpressionSettings } from './self-expression.js';
+import { defaultExpressionSettings, normalizeExpressionSettings, expressionDayBounds, expressionBudgetActions, expressionUsedAttempts } from './self-expression.js';
+import { parseProfileRequest } from './profile-tools.js';
 import { HEYBOX_REPLY_STATES, HEYBOX_REPLY_TERMINAL, heyboxId, heyboxKey, normalizeHeyboxThread, normalizeHeyboxComment,
   heyboxThreadKey, heyboxThreadIdentityKey, heyboxThreadHash, heyboxThreadScope, heyboxCommentKey, heyboxCommentHash, heyboxCommentActor, normalizeHeyboxConfirmation } from './heybox-thread.js';
 import { biliVideoUrl } from './bili-reading.js';
@@ -596,6 +597,83 @@ export function createStore(dbPath) {
     return source?.type === 'message' && source.scope === 'owner' && source.actor === 'owner'
       && typeof source.metadata?.messageId === 'string' && message?.id === source.metadata.messageId
       && message.role === 'user' && message.scope === 'owner' && message.actor === 'owner' && message.content === source.content;
+  }
+  const profileActions = ['avatar', 'nickname', 'signature'];
+  const profileOutcomes = ['updated', 'submitted', 'unchanged', 'unknown', 'failed', 'fee_required', 'verification_required'];
+  const profileHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  function profileSource(kind, id, action, now, expectedText) {
+    if (api.hasDelivery(`profile-history:${id}`)) return null;
+    const row = get('SELECT * FROM events WHERE id = ?', id), source = row && eventRow(row);
+    if (!source || source.scope !== 'owner' || source.createdAt > now) return null;
+    if (kind === 'owner') {
+      const message = typeof source.metadata.messageId === 'string' && get('SELECT * FROM messages WHERE id = ?', source.metadata.messageId);
+      if (!validFollowupSource(source, message) || message.created_at > now || currentConversationOrigin(source, message) === null
+        || source.metadata.qqVoice !== undefined || Number(source.metadata.imageCount || 0) > 0
+        || expectedText !== undefined && (source.content !== expectedText || message.content !== expectedText)) return null;
+      const parsed = parseProfileRequest(source.content), change = parsed.changes?.find(item => item.action === action);
+      if (!change) return null;
+      return { source, change, signature: profileHash([source, messageRow(message), currentConversationOrigin(source, message),
+        api.listAccounts().filter(account => account.personId === 'owner')]) };
+    }
+    const budget = api.getSetting('selfExpressionStatus', {}), config = normalizeExpressionSettings({}, api.getSetting('selfExpression', {}));
+    if (kind !== 'scheduler' || source.type !== 'self_expression' || source.actor !== 'scheduler' || source.metadata.platform !== 'bilibili'
+      || source.metadata.action !== action || source.metadata.outcome !== 'attempt' || source.metadata.profileQuotaReserved !== true
+      || source.metadata.dayId !== budget.dayId || !budget.dayId || !config.enabled || !config.platforms.bilibili.enabled || config.platforms.bilibili[action] !== true
+      || !Number.isFinite(Date.parse(budget.dayStartAt)) || !Number.isFinite(Date.parse(budget.dayEndAt))
+      || Date.parse(now) < Date.parse(budget.dayStartAt) || Date.parse(now) >= Date.parse(budget.dayEndAt)
+      || source.createdAt < budget.dayStartAt) return null;
+    return { source, signature: profileHash([source, config, budget.dayId]) };
+  }
+  function profileAttempt(id) {
+    const row = get("SELECT * FROM events WHERE id = ? AND type = 'profile_change' AND scope = 'owner' AND json_extract(metadata, '$.phase') = 'attempt'", id);
+    if (!row) return null;
+    const event = eventRow(row), metadata = event.metadata;
+    return metadata.version === 1 && profileActions.includes(metadata.action) && ['owner', 'scheduler'].includes(metadata.origin)
+      && event.actor === metadata.origin && event.sourceRef === metadata.sourceId && typeof metadata.sourceHash === 'string'
+      && /^[a-f0-9]{64}$/.test(metadata.sourceHash) && typeof metadata.payloadHash === 'string' && /^[a-f0-9]{64}$/.test(metadata.payloadHash) ? event : null;
+  }
+  function profileAttemptSourceCurrent(attempt, now) {
+    try {
+      const metadata = attempt.metadata, source = profileSource(metadata.origin, metadata.sourceId, metadata.action, now);
+      if (source?.signature !== metadata.sourceHash) return false;
+      const state = api.getSetting('selfExpressionStatus', {}), config = normalizeExpressionSettings({}, api.getSetting('selfExpression', {}));
+      if (state.dayId !== metadata.dayId || !Number.isFinite(Date.parse(state.dayStartAt)) || !Number.isFinite(Date.parse(state.dayEndAt))
+        || now < state.dayStartAt || now >= state.dayEndAt || expressionUsedAttempts(state) > config.dailyLimit) return false;
+      const counts = state.platformAttempts?.bilibili || {};
+      return expressionBudgetActions.reduce((sum, action) => sum + integer(counts[action] ?? 0, 'B站公开操作次数', 0, Number.MAX_SAFE_INTEGER), 0)
+        <= config.platforms.bilibili.dailyLimit;
+    } catch { return false; }
+  }
+  function finishProfileAttempt(attempt, input, now) {
+    const metadata = attempt.metadata;
+    const sourceValid = profileAttemptSourceCurrent(attempt, now);
+    const previous = all("SELECT * FROM events WHERE type = 'profile_change' AND scope = 'owner' AND json_extract(metadata, '$.phase') = 'result' AND json_extract(metadata, '$.attemptId') = ?", attempt.id).map(eventRow);
+    if (previous.length) {
+      if (previous.length !== 1 || previous[0].metadata.outcome !== input.outcome) invalid('B站资料修改已有不同结果，不能重复记录。');
+      const saved = previous[0].metadata;
+      return { attemptId: attempt.id, action: metadata.action, outcome: saved.outcome, sourceValid,
+        ...(sourceValid && saved.value !== undefined ? { value: saved.value } : {}), ...(saved.avatarId ? { avatarId: saved.avatarId } : {}) };
+    }
+    const confirmed = ['updated', 'submitted', 'unchanged'].includes(input.outcome);
+    const result = { version: 1, phase: 'result', attemptId: attempt.id, accountId: metadata.accountId, action: metadata.action,
+      origin: metadata.origin, sourceId: metadata.sourceId, payloadHash: metadata.payloadHash, outcome: input.outcome, sourceValid,
+      ...(sourceValid && confirmed && input.value !== undefined ? { value: input.value } : {}),
+      ...(metadata.avatarId ? { avatarId: metadata.avatarId, avatarHash: metadata.avatarHash } : {}),
+      ...(sourceValid && input.message ? { message: input.message } : {}) };
+    insertEvent({ id: randomUUID(), ...eventFields({ type: 'profile_change', scope: 'owner', actor: metadata.origin,
+      content: `B站资料修改结果：${input.outcome}。${sourceValid ? '' : '原来源已失效，未保存旧资料正文。'}`,
+      sourceRef: metadata.sourceId, metadata: result }), createdAt: now });
+    if (metadata.origin === 'owner') {
+      const state = api.getSetting('selfExpressionStatus', {});
+      if (state.dayId === metadata.dayId && state.outcomes?.bilibili?.[metadata.action]?.profileAttemptId === attempt.id) {
+        api.setSetting('selfExpressionStatus', { ...state, outcomes: { ...state.outcomes, bilibili: { ...state.outcomes.bilibili,
+          [metadata.action]: { outcome: input.outcome, at: now, profileAttemptId: attempt.id, accountId: metadata.accountId } } },
+          ...(sourceValid && ['updated', 'unchanged'].includes(input.outcome) && metadata.action === 'signature' && input.value !== undefined ? { lastSignature: input.value } : {}),
+          ...(sourceValid && ['updated', 'unchanged'].includes(input.outcome) && metadata.action === 'avatar' ? { lastAvatarId: metadata.avatarId } : {}) });
+      }
+    }
+    return { attemptId: attempt.id, action: metadata.action, outcome: input.outcome, sourceValid,
+      ...(result.value !== undefined ? { value: result.value } : {}), ...(metadata.avatarId ? { avatarId: metadata.avatarId } : {}) };
   }
   function pairedConversationOrigin(source, message) {
     if (!validFollowupSource(source, message)) return null;
@@ -1822,7 +1900,7 @@ export function createStore(dbPath) {
       if (Reflect.ownKeys(input).length !== 4 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings', 'expectedText'].includes(key))) invalid('自主活动偏好更新参数无效。');
       let patch;
       try { patch = normalizeAutonomyControlPatch(input.patch); }
-      catch { invalid('仅可调整三个总开关、B站通知回复与文字动态开关及有效的公开表达欲、全平台每日公开发布上限和间隔。'); }
+      catch { invalid('仅可调整三个总开关、B站通知回复与文字动态开关及有效的公开表达欲、全平台每日公开操作上限和间隔。'); }
       const sourceEventId = identifier(input.sourceEventId, '自主活动偏好来源 ID');
       if (typeof input.expectedText !== 'string' || !input.expectedText.trim() || input.expectedText.length > 8000) invalid('自主活动偏好须核对本轮直接文字。');
       const keys = ['autonomy', 'books', 'selfExpression'];
@@ -2659,7 +2737,7 @@ export function createStore(dbPath) {
           || !config.enabled || !platform?.enabled || platform.reply !== true || budget.dayId !== dayId
           || !Number.isFinite(Date.parse(budget.dayStartAt)) || !Number.isFinite(Date.parse(budget.dayEndAt)) || time < Date.parse(budget.dayStartAt) || time >= Date.parse(budget.dayEndAt)) return null;
         const limit = integer(config.dailyLimit, '公共表达每日上限', 0, 100), platformLimit = integer(platform.dailyLimit, '小黑盒公开表达每日上限', 0, 100);
-        const attempts = integer(budget.postAttempts, '公共表达次数', 0, Number.MAX_SAFE_INTEGER), publicAttempts = ['post', 'comment', 'reply'].reduce((sum, action) => sum + integer(counts[action] ?? 0, '小黑盒公开表达次数', 0, Number.MAX_SAFE_INTEGER), 0);
+        const attempts = integer(budget.postAttempts, '公共表达次数', 0, Number.MAX_SAFE_INTEGER), publicAttempts = expressionBudgetActions.reduce((sum, action) => sum + integer(counts[action] ?? 0, '小黑盒公开表达次数', 0, Number.MAX_SAFE_INTEGER), 0);
         const unconfirmed = ['post', 'comment', 'reply'].some(action => ['pending', 'unknown', 'error'].includes(budget.outcomes?.heybox?.[action]?.outcome) && Date.parse(budget.outcomes.heybox[action].at) >= Date.parse(budget.dayStartAt));
         if (attempts >= limit || publicAttempts >= platformLimit || unconfirmed || !claimHeybox('send', key, now)) return null;
         const target = { targetKey: key, targetUrl: `https://www.xiaoheihe.cn/app/bbs/link/${item.postId}` };
@@ -2845,7 +2923,7 @@ export function createStore(dbPath) {
           || !Number.isFinite(Date.parse(budget.dayStartAt)) || !Number.isFinite(Date.parse(budget.dayEndAt))
           || time < Date.parse(budget.dayStartAt) || time >= Date.parse(budget.dayEndAt)) return null;
         const limit = integer(config.dailyLimit, '公共表达每日上限', 0, 100), platformLimit = integer(platform.dailyLimit, 'B站公开表达每日上限', 0, 100);
-        const attempts = integer(budget.postAttempts, '公共表达次数', 0, Number.MAX_SAFE_INTEGER), publicAttempts = ['post', 'comment', 'reply'].reduce((sum, action) => sum + integer(counts[action] ?? 0, '平台公共表达次数', 0, Number.MAX_SAFE_INTEGER), 0);
+        const attempts = integer(budget.postAttempts, '公共表达次数', 0, Number.MAX_SAFE_INTEGER), publicAttempts = expressionBudgetActions.reduce((sum, action) => sum + integer(counts[action] ?? 0, '平台公共表达次数', 0, Number.MAX_SAFE_INTEGER), 0);
         const unconfirmed = ['post', 'comment', 'reply'].some(action => ['pending', 'unknown', 'error'].includes(budget.outcomes?.bilibili?.[action]?.outcome)
           && Date.parse(budget.outcomes.bilibili[action].at) >= Date.parse(budget.dayStartAt));
         if (attempts >= limit || publicAttempts >= platformLimit || unconfirmed || !claimBili('send', key, now)) return null;
@@ -2883,6 +2961,92 @@ export function createStore(dbPath) {
           else if (item?.state === 'sending') { appendBiliState(item, 'unknown', now); unknown++; }
         }
         return { interrupted, unknown };
+      });
+    },
+    beginProfileChange(input) {
+      record(input, 'B站资料修改');
+      if (Object.keys(input).some(key => !['accountId', 'action', 'value', 'avatarId', 'avatarHash', 'sourceEventId', 'expectedText', 'sourceAttemptId', 'now'].includes(key))
+        || !profileActions.includes(input.action)) invalid('B站资料修改字段无效。');
+      const accountId = biliSocialId(input.accountId), action = input.action;
+      const owner = input.sourceEventId !== undefined;
+      if (owner === (input.sourceAttemptId !== undefined) || !owner && input.expectedText !== undefined) invalid('B站资料修改须有唯一有效来源。');
+      const sourceId = identifier(owner ? input.sourceEventId : input.sourceAttemptId, 'B站资料修改来源 ID');
+      const expectedText = owner ? text(input.expectedText, '本轮资料请求', 8000, { trim: false }) : undefined;
+      const now = followupClock(input.now === undefined ? Date.now() : input.now), time = Date.parse(now);
+      let value, avatarId, avatarHash;
+      if (action === 'avatar') {
+        if (input.value !== undefined || !['hello', 'happy', 'thinking', 'comfort'].includes(input.avatarId)
+          || typeof input.avatarHash !== 'string' || !/^[a-f0-9]{64}$/.test(input.avatarHash)) invalid('B站头像须为固定素材及其有效摘要。');
+        avatarId = input.avatarId; avatarHash = input.avatarHash;
+      } else {
+        if (input.avatarId !== undefined || input.avatarHash !== undefined) invalid('文字资料修改不能携带头像。');
+        value = text(input.value, 'B站资料文字', 80);
+        if (/[\x00-\x1f\x7f]/.test(value)) invalid('B站资料文字不能包含控制字符。');
+      }
+      const payloadHash = profileHash(action === 'avatar' ? { action, avatarId, avatarHash } : { action, value });
+      return transaction(() => {
+        const source = profileSource(owner ? 'owner' : 'scheduler', sourceId, action, now, expectedText);
+        if (!source || owner && (source.change.value !== undefined && source.change.value !== value
+          || source.change.avatarId !== undefined && source.change.avatarId !== avatarId)) return null;
+        if (get("SELECT 1 FROM events WHERE type = 'profile_change' AND scope = 'owner' AND source_ref = ? AND json_extract(metadata, '$.phase') = 'attempt' AND json_extract(metadata, '$.accountId') = ? AND json_extract(metadata, '$.action') = ? LIMIT 1", sourceId, accountId, action)) return null;
+        const config = normalizeExpressionSettings({}, api.getSetting('selfExpression', {}));
+        let state = api.getSetting('selfExpressionStatus', {});
+        if (owner && (!state.dayId || Number.isFinite(Date.parse(state.dayEndAt)) && time >= Date.parse(state.dayEndAt))) {
+          state = { ...state, ...expressionDayBounds(time, config.timeZone), dayId: randomUUID(), decisionAttempts: 0,
+            opportunityAttempts: 0, postAttempts: 0, biliReplyDecisionAttempts: 0, platformAttempts: {}, daySlots: [], nextRunAt: '', configSignature: '' };
+        }
+        if (!state.dayId || !Number.isFinite(Date.parse(state.dayStartAt)) || !Number.isFinite(Date.parse(state.dayEndAt))
+          || time < Date.parse(state.dayStartAt) || time >= Date.parse(state.dayEndAt)) return null;
+        const counts = state.platformAttempts?.bilibili || {}, used = expressionUsedAttempts(state);
+        if (owner && state.postAttempts !== used) { state = { ...state, postAttempts: used }; api.setSetting('selfExpressionStatus', state); }
+        const platformUsed = expressionBudgetActions.reduce((sum, kind) => sum + integer(counts[kind] ?? 0, 'B站公开操作次数', 0, Number.MAX_SAFE_INTEGER), 0);
+        if (owner ? used >= config.dailyLimit || platformUsed >= config.platforms.bilibili.dailyLimit
+          : used < 1 || used > config.dailyLimit || platformUsed > config.platforms.bilibili.dailyLimit || !(counts[action] > 0)) return null;
+        if (!api.claimDelivery(`profile:${accountId}:${sourceId}:${action}`)) return null;
+        const attemptId = randomUUID();
+        if (owner) api.setSetting('selfExpressionStatus', { ...state, postAttempts: used + 1,
+          platformAttempts: { ...state.platformAttempts, bilibili: { ...counts, [action]: (counts[action] || 0) + 1 } },
+          ...(action === 'avatar' ? { lastAvatarAttempts: { ...state.lastAvatarAttempts, bilibili: now } } : {}),
+          outcomes: { ...state.outcomes, bilibili: { ...state.outcomes?.bilibili, [action]: { outcome: 'pending', at: now, profileAttemptId: attemptId, accountId } } } });
+        insertEvent({ id: attemptId, ...eventFields({ type: 'profile_change', scope: 'owner', actor: owner ? 'owner' : 'scheduler',
+          sourceRef: sourceId, content: '开始执行B站资料修改，本次已计入共享公开操作额度。', metadata: { version: 1, phase: 'attempt',
+            accountId, action, origin: owner ? 'owner' : 'scheduler', sourceId, sourceHash: source.signature, payloadHash, dayId: state.dayId,
+            ...(avatarId ? { avatarId, avatarHash } : {}) } }), createdAt: now });
+        return { attemptId, accountId, action, sourceValid: true, ...(avatarId ? { avatarId } : {}) };
+      });
+    },
+    finishProfileChange(attemptId, input) {
+      attemptId = identifier(attemptId, 'B站资料尝试 ID'); record(input, 'B站资料结果');
+      if (Object.keys(input).some(key => !['outcome', 'value', 'avatarId', 'message'].includes(key)) || !profileOutcomes.includes(input.outcome)) invalid('B站资料结果字段无效。');
+      const clean = { outcome: input.outcome, ...(input.value === undefined ? {} : { value: text(input.value, 'B站资料结果文字', 80) }),
+        ...(input.avatarId === undefined ? {} : { avatarId: input.avatarId }), ...(input.message === undefined ? {} : { message: text(input.message, 'B站资料结果说明', 500, { empty: true }) }) };
+      return transaction(() => {
+        const attempt = profileAttempt(attemptId);
+        if (!attempt) invalid('B站资料尝试不存在或无效。');
+        const metadata = attempt.metadata;
+        if (clean.avatarId !== undefined && (metadata.action !== 'avatar' || clean.avatarId !== metadata.avatarId)
+          || clean.value !== undefined && (metadata.action === 'avatar' || /[\x00-\x1f\x7f]/.test(clean.value)
+            || profileHash({ action: metadata.action, value: clean.value }) !== metadata.payloadHash)) invalid('B站资料结果与原尝试不一致。');
+        return finishProfileAttempt(attempt, clean, new Date().toISOString());
+      });
+    },
+    isProfileChangeCurrent(attemptId) {
+      attemptId = identifier(attemptId, 'B站资料尝试 ID');
+      const attempt = profileAttempt(attemptId);
+      return Boolean(attempt && !get("SELECT 1 FROM events WHERE type = 'profile_change' AND scope = 'owner' AND json_extract(metadata, '$.phase') = 'result' AND json_extract(metadata, '$.attemptId') = ? LIMIT 1", attemptId)
+        && profileAttemptSourceCurrent(attempt, new Date().toISOString()));
+    },
+    recoverProfileChanges() {
+      return transaction(() => {
+        const now = new Date().toISOString(), attempts = all(`SELECT e.id FROM events e WHERE e.type = 'profile_change' AND e.scope = 'owner'
+          AND json_extract(e.metadata, '$.phase') = 'attempt' AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type = 'profile_change' AND r.scope = 'owner'
+            AND json_extract(r.metadata, '$.phase') = 'result' AND json_extract(r.metadata, '$.attemptId') = e.id)`);
+        let unknown = 0;
+        for (const row of attempts) {
+          const attempt = profileAttempt(row.id);
+          if (attempt) { finishProfileAttempt(attempt, { outcome: 'unknown', message: '上次资料修改未确认结果，不自动重试。' }, now); unknown++; }
+        }
+        return { unknown };
       });
     },
     latestOwnerMessage() {
@@ -3545,6 +3709,14 @@ export function createStore(dbPath) {
         for (const revision of revisions) insertRevision(revision);
         for (const event of events) insertEvent(event);
         for (const message of messages) insertMessage(message);
+        for (const event of events) {
+          const ownerRequest = event.type === 'message' && event.scope === 'owner' && event.actor === 'owner'
+            && validFollowupSource(event, get('SELECT * FROM messages WHERE id = ?', event.metadata.messageId || '')) && parseProfileRequest(event.content).changes;
+          const reserved = event.type === 'self_expression' && event.scope === 'owner' && event.actor === 'scheduler'
+            && event.metadata.platform === 'bilibili' && profileActions.includes(event.metadata.action)
+            && event.metadata.outcome === 'attempt' && event.metadata.profileQuotaReserved === true;
+          if (ownerRequest || reserved) api.claimDelivery(`profile-history:${event.id}`);
+        }
         // This table is never cleared: even backups made before a memory existed cannot undo its block.
         for (const item of conversationBlocks) insertConversationBlock(item.scope, item.eventId, item.blockedAt);
         backfillConversationBlocks();

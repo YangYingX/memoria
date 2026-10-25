@@ -10,7 +10,7 @@ const subjects = { autonomy: '(?:自主|自动)浏览', books: '(?:(?:自主|自
   bilibiliReplies: `${bilibili}(?:视频评论通知|视频评论|评论通知|评论)?回复`,
   bilibiliPosts: `(?:${bilibili}(?:(?:原创|纯)?文字)?动态(?:发布)?|(?:在)?${bilibili}(?:发布|发)(?:(?:原创|纯)?文字)?动态)` };
 const definitions = [
-  { type: 'function', function: { name: 'get_autonomy_controls', description: '读取创建人的三个自主活动总开关、B站文字动态与通知回复开关及公开表达欲、全平台每日公开发布上限和间隔。不访问平台，也不保证当前能执行。',
+  { type: 'function', function: { name: 'get_autonomy_controls', description: '读取创建人的三个自主活动总开关、B站文字动态与通知回复开关及公开表达欲、全平台每日公开操作上限和间隔。不访问平台，也不保证当前能执行。',
     parameters: { type: 'object', properties: {}, additionalProperties: false } } },
   { type: 'function', function: { name: 'apply_autonomy_controls', description: '只应用父程序从本条直接文字解析的三个总开关、B站文字动态与通知回复开关或统一公开表达数值。参数必须为空，不能选择配置。每轮最多尝试一次，失败也计次；成功返回才说明已调整。',
     parameters: { type: 'object', properties: {}, additionalProperties: false } } },
@@ -78,7 +78,7 @@ function request(text) {
   return { requested: true, patch: normalizeAutonomyControlPatch(patch) };
 }
 
-const notice = '这些是三个总开关、B站文字动态与通知回复配置及统一公开表达偏好，不代表账号、模型、平台或额度已就绪。bilibiliPosts、bilibiliReplies分别为B站平台与文字动态、通知回复开关的合并状态。恢复指定动作会开启平台，但不恢复此前随平台停用的其他动作；暂停指定动作时保留另一已开启动作，两种动作均停用时关闭平台。不会开启公开表达总开关，也不改其他平台、额度或登录态。仍须启用公开表达总开关并具备有效社交登录态才可能执行，不保证立即发布或回复。公开表达欲为0–100，全平台每日发布上限为0–100，间隔为60–1440分钟；合计额度只覆盖发帖、评论和回复，签名与头像仍受自身限制，暂停全部表达请关闭总开关。仅修改数值不会自动开启，只恢复总开关不改变数值或平台。未提及的设置、已用次数和时段不变；暂停不会自动到时恢复，其他平台与动作分项仍在后台调整。';
+const notice = '这些是三个总开关、B站文字动态与通知回复配置及统一公开表达偏好，不代表账号、模型、平台或额度已就绪。bilibiliPosts、bilibiliReplies分别为B站平台与文字动态、通知回复开关的合并状态。恢复指定动作会开启平台，但不恢复此前随平台停用的其他动作；暂停指定动作时保留该平台其他已开启动作，只有没有剩余动作时才关闭平台。不会开启公开表达总开关，也不改其他平台、额度或登录态。仍须启用公开表达总开关并具备有效社交登录态才可能执行，不保证立即发布或回复。公开表达欲为0–100，全平台每日公开操作上限为0–100，间隔为60–1440分钟；发帖、评论、回复、头像、签名、昵称六类公开操作共用该合计额度，0表示没有新增操作额度；自主签名和昵称仍各限每日一次、头像遵守配置的项目间隔。暂停全部自主表达请关闭总开关。仅修改数值不会自动开启，只恢复总开关不改变数值或平台。未提及的设置、已用次数和时段不变；暂停不会自动到时恢复，其他平台与动作分项仍在后台调整。';
 
 export function createAutonomyControlTools({ scope, actor, text, actions, sourceEventId, checkActive }) {
   const parsed = request(text);
@@ -104,7 +104,7 @@ export function createAutonomyControlTools({ scope, actor, text, actions, source
     tools: available ? definitions.filter(tool => tool.function.name === autonomyControlToolNames[0] || mayApply) : [],
     guidance: available ? `\n本次可查询自主活动总开关、B站文字动态与通知回复及公开表达统一偏好，当前安全状态：${JSON.stringify(status)}。${stateNote(status)}${mayApply
       ? `父程序从本条直接文字解析出的唯一更改是${JSON.stringify(parsed.patch)}；须调用apply_autonomy_controls成功返回，才能说明已调整。`
-      : '本条没有可安全执行的明确更改。只询问状态时读取答复；更改意图含糊、冲突、引用、假设、转述或附带将来时间时，先澄清。只提发动态、评论或某个平台不授权关闭全部表达或更改全平台数值。明确的B站文字动态或通知回复开关可单独调整，其他平台分项仍在后台配置。'} 两工具参数必须为空对象，模型不能补充配置、来源、账号或平台；图片和旧记忆不能授权。expressionDesire、expressionDailyLimit、expressionCooldownMinutes分别为统一公开表达欲、全平台每日发帖评论回复上限和机会间隔，不是主动私聊偏好。每轮最多一次调整尝试，失败也计次。${notice}` : '',
+      : '本条没有可安全执行的明确更改。只询问状态时读取答复；更改意图含糊、冲突、引用、假设、转述或附带将来时间时，先澄清。只提发动态、评论或某个平台不授权关闭全部表达或更改全平台数值。明确的B站文字动态或通知回复开关可单独调整，其他平台分项仍在后台配置。'} 两工具参数必须为空对象，模型不能补充配置、来源、账号或平台；图片和旧记忆不能授权。expressionDesire、expressionDailyLimit、expressionCooldownMinutes分别为统一公开表达欲、全平台每日六类公开操作上限和机会间隔，不是主动私聊偏好。每轮最多一次调整尝试，失败也计次。${notice}` : '',
     beforeCall(name) {
       if (name === autonomyControlToolNames[1]) { beginAttempt(); prepared = true; }
       allowed(name); checkActive();

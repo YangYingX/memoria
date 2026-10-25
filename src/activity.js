@@ -1,12 +1,12 @@
 import { normalizeAutonomySettings } from './autonomy.js';
-import { expressionPlatforms, normalizeExpressionSettings } from './self-expression.js';
+import { expressionPlatforms, normalizeExpressionSettings, expressionBudgetActions, expressionUsedAttempts } from './self-expression.js';
 import { validateHeyboxPost } from './heybox-post.js';
 
 const text = (value, limit) => typeof value === 'string' ? value.slice(0, limit) : '';
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 const date = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : '';
 const currentDay = (state, time) => Date.parse(state.dayStartAt) <= time && time < Date.parse(state.dayEndAt);
-const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'cancelled', 'skipped', 'quiet', 'busy', 'limit', 'missed', 'deciding', 'decided', 'checking', 'unavailable']);
+const outcomes = new Set(['pending', 'unknown', 'error', 'success', 'review', 'updated', 'submitted', 'unchanged', 'failed', 'fee_required', 'verification_required', 'cancelled', 'skipped', 'quiet', 'busy', 'limit', 'missed', 'deciding', 'decided', 'checking', 'unavailable']);
 const outcome = value => outcomes.has(value) ? value : 'unrecorded';
 
 // Only project selected fields: raw scheduler state can contain private settings and errors.
@@ -37,15 +37,16 @@ export function activitySnapshot(store, { readingStatus = {}, expressionStatus =
         attempts: count(dshStatus.reading.attempts), dailyLimit: count(dshStatus.reading.dailyLimit), remaining: count(dshStatus.reading.remaining),
       } : null },
     expression: { enabled: expression.enabled, busy: expressionStatus.busy === true, desire: expression.desire,
-      dailyLimit: expression.dailyLimit, attempts: expressionToday ? count(expressionStatus.postAttempts) : 0,
+      dailyLimit: expression.dailyLimit, attempts: expressionToday ? expressionUsedAttempts(expressionStatus) : 0,
       cooldownMinutes: expression.cooldownMinutes,
       budgetTimeZone: expressionToday ? text(expressionStatus.timeZone, 80) : expression.timeZone,
       nextRunAt: expression.enabled && expressionToday ? date(expressionStatus.nextRunAt) : '',
       platforms: Object.entries(expressionPlatforms).map(([id, platform]) => ({ id, name: platform.name,
         enabled: expression.platforms[id].enabled, postEnabled: expression.platforms[id].post,
         commentEnabled: expression.platforms[id].comment === true, replyEnabled: expression.platforms[id].reply === true, dailyLimit: expression.platforms[id].dailyLimit,
-        attempts: expressionToday ? ['post', 'comment', 'reply'].reduce((sum, action) => sum + count(expressionStatus.platformAttempts?.[id]?.[action]), 0) : 0,
-        actions: ['post', 'comment', 'reply'].filter(action => expressionPlatforms[id].actions.includes(action)).map(action => ({ action,
+        avatarEnabled: expression.platforms[id].avatar === true, signatureEnabled: expression.platforms[id].signature === true, nicknameEnabled: expression.platforms[id].nickname === true,
+        attempts: expressionToday ? expressionBudgetActions.reduce((sum, action) => sum + count(expressionStatus.platformAttempts?.[id]?.[action]), 0) : 0,
+        actions: expressionBudgetActions.filter(action => expressionPlatforms[id].actions.includes(action)).map(action => ({ action,
           attempts: expressionToday ? count(expressionStatus.platformAttempts?.[id]?.[action]) : 0,
           outcome: outcome(expressionStatus.outcomes?.[id]?.[action]?.outcome), lastAttempt: date(expressionStatus.outcomes?.[id]?.[action]?.at) })),
         lastPostOutcome: outcome(expressionStatus.outcomes?.[id]?.post?.outcome),
