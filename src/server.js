@@ -22,7 +22,7 @@ import { parseQQBookFile, loadQQBookFile } from './qq-books.js';
 import { parseBookFile, BOOK_FILE_MAX_BYTES } from './book-files.js';
 import { createProactiveJobs, defaultProactiveSettings, normalizeProactiveSettings } from './proactive.js';
 import { createProactiveRecipientResolver } from './proactive-recipient.js';
-import { authorizeInitialQQContact } from './proactive-first-contact.js';
+import { authorizeInitialQQContact, qqCompanionship } from './proactive-first-contact.js';
 import { composeProactive } from './proactive-compose.js';
 import { bindOwnerHeybox, bindOwnerBilibili } from './identity.js';
 import { createMumuRuntime } from './mumu-runtime.js';
@@ -620,7 +620,10 @@ function saveSettings(input) {
   const reconnectFeishu = next.feishu && ['enabled', 'botId', 'expectedFingerprint'].some(key => next.feishu[key] !== store.getSetting('feishu', defaultFeishuSettings)[key]);
   const allowInitialQQ = next.proactive?.enabled === true && store.getSetting('proactive', {}).enabled !== true;
   for (const [key, value] of Object.entries(next)) store.setSetting(key, value);
-  if (allowInitialQQ && !getProactiveRecipient()) authorizeInitialQQContact(store);
+  if (allowInitialQQ) {
+    store.authorizeQQCompanionship();
+    if (!getProactiveRecipient()) authorizeInitialQQContact(store);
+  }
   if (next.chatMemory) void chatMemoryJobs.tick().catch(error => console.error('Chat memory scheduler:', error.message));
   if (reconnectFeishu) void feishuRuntime.restart().catch(() => {});
   return publicSettings();
@@ -690,7 +693,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
             }
           }, signal: options.signal, assertActive: options.assertActive }),
           companionActions: createCompanionPreferenceActions({ store, cancel: () => proactiveJobs.cancel(), signal: options.signal,
-            assertActive: options.assertActive, getReadiness: () => Boolean(getProactiveRecipient() && store.getSetting('model')?.apiKey) }),
+            assertActive: options.assertActive, getReadiness: () => Boolean((getProactiveRecipient() || qqCompanionship(store)?.recipient) && store.getSetting('model')?.apiKey) }),
           followupActions: createFollowupActions({ store, getRecipient: (sourceEventId, allowLegacyQQ = false) => getProactiveRecipient({ sourceEventId, allowLegacyQQ }), cancel: () => proactiveJobs.cancel(), signal: options.signal, assertActive: options.assertActive }) } : {}) });
       try { if (!result.silent && !options.deferAssistant) moodJobs.observeConversation(scope); } catch { /* Mood sampling must not discard a completed reply. */ }
       return result;

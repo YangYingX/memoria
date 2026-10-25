@@ -1,10 +1,15 @@
-import { initialQQContact } from './proactive-first-contact.js';
+import { initialQQContact, qqCompanionship } from './proactive-first-contact.js';
 
 // Delivery destinations come from paired application records, never from model output.
 export function createProactiveRecipientResolver({ store, getFeishuStatus }) {
-  return function getRecipient({ messageId, sourceEventId, allowLegacyQQ = false, legacyAccountId, initialAuthorizationId } = {}) {
+  return function getRecipient({ messageId, sourceEventId, allowLegacyQQ = false, legacyAccountId, initialAuthorizationId, companionAuthorizationId } = {}) {
     let origin;
     try {
+      if (companionAuthorizationId !== undefined) {
+        if (messageId !== undefined || sourceEventId !== undefined || initialAuthorizationId !== undefined
+          || allowLegacyQQ !== false || legacyAccountId !== undefined) return null;
+        return qqCompanionship(store, { authorizationId: companionAuthorizationId })?.recipient || null;
+      }
       if (initialAuthorizationId !== undefined) return initialQQContact(store, { authorizationId: initialAuthorizationId })?.recipient || null;
       if (sourceEventId) origin = store.getConversationOriginByEvent(sourceEventId);
       else origin = store.getConversationOrigin(messageId || store.latestOwnerMessage()?.id);

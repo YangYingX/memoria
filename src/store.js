@@ -13,6 +13,7 @@ import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, biliDynamicId, bi
 import { normalizeCompanionState, normalizeCompanionEnvelope } from './companion-state.js';
 import { companionPreferenceValues, normalizeCompanionPreferencePatch } from './companion-preferences.js';
 import { defaultProactiveSettings } from './proactive.js';
+import { authorizeQQCompanionship } from './proactive-first-contact.js';
 import { normalizeAutonomyControlPatch, autonomyControlValues, expressionControlFields, biliExpressionSwitch } from './autonomy-controls.js';
 import { defaultAutonomySettings } from './autonomy.js';
 import { defaultBookSettings } from './book-jobs.js';
@@ -1231,7 +1232,7 @@ export function createStore(dbPath) {
         const metadata = message.metadata;
         if (message.scope !== 'owner' || message.role !== 'assistant' || message.actor !== 'agent' || metadata.mode !== 'live'
           || metadata.proactive !== true || Object.hasOwn(metadata, 'replyTo')
-          || !['reading', 'conversation', 'theme', 'agenda', 'greeting'].includes(metadata.kind) || typeof metadata.sourceKey !== 'string'
+          || !['reading', 'conversation', 'theme', 'agenda', 'greeting', 'presence'].includes(metadata.kind) || typeof metadata.sourceKey !== 'string'
           || !/^[a-f0-9]{64}$/.test(metadata.sourceKey) || typeof metadata.messageId !== 'string'
           || !/^(?:0|-?[1-9]\d{0,19}|[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127})$/.test(metadata.messageId)) continue;
         const key = JSON.stringify([metadata.sourceKey, metadata.messageId, metadata.kind, message.content]);
@@ -1378,6 +1379,10 @@ export function createStore(dbPath) {
     setSetting(key, value) {
       key = identifier(key, '设置名');
       const clean = jsonValue(value, '设置', 50000);
+      if (key === 'proactive' && clean?.enabled !== true
+        || key === 'qq' && (clean?.enabled !== true || clean.botId !== api.getSetting('qq', {}).botId)) {
+        run('UPDATE settings SET value = ? WHERE key = ?', 'null', 'proactiveQQAuthorization');
+      }
       run('INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, JSON.stringify(clean));
       return clean;
     },
@@ -1508,6 +1513,9 @@ export function createStore(dbPath) {
         return { memories };
       });
     },
+    authorizeQQCompanionship(expectedTarget) {
+      return transaction(() => authorizeQQCompanionship(api, { expectedTarget }));
+    },
     updateProactivePreferences(input) {
       record(input, '陪伴偏好更新');
       if (Reflect.ownKeys(input).length !== 4 || Reflect.ownKeys(input).some(key => !['patch', 'sourceEventId', 'expectedSettings', 'expectedText'].includes(key))) invalid('陪伴偏好更新参数无效。');
@@ -1534,6 +1542,7 @@ export function createStore(dbPath) {
         try { before = companionPreferenceValues(current); after = companionPreferenceValues(next); }
         catch { invalid('当前主动私聊设置无效，请先在后台修复。'); }
         api.setSetting('proactive', next);
+        if (before.enabled !== true && after.enabled === true && currentConversationOrigin(source, message)?.platform === 'qq') authorizeQQCompanionship(api);
         insertEvent({ id: randomUUID(), ...eventFields({ type: 'companion_preference', scope: 'owner', actor: 'owner',
           sourceRef: sourceEventId, content: '已根据创建人当前聊天调整主动陪伴偏好。', metadata: { patch, before, after } }), createdAt: now });
         return after;
@@ -2207,6 +2216,7 @@ export function createStore(dbPath) {
         const previous = accountRow(get('SELECT * FROM accounts WHERE platform = ? AND user_id = ?', fields.platform, fields.userId));
         const account = { id: previous?.id ?? randomUUID(), ...fields, createdAt: previous?.createdAt ?? now, updatedAt: now };
         if (api.getSetting('proactiveInitialQQ', null)?.accountId === account.id) api.setSetting('proactiveInitialQQ', null);
+        if (api.getSetting('proactiveQQAuthorization', null)?.accountId === account.id) api.setSetting('proactiveQQAuthorization', null);
         if (previous) run('UPDATE accounts SET person_id = ?, label = ?, updated_at = ? WHERE id = ?', account.personId, account.label, now, previous.id);
         else insertAccount(account);
         if (!validFollowupRecipient(account)) for (const row of all("SELECT * FROM followups WHERE recipient_account_id = ? AND status IN ('pending', 'paused', 'deciding', 'attempted')", account.id)) {
@@ -3012,6 +3022,7 @@ export function createStore(dbPath) {
         const proactive = api.getSetting('proactive', null);
         if (proactive) api.setSetting('proactive', { ...proactive, enabled: false });
         api.setSetting('proactiveInitialQQ', null);
+        api.setSetting('proactiveQQAuthorization', null);
         const chatMemory = api.getSetting('chatMemory', null);
         api.setSetting('chatMemory', { ...(chatMemory || {}), enabled: false });
         insertEvent({ id: randomUUID(), ...eventFields({ type: 'chat_memory_activation', scope: 'owner', actor: 'scheduler',

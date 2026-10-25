@@ -42,3 +42,31 @@ export function initialQQContact(store, { authorizationId, now = Date.now() } = 
       userId: target.userId, botId: target.botId, bindingUpdatedAt: target.bindingUpdatedAt } };
   } catch { return null; }
 }
+
+const companionType = 'proactive_qq_companionship_authorization';
+
+export function authorizeQQCompanionship(store, { expectedTarget } = {}) {
+  if (store.getSetting('proactive', {}).enabled !== true) return null;
+  const target = snapshot(store);
+  if (!target || expectedTarget !== undefined && JSON.stringify(target) !== JSON.stringify(expectedTarget)) return null;
+  const event = store.addEvent({ type: companionType, scope: 'owner', actor: 'owner', sourceRef: target.accountId,
+    content: '已允许按主动陪伴设置持续联系当前绑定的创建人QQ；停用、换绑或更换机器人后失效。', metadata: target });
+  store.setSetting('proactiveQQAuthorization', { ...target, eventId: event.id, createdAt: event.createdAt });
+  return { authorizationId: event.id };
+}
+
+export function qqCompanionship(store, { authorizationId, now = Date.now() } = {}) {
+  try {
+    if (!Number.isSafeInteger(now) || store.getSetting('proactive', {}).enabled !== true) return null;
+    const grant = store.getSetting('proactiveQQAuthorization', null), target = snapshot(store);
+    if (!grant || !target || Array.isArray(grant) || Object.keys(grant).length !== 7
+      || !instant(grant.createdAt) || Date.parse(grant.createdAt) > now || Date.parse(target.bindingUpdatedAt) > now
+      || authorizationId !== undefined && grant.eventId !== authorizationId) return null;
+    const { eventId, createdAt, ...savedTarget } = grant;
+    if (JSON.stringify(savedTarget) !== JSON.stringify(target)) return null;
+    const event = store.listEvents({ type: companionType, scope: 'owner', actor: 'owner', limit: 100 }).find(item => item.id === eventId);
+    if (!event || event.createdAt !== createdAt || event.sourceRef !== target.accountId || JSON.stringify(event.metadata) !== JSON.stringify(target)) return null;
+    return { authorizationId: eventId, recipient: { platform: 'qq', accountId: target.accountId,
+      userId: target.userId, botId: target.botId, bindingUpdatedAt: target.bindingUpdatedAt } };
+  } catch { return null; }
+}
