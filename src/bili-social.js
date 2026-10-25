@@ -48,6 +48,8 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
         if (!evidence || (expected && JSON.stringify(evidence.memory) !== JSON.stringify(expected))
           || (memoryVersions.has(id) && memoryVersions.get(id) !== evidence.signature)) invalidSource();
         memoryVersions.set(id, evidence.signature);
+        const selfView = evidence.memory.category === 'self-view' ? store.getSelfViewMemoryEvidence(id, scopes) : null;
+        if (selfView) trackConversation({ id: selfView.conversationId });
         return evidence.memory;
       }
       function trackMemoryResult(result) {
