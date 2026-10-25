@@ -596,14 +596,14 @@ function renderMoodStatus() {
 
 function renderChatMemoryStatus() {
   const config = state.data?.settings.chatMemory || {}, status = state.data?.chatMemoryStatus || {};
-  const outcomes = { evaluating: '正在整理新私聊…', success: '已将原话摘记放上书架', quiet: '这次没有新增摘记', error: '这次未能完成', cancelled: '已让出时间，等待下次整理', interrupted: '上次整理中断，未自动重试' };
-  $('chat-memory-summary').textContent = !config.enabled ? '已暂停。再次开启时，从新的私聊开始整理。'
+  const outcomes = { evaluating: '正在整理新交流…', success: '已将原话摘记放上书架', quiet: '这次没有新增摘记', error: '这次未能完成', cancelled: '已让出时间，等待下次整理', interrupted: '上次整理中断，未自动重试' };
+  $('chat-memory-summary').textContent = !config.enabled ? '已暂停。再次开启时，从新的交流开始整理。'
     : !state.data?.settings.model.hasApiKey ? '已开启，等待配置模型 API。'
       : config.dailyLimit === 0 ? '每日上限为 0，暂停新的整理尝试。'
-        : `已开启，每 ${config.intervalMinutes ?? 180} 分钟最多整理一次。${status.nextRunAt ? `下次最早整理：${date(status.nextRunAt)}。` : '等待新的私聊和空闲时间。'}`;
+        : `已开启，每 ${config.intervalMinutes ?? 180} 分钟最多整理一次。${status.nextRunAt ? `下次最早整理：${date(status.nextRunAt)}。` : '等待新的交流和空闲时间。'}`;
   const today = status.day === new Date().toISOString().slice(0, 10);
   $('chat-memory-count').textContent = `今日整理尝试 ${today ? status.attempts || 0 : 0} / ${config.dailyLimit ?? 4} 次（UTC） · 上次新增 ${status.savedCount || 0} 条`;
-  $('chat-memory-outcome').textContent = `${status.busy ? '正在整理新私聊…' : outcomes[status.lastOutcome] || '还没有整理记录'}${status.lastAttemptAt ? ` · 最近尝试：${date(status.lastAttemptAt)}` : ''}`;
+  $('chat-memory-outcome').textContent = `${status.busy ? '正在整理新交流…' : outcomes[status.lastOutcome] || '还没有整理记录'}${status.lastAttemptAt ? ` · 最近尝试：${date(status.lastAttemptAt)}` : ''}`;
   $('chat-memory-error').hidden = !status.lastError;
   $('chat-memory-error').textContent = status.lastError || '';
 }

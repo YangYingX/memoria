@@ -1,6 +1,6 @@
 {
   "name": "memoria",
-  "version": "0.3.110",
+  "version": "0.3.111",
   "private": true,
   "description": "A local-first personal agent with scoped memories and verifiable experiences.",
   "type": "module",

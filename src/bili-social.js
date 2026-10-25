@@ -145,9 +145,7 @@ export function createBiliSocialDiscussion({ store, runtime, getCredentials, onR
             const assistant = store.addMessage({ scope: record.scope, role: 'assistant', actor: 'agent', content: text,
               metadata: { ...assistantMetadata(), replyId } });
             try { onReplyDelivered(record.scope, assistant.id); } catch { /* Sampling must not discard a confirmed reply. */ }
-            store.saveMemory({ title: `评论区交流：${record.notice.title || record.notice.content.slice(0, 40)}`.slice(0, 200), scope: record.scope, category: 'event',
-              content: `【B站公开评论；已回复并取得平台编号，不代表已通过所有审核】\n对方写道：${record.notice.content}\n来源：${url}`,
-              sourceType: 'conversation', sourceRef: record.sourceEventId });
+            // Completed thread turns are available to the shared idle memory organizer.
             return true;
           } catch { return false; }
         },

@@ -129,11 +129,11 @@
               <label>活动时区<input id="autonomy-time-zone" required maxlength="80" placeholder="Asia/Shanghai" spellcheck="false"><small>中国标准时间填写 Asia/Shanghai；次数和时段按此时区安排。</small></label>
               <p class="caption">每天会在次数范围内随机决定计划，并分散到活跃时段。程序运行时执行，错过的活动不会集中补跑。修改设置不会重置已经使用的次数。</p>
             </div></section>
-            <section id="chat-memory-settings" class="panel padded settings-section"><div class="settings-section-intro"><h2>私聊记忆沉淀</h2><p class="muted">空闲时回看新的私聊原话，把值得记住的片段放上书架。</p></div><div class="settings-fields">
-              <label class="check-label"><input id="chat-memory-enabled" type="checkbox">启用私聊记忆沉淀</label>
+            <section id="chat-memory-settings" class="panel padded settings-section"><div class="settings-section-intro"><h2>聊天记忆沉淀</h2><p class="muted">空闲时回看新的交流，把值得记住的人与事放上书架。</p></div><div class="settings-fields">
+              <label class="check-label"><input id="chat-memory-enabled" type="checkbox">启用聊天记忆沉淀</label>
               <div class="field-row"><label>整理间隔（分钟）<input id="chat-memory-interval" type="number" min="60" max="1440" required></label><label>每天最多尝试（次）<input id="chat-memory-limit" type="number" min="0" max="12" required></label></div>
-              <p class="caption">默认开启，每 180 分钟最多整理一次，每天最多 4 次，按 UTC 日期计数。只处理本次启用后新产生的私聊，不补扫旧历史；每次在同一私聊中查看最多 12 条新原话，最多保存 2 条完整原话摘记，也可以不保存。群聊不参与。</p>
-              <p class="caption">需要模型 API；每次最多一次模型请求，与聊天共用每日模型总额度，失败也计次。私聊记忆沿用原范围，书架中可查看、更正或删除；有聊天或其他任务时让出空闲时间。</p>
+              <p class="caption">默认开启，每 180 分钟最多整理一次，每天最多 4 次，按 UTC 日期计数。只处理启用后的新交流，不补扫旧历史；每次查看同一场合、同一发言者最多 12 条原话，最多保存 2 条摘记，也可以不保存。群聊和 B站线程只整理已完成回复的交流。</p>
+              <p class="caption">需要模型 API；每次最多一次模型请求，与聊天共用每日模型总额度，失败也计次。记忆沿用原私聊、群或评论线程的范围，书架中可查看、更正或删除；有聊天或其他任务时让出空闲时间。</p>
               <p id="chat-memory-summary" class="caption" role="status">正在读取记忆沉淀设置…</p>
               <p id="chat-memory-count" class="caption"></p>
               <p id="chat-memory-outcome" class="caption" aria-live="polite"></p>
