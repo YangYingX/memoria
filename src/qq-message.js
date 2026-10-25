@@ -4,6 +4,29 @@ function id(value, message = false) {
   return (message ? /^(?:0|-?[1-9]\d{0,19})$/ : /^[1-9]\d{0,19}$/).test(result) ? result : null;
 }
 
+export function normalizeQQDisplayName(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !value || value !== value.trim() || value.length > 80 || !value.isWellFormed()
+    || /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(value)) throw new Error('QQ 显示称呼无效。');
+  return value;
+}
+
+function qqDisplayName(event) {
+  const userId = id(event.user_id);
+  if (event.post_type !== 'message' || !userId || id(event.sender?.user_id) !== userId
+    || !['private', 'group'].includes(event.message_type)
+    || (event.message_type === 'group' ? !id(event.group_id) : event.group_id !== undefined)) return undefined;
+  const names = event.message_type === 'group' ? [event.sender.card, event.sender.nickname] : [event.sender.nickname];
+  for (const value of names) {
+    if (typeof value !== 'string') continue;
+    let name = value.trim().slice(0, 80);
+    if (/[\uD800-\uDBFF]/.test(name.at(-1))) name = name.slice(0, -1);
+    name = name.trim();
+    try { if (name) return normalizeQQDisplayName(name); } catch { /* Invalid labels cannot replace the account identity. */ }
+  }
+  return undefined;
+}
+
 export function parseQQMessage(event) {
   const segments = Array.isArray(event.message) ? event.message : [];
   const message = segments.length
@@ -12,7 +35,9 @@ export function parseQQMessage(event) {
   const mentions = [...new Set(segments.filter(segment => segment?.type === 'at').map(segment => segment.data?.qq === 'all' ? 'all' : id(segment.data?.qq)).filter(Boolean))].slice(0, 20);
   const replies = segments.filter(segment => segment?.type === 'reply');
   const replyId = replies.length === 1 ? id(replies[0].data?.id, true) : null;
+  const displayName = qqDisplayName(event);
   return { message, imageUrls: segments.filter(segment => segment?.type === 'image').map(segment => segment.data?.url),
+    ...(displayName ? { displayName } : {}),
     ...(mentions.length ? { mentions } : {}), ...(replyId !== null ? { replyId } : replies.length ? { replyUnavailable: true } : {}) };
 }
 

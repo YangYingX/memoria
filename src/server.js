@@ -669,7 +669,7 @@ async function chat(scope, message, actor = 'owner', imageUrls = [], origin = ''
         return { ...found, expressions: found.expressions.filter(item => current.get(item.id) === JSON.stringify(item)) };
       } : undefined;
       const collectExpression = origin ? input => { options.signal?.throwIfAborted(); options.assertActive?.(); return store.saveExpression({ ...input, scope, origin, actor }); } : undefined;
-      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
+      const result = await runConversation({ store, readAndRemember, scope, message, actor, images, expressions, searchExpressions, collectExpression, allowSilence: options.allowSilence === true, deferAssistant: options.deferAssistant === true, qqBatchSources: options.qqBatchSources, qqReplyContext: options.qqReplyContext, qqDisplayName: options.qqDisplayName, conversationOrigin: options.conversationOrigin, signal: options.signal, assertActive: options.assertActive,
         ...(dshAvailable ? { memoryAgent: async (query, excludeMessageId) => {
           options.signal?.throwIfAborted(); options.assertActive?.();
           const recalled = await dshRuntime.execute({ scope, actor, name: 'recall_memory', args: { query }, excludeMessageId, signal: options.signal,
@@ -885,7 +885,7 @@ async function runQQBatch(items, { signal }) {
     }
     const result = await chat(context.scope, items.map(item => item.text).join('\n'), context.actor, first.imageUrls, context.origin,
       { signal, assertActive, qqBatchSources: items.length > 1 ? sources : undefined,
-        qqReplyContext: qqReplyContext.length ? qqReplyContext : undefined,
+        qqReplyContext: qqReplyContext.length ? qqReplyContext : undefined, qqDisplayName: items.at(-1).qqDisplayName,
         ...(context.scope === 'owner' && context.account?.personId === 'owner' ? { conversationOrigin: {
           version: 1, platform: 'qq', accountId: context.account.id, botId: context.config.botId, userId: context.account.userId } } : {}),
         allowSilence: ambient, deferAssistant: true });
@@ -1060,7 +1060,7 @@ async function handleQQ(event, config, ingressEpoch = qqEpoch) {
     ? segments.every(segment => segment?.type === 'text' || (groupId && segment?.type === 'at' && String(segment.data?.qq) === selfId))
     : !/\[CQ:/i.test(String(event.raw_message || '')));
   if (!qqChatBatch.enqueue({ conversation, mergeKey: `${context.mergeKey}:${ambient ? 'ambient' : 'addressed'}`, context, text: message, imageUrls,
-    ambient, mergeable, mentions: parsed.mentions, replyId: parsed.replyId, replyUnavailable: parsed.replyUnavailable,
+    ambient, mergeable, qqDisplayName: parsed.displayName, mentions: parsed.mentions, replyId: parsed.replyId, replyUnavailable: parsed.replyUnavailable,
     windowMs: normalizeQQMergeWindow(config.mergeWindowMs), platformMessageId, receivedAt: new Date().toISOString() })) {
     if (!ambient) await sendQQ(config, target, '当前聊天有较多消息等待处理，请稍后再发。', [], origin, { beforeSend: context.assertActive });
   }

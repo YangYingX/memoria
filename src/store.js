@@ -6,7 +6,7 @@ import { imageMimeType } from './images.js';
 import { assertPublicUrl } from './public-fetch.js';
 import { normalizeMoodState, applyMoodDelta, moodSnapshot } from './mood.js';
 import { normalizeQQBatchSources, qqBatchSourceInfo } from './qq-batch-source.js';
-import { normalizeQQReplyContext } from './qq-message.js';
+import { normalizeQQReplyContext, normalizeQQDisplayName } from './qq-message.js';
 import { normalizeConversationOrigin } from './conversation-origin.js';
 import { FOLLOWUP_STATUSES, FOLLOWUP_TERMINAL_STATUSES, FOLLOWUP_DAY_MS, followupTimestamp, followupClock, normalizeFollowupRecord } from './followup-fields.js';
 import { BILI_REPLY_STATES, BILI_REPLY_TERMINAL, biliSocialId, biliDynamicId, biliNoticeUrl, normalizeNotice, biliNoticeKey, biliCommentKey, biliNoticeHash, biliNoticeScope, biliNoticeActor } from './bili-social-notice.js';
@@ -377,10 +377,15 @@ const followupRow = row => row ? ({ id: row.id, memoryId: row.memory_id, sourceE
 const normalize = value => value.normalize('NFKC').toLowerCase();
 
 function qqReplySourceInfo(userMetadata, sourceMetadata, content) {
+  let label = {};
+  try {
+    const user = normalizeQQDisplayName(userMetadata.qqDisplayName), source = normalizeQQDisplayName(sourceMetadata.qqDisplayName);
+    if (user && user === source) label = { qqDisplayName: user };
+  } catch { /* Only matching valid source labels enter conversation context. */ }
   try {
     const user = normalizeQQReplyContext(userMetadata.qqReplyContext, content), source = normalizeQQReplyContext(sourceMetadata.qqReplyContext, content);
-    return user && source && JSON.stringify(user) === JSON.stringify(source) ? { qqReplyContext: user } : {};
-  } catch { return {}; }
+    return user && source && JSON.stringify(user) === JSON.stringify(source) ? { ...label, qqReplyContext: user } : label;
+  } catch { return label; }
 }
 
 function chatMemoryPrivate(scope, actor) {
@@ -1049,7 +1054,10 @@ export function createStore(dbPath) {
     const linkedUsers = new Set(linkedSources.map(row => row.id)), replySources = new Map();
     for (const source of linkedSources) {
       const user = users.get(source.id), info = qqReplySourceInfo(user.metadata, JSON.parse(source.sourceMetadata), user.content);
-      replySources.set(source.id, replySources.has(source.id) && JSON.stringify(replySources.get(source.id)) !== JSON.stringify(info) ? {} : info);
+      const previous = replySources.get(source.id);
+      replySources.set(source.id, previous ? Object.fromEntries(['qqReplyContext', 'qqDisplayName']
+        .filter(key => Object.hasOwn(previous, key) && Object.hasOwn(info, key) && JSON.stringify(previous[key]) === JSON.stringify(info[key]))
+        .map(key => [key, info[key]])) : info);
     }
     const historicalOrigins = new Map(), imageSources = new Map();
     // Historical origin proves a label, never a current account binding or delivery permission.
@@ -2151,8 +2159,8 @@ export function createStore(dbPath) {
       return state.messages.filter(message => message.scope === scope && (message.role === 'user'
         ? !state.blockedUsers.has(message.id) : !state.hiddenAssistants.has(message.id))
         && (!selectedIds || selectedIds.has(message.id))).slice(0, limit).reverse().map(message => {
-        if (message.role !== 'user' || !Object.hasOwn(message.metadata, 'qqReplyContext')) return message;
-        const { qqReplyContext, ...metadata } = message.metadata;
+        if (message.role !== 'user' || !['qqReplyContext', 'qqDisplayName'].some(key => Object.hasOwn(message.metadata, key))) return message;
+        const { qqReplyContext, qqDisplayName, ...metadata } = message.metadata;
         return { ...message, metadata: { ...metadata, ...state.replySources.get(message.id) } };
       });
     },
