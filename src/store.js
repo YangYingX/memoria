@@ -22,6 +22,7 @@ import { parseProfileRequest } from './profile-tools.js';
 import { HEYBOX_REPLY_STATES, HEYBOX_REPLY_TERMINAL, heyboxId, heyboxKey, normalizeHeyboxThread, normalizeHeyboxComment,
   heyboxThreadKey, heyboxThreadIdentityKey, heyboxThreadHash, heyboxThreadScope, heyboxCommentKey, heyboxCommentHash, heyboxCommentActor, normalizeHeyboxConfirmation } from './heybox-thread.js';
 import { biliVideoUrl } from './bili-reading.js';
+import { isBiliSourceEvidence } from './bili-source.js';
 
 const LIMITS = { title: 200, memory: 30000, event: 30000, metadata: 16000, sourceRef: 2048 };
 const EXPRESSION_LIMITS = { image: 2 * 1024 * 1024, total: 8 * 1024 * 1024, count: 64, perOrigin: 20 };
@@ -1351,9 +1352,7 @@ export function createStore(dbPath) {
         if (!reading || !original || reading.sourceRef !== url || original.sourceRef !== url || original.content !== reading.content
           || original.createdAt !== reading.createdAt || reading.metadata.memoryId !== original.id || reading.metadata.reusedMemory === true
           || (reading.metadata.partIndex !== undefined && reading.metadata.partIndex !== 1)
-          || evidence?.sourceKind !== 'bilibili-transcript' || evidence.plugin !== 'dsh-bili-humanism'
-          || evidence.bvid !== metadata.bvid || evidence.videoPart !== Number(target.searchParams.get('p'))
-          || !['A1', 'A2'].includes(evidence.route) || evidence.visual !== false || evidence.audio !== false) return null;
+          || !isBiliSourceEvidence(evidence, metadata.bvid, Number(target.searchParams.get('p')))) return null;
         const attempts = all(`SELECT * FROM events WHERE type = 'self_expression' AND scope = 'owner' AND actor = 'scheduler'
           AND json_extract(metadata, '$.platform') = 'bilibili' AND json_extract(metadata, '$.action') = 'comment'
           AND json_extract(metadata, '$.outcome') = 'attempt' AND json_extract(metadata, '$.bvid') = ?

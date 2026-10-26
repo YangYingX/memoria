@@ -40,7 +40,7 @@ export function assertPublicUrl(value) {
 const proxyDnsHosts = new Set(['www.xiaoheihe.cn', 'api.xiaoheihe.cn', 'static.max-c.com', 'static.portal101.cn', 'zh.wikisource.org']);
 const proxyDnsCache = new Map();
 
-async function proxyPublicAddresses(host, signal) {
+export async function proxyPublicAddresses(host, signal) {
   const cached = proxyDnsCache.get(host);
   signal.throwIfAborted();
   if (cached?.expiresAt > Date.now()) return cached.addresses;

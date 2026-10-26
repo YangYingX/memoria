@@ -238,7 +238,13 @@
               <p class="caption">已有 Chrome 登录可直接导入：在当前 Chrome 的扩展管理页加载 <code>extensions/bili-login-bridge</code>；已安装旧版时先重新加载，确认扩展为 1.1.0，再用同一个 Chrome 打开 http://127.0.0.1:3210 并登录后台，点击上方导入按钮。仅在点击时读取 B站四项必要 Cookie，导入后可移除；不读取其他网站或把登录状态发给模型。旧凭据仍可只读，社交凭据不足时需重新导入。</p>
               <p class="caption">项目打开独立浏览器，由你手动登录；确认后把执行所需凭据保存在本机。专用执行账号不用于认定创建人身份。Windows 使用独立 Chrome 窗口，Linux 需图形会话；凭据不进入备份或 GitHub。登录不会自动解除已有的平台风险暂停，保存状态不等于启用社交回复。</p>
               <label>每天最多尝试几次 B站浏览或读取<input id="dsh-reading-limit" type="number" min="0" max="50" step="1" required><small>默认 6 次，所有聊天场合共用，按 UTC 日期计数；发现候选和读取所选视频合计只计一次，失败也计次，重启或换会话不清零。0 表示暂停新读取，已有记忆仍可翻阅。</small></label>
-              <p class="caption">在聊天或网页阅读中提供完整的 B站 BV 视频链接，也可加入固定网址阅读安排。通过只读接口获取字幕文字，不读取画面或音频；全部取得文字分段存入书架。平台验证可能阻止读取；暂停后不自动重试。阅读不消耗公开发布额度。</p>
+                <p class="caption">她可以在自主浏览中选择视频，也可在聊天中接收完整 BV 链接。默认读取可用文字；启用下方媒体采样后，还可查看少量画面，并在没有字幕时转写部分语音。实际取得的资料分段存入书架。平台验证可能阻止读取；暂停后不自动重试。阅读不消耗公开发布额度。</p>
+                <label class="check-label"><input id="bili-video-enabled" type="checkbox">在 B站浏览中启用画面与语音采样</label>
+                <div class="field-row"><label>每个视频采样画面数<input id="bili-video-frames" type="number" min="0" max="8" step="1" required></label><label>无字幕时最多转写秒数<input id="bili-video-audio" type="number" min="0" max="60" step="1" required></label></div>
+                <div class="field-row"><label>每日媒体下载预算（MiB）<input id="bili-video-download" type="number" min="0" max="4096" step="1" required></label><label>每日本地转写预算（秒）<input id="bili-video-asr" type="number" min="0" max="86400" step="1" required></label></div>
+                <p class="caption">画面理解需要支持图片输入的模型，调用计入已有模型额度；语音转写使用本地资源。单次只转写开头最多60秒、均匀采样最多8张画面，可能遗漏重要内容，不代表完整观看或理解音乐。下载每轨按最多64 MiB预占，失败不返还；额度按UTC日期累计。这里调整能力与预算，日常触发仍由自主安排或聊天承担。</p>
+                <p id="bili-video-status" class="connection-result" role="status"></p>
+                <button id="bili-video-resume" class="button secondary" type="button" hidden>已完成官网核验，恢复媒体采样</button>
               <div class="connection-test"><button id="dsh-test" class="button secondary" type="button">检测插件运行层</button><p class="caption">此按钮只检测宿主，不调用模型或访问平台。独立宿主配置方法见仓库部署说明。</p><p id="dsh-test-result" class="connection-result" role="status" hidden></p></div>
             </div></section>
             <section class="panel padded settings-section"><div class="settings-section-intro"><span class="section-number">11</span><h2>飞书文本聊天</h2><p class="muted">在获准的私聊和群聊中延续同一人格与记忆。需先按部署说明安装专用连接环境。</p></div><div class="settings-fields">

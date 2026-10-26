@@ -104,6 +104,7 @@ async function loadState({ fill = false } = {}) {
   renderBackupStatus(state.data.backupStatus);
   renderActivityStatus(state.data.activityStatus);
   renderAutonomyStatus(state.data.autonomyStatus);
+  renderBiliVideoStatus();
   renderSelfExpressionStatus(state.data.selfExpressionStatus);
   renderMoodStatus();
   renderChatMemoryStatus();
@@ -449,12 +450,26 @@ function renderAccounts() {
   }
 }
 
+function renderBiliVideoStatus() {
+  const video = state.data?.biliVideoStatus || {};
+  $('bili-video-resume').hidden = !video.pause;
+  $('bili-video-status').textContent = !video.enabled ? '媒体采样已关闭，仍可读取可用文字。'
+    : video.pause ? '平台要求核验，媒体采样已暂停；请先在B站官方页面完成核验，再恢复采样。'
+    : !video.decoder?.ready ? '本地视频处理尚未准备好，请按部署说明安装。'
+    : `本地视频处理已准备好。${video.lastOutcome === 'success' ? `最近取得 ${video.frameCount} 张画面观察、${Math.round(video.speechSeconds || 0)} 秒语音文字。` : video.message || ''}`;
+}
+
 function fillSettings() {
-  const { persona, model, qq, feishu = {}, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, mood = {}, chatMemory = {} } = state.data.settings;
+  const { persona, model, qq, feishu = {}, reading, autonomy = {}, drawing = {}, selfExpression = {}, books = {}, proactive = {}, dshReading = {}, biliVideo = {}, mood = {}, chatMemory = {} } = state.data.settings;
   $('chat-memory-enabled').checked = chatMemory.enabled !== false;
   $('chat-memory-interval').value = chatMemory.intervalMinutes ?? 180;
   $('chat-memory-limit').value = chatMemory.dailyLimit ?? 4;
   $('dsh-reading-limit').value = dshReading.dailyReadLimit ?? 6;
+  $('bili-video-enabled').checked = Boolean(biliVideo.enabled);
+  $('bili-video-frames').value = biliVideo.frames ?? 6;
+  $('bili-video-audio').value = biliVideo.audioSeconds ?? 60;
+  $('bili-video-download').value = biliVideo.dailyDownloadMiB ?? 256;
+  $('bili-video-asr').value = biliVideo.dailyAudioSeconds ?? 360;
   $('mood-enabled').checked = Boolean(mood.enabled);
   $('mood-interval').value = mood.intervalMinutes ?? 15;
   $('mood-limit').value = mood.dailyLimit ?? 48;
@@ -999,6 +1014,10 @@ $('expression-upload-form').addEventListener('submit', event => {
   });
 });
 $('refresh-autonomy').addEventListener('click', () => action($('refresh-autonomy'), () => Promise.all([loadState(), loadEvents()])));
+$('bili-video-resume').addEventListener('click', () => action($('bili-video-resume'), async () => {
+  await api('/api/bili/video/resume', { method: 'POST', data: { confirmed: true } });
+  await loadState();
+}));
 $('autonomy-run').addEventListener('click', () => action($('autonomy-run'), async () => {
   renderAutonomyStatus({ ...state.data.autonomyStatus, busy: true });
   try {
@@ -1188,6 +1207,7 @@ $('settings-form').addEventListener('submit', event => {
     try {
       await api('/api/settings', { method: 'PUT', data: {
         dshReading: { dailyReadLimit: Number($('dsh-reading-limit').value) },
+        biliVideo: { enabled: $('bili-video-enabled').checked, frames: Number($('bili-video-frames').value), audioSeconds: Number($('bili-video-audio').value), dailyDownloadMiB: Number($('bili-video-download').value), dailyAudioSeconds: Number($('bili-video-asr').value) },
         mood: { enabled: $('mood-enabled').checked, intervalMinutes: Number($('mood-interval').value), dailyLimit: Number($('mood-limit').value) },
         chatMemory: { enabled: $('chat-memory-enabled').checked, intervalMinutes: Number($('chat-memory-interval').value), dailyLimit: Number($('chat-memory-limit').value) },
         persona: { name: $('persona-name').value.trim(), description: $('persona-description').value.trim() },

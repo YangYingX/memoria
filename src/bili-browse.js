@@ -1,7 +1,7 @@
 import { queryTokens } from './store.js';
 import { biliReadingPage } from './bili-reading.js';
 
-export async function browseBiliVideos({ store, runtime, interests, failedUrls = [], signal, background = false, onYield, random = Math.random }) {
+export async function browseBiliVideos({ store, runtime, reader, interests, failedUrls = [], signal, background = false, onYield, random = Math.random }) {
   if (typeof background !== 'boolean') throw new Error('B站浏览任务来源无效。');
   const tokens = queryTokens(`${interests || ''} ${store.getSetting('persona', {}).description || ''}`);
   const excluded = new Set(failedUrls);
@@ -34,11 +34,18 @@ export async function browseBiliVideos({ store, runtime, interests, failedUrls =
         return { skipped: 'no_unread_videos' };
       }
       signal?.throwIfAborted();
-      const page = biliReadingPage(payload, selectedUrl);
-      return { ...page, source: 'dsh-bili-humanism', selectionReason: `${unreadableUrls.length ? '前一候选无可读文字，改选不同视频。' : ''}${selectionReason}`,
+      const page = reader ? await reader.read(selectedUrl, { scope: 'owner', actor: 'scheduler', signal, background, onYield, textPayload: payload }) : biliReadingPage(payload, selectedUrl);
+      return { ...page, source: page.evidence.plugin, selectionReason: `${unreadableUrls.length ? '前一候选无可用资料，改选不同视频。' : ''}${selectionReason}`,
         ...(unreadableUrls.length ? { unreadableUrls: [...unreadableUrls] } : {}) };
     } catch (error) {
       if (selectedUrl) error.sourceUrl = selectedUrl;
+      if (error.code === 'NO_READABLE_TEXT' && selectedUrl && reader?.status().enabled) {
+        try {
+          const page = await reader.read(selectedUrl, { scope: 'owner', actor: 'scheduler', signal, background, onYield, textPayload: null });
+          return { ...page, source: page.evidence.plugin, selectionReason,
+            ...(unreadableUrls.length ? { unreadableUrls: [...unreadableUrls] } : {}) };
+        } catch (mediaError) { mediaError.sourceUrl = selectedUrl; throw mediaError; }
+      }
       if (error.code === 'NO_READABLE_TEXT' && selectedUrl) {
         excluded.add(selectedUrl); unreadableUrls.push(selectedUrl); unreadableError = error;
       }

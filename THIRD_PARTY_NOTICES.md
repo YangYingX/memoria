@@ -1,5 +1,9 @@
 # Third-party notices
 
+## Optional local video sampling
+
+The video preparation command downloads a fixed LGPL build of FFmpeg and ffprobe from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). Archive and extracted-file checksums, version checks, codec checks and license/source information are retained with the separately installed tools. These executables, archives and media files are not distributed with this repository. See [FFmpeg's licensing information](https://ffmpeg.org/legal.html); the project license does not replace those obligations. Downloaded videos, audio, subtitles and model-generated observations are not covered by the FFmpeg or DSH code licenses.
+
 ## Optional local speech input
 
 The local speech adapter runs the external `@deepseek-ai/dsh-experimental-speech-to-text-sensevoice` worker, pinned to `0.2.1-rc.2` (MIT), with `sherpa-onnx-node` `1.13.8` (Apache-2.0). These runtime packages are installed separately and are not copied into this repository. See the [official DSH provider](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/experimental/speech-to-text-sensevoice) and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).

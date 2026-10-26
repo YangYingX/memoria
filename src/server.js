@@ -13,6 +13,10 @@ import { createBackupJobs, normalizeBackupSettings, publicBackupSettings } from 
 import { parseQQMessage, verifiedQQReply } from './qq-message.js';
 import { parseQQVoice, loadQQVoice } from './qq-voice.js';
 import { createSpeechRuntime } from './speech-runtime.js';
+import { createVideoRuntime } from './video-runtime.js';
+import { createBiliMedia } from './bili-media.js';
+import { createBiliVideoReader } from './bili-video-reader.js';
+import { defaultBiliVideoSettings, normalizeBiliVideoSettings } from './bili-video-settings.js';
 import { loadQQImages, validateQQImageUrls } from './images.js';
 import { createAutonomyJobs, defaultAutonomySettings, normalizeAutonomySettings, reflectReading } from './autonomy.js';
 import { discoverHeyboxPosts, readHeyboxPost } from './browser-reader.js';
@@ -34,7 +38,7 @@ import { activitySnapshot, communityReadingResult, inspectRecentPost } from './a
 import { createActivityJobs } from './activity-jobs.js';
 import { createDshRuntime, defaultDshReadingSettings, normalizeDshReadingSettings } from './dsh-runtime.js';
 import { createMateRuntime, mateFailure } from './mate-runtime.js';
-import { biliVideoUrl, biliReadingPage } from './bili-reading.js';
+import { biliVideoUrl } from './bili-reading.js';
 import { createBiliAccount } from './bili-account.js';
 import { createHeyboxAccount } from './heybox-account.js';
 import { browseBiliVideos } from './bili-browse.js';
@@ -108,6 +112,7 @@ const defaults = {
   books: defaultBookSettings,
   proactive: defaultProactiveSettings,
   dshReading: defaultDshReadingSettings,
+  biliVideo: defaultBiliVideoSettings,
   mood: defaultMoodSettings,
   chatMemory: defaultChatMemorySettings,
   backup: { enabled: false, intervalHours: 6, keepLocal: 30, localDirectory: resolve(process.env.PERSONA_BACKUP_DIR || join(root, 'backups')), passphrase: '', webdav: { enabled: false, url: '', username: '', password: '' } },
@@ -186,6 +191,10 @@ let communityConversation = false;
 let postInspection = false;
 let receivingBook = '';
 const speechRuntime = createSpeechRuntime({ dataDir });
+const videoRuntime = createVideoRuntime({ dataDir });
+const biliMedia = createBiliMedia({ store, dataDir, getCredentials: () => readBiliCredentials({ dataDir }) });
+const biliVideoReader = createBiliVideoReader({ store, runtime: dshRuntime, decoder: videoRuntime, speech: speechRuntime,
+  media: biliMedia, getIdentitySnapshot: activityIdentity });
 function heyboxRuntime() {
   if (process.platform !== 'win32') throw new Error('客户端小黑盒发帖目前需要 Windows 专用 MuMu 设备。');
   let config;
@@ -202,7 +211,7 @@ function activityIdentity() {
     return existsSync(path) ? createHash('sha256').update(readFileSync(path)).digest('hex') : null;
   };
   return createHash('sha256').update(JSON.stringify({ accounts: store.listAccounts(),
-    files: Object.fromEntries(['bili-credentials.json', 'heybox-credentials.json', 'android-runtime.json', 'dsh-runtime.json', 'mate-runtime.json'].map(name => [name, fingerprint(name)])),
+    files: Object.fromEntries(['bili-credentials.json', 'heybox-credentials.json', 'android-runtime.json', 'dsh-runtime.json', 'mate-runtime.json', 'video-runtime.json', 'speech-runtime.json'].map(name => [name, fingerprint(name)])),
     feishu: (() => { const value = feishuRuntime.status(); return { epoch: value.epoch, fingerprint: value.fingerprint, botId: value.botId }; })() })).digest('hex');
 }
 function makeAutonomyJobs() {
@@ -215,7 +224,7 @@ function makeAutonomyJobs() {
         priority: reading.background ? 'background' : 'normal', ...(reading.background ? { onYield: () => autonomyJobs.cancel() } : {}) });
       return note.text;
     },
-    browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, ...options,
+    browseVideos: options => browseBiliVideos({ store, runtime: dshRuntime, reader: biliVideoReader, ...options,
       ...(options.background ? { onYield: () => autonomyJobs.cancel() } : {}) }),
     discoverPosts: async (source, options) => {
       if (source !== 'heybox') throw new Error('此社区尚未接入。');
@@ -726,7 +735,7 @@ function publicSettings() {
   qqView.mergeWindowMs = normalizeQQMergeWindow(qq.mergeWindowMs);
   Object.assign(qqView, normalizeQQGroupAttentionSettings(qq));
   Object.assign(qqView, normalizeQQReplySettings(qq));
-  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, feishu: normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)), reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: normalizeBookSettings({}, store.getSetting('books')), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), chatMemory: normalizeChatMemorySettings(store.getSetting('chatMemory')), dshReading: store.getSetting('dshReading'), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
+  return { persona, model: { ...modelView, hasApiKey: Boolean(apiKey) }, qq: { ...qqView, hasAccessToken: Boolean(accessToken) }, feishu: normalizeFeishuSettings(store.getSetting('feishu', defaultFeishuSettings)), reading: store.getSetting('reading'), autonomy: store.getSetting('autonomy'), books: normalizeBookSettings({}, store.getSetting('books')), proactive: store.getSetting('proactive'), mood: store.getSetting('mood'), chatMemory: normalizeChatMemorySettings(store.getSetting('chatMemory')), dshReading: store.getSetting('dshReading'), biliVideo: normalizeBiliVideoSettings(store.getSetting('biliVideo')), drawing: publicDrawingSettings(store.getSetting('drawing')), selfExpression: publicExpressionSettings(store.getSetting('selfExpression'), expressionPlatforms), backup: publicBackupSettings(store.getSetting('backup')) };
 }
 
 function saveSettings(input) {
@@ -767,9 +776,10 @@ function saveSettings(input) {
   if (input.books) next.books = normalizeBookSettings(input.books, store.getSetting('books'));
   if (input.proactive) next.proactive = normalizeProactiveSettings(input.proactive, store.getSetting('proactive'));
   if (input.dshReading) next.dshReading = normalizeDshReadingSettings(input.dshReading);
+  if (input.biliVideo) next.biliVideo = normalizeBiliVideoSettings(input.biliVideo);
   if (input.mood) next.mood = normalizeMoodSettings(input.mood, store.getSetting('mood'));
   if (input.chatMemory) next.chatMemory = normalizeChatMemorySettings(input.chatMemory, store.getSetting('chatMemory'));
-  if (next.autonomy && JSON.stringify(next.autonomy) !== JSON.stringify(store.getSetting('autonomy'))) autonomyJobs.cancel();
+  if (['autonomy', 'biliVideo'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) autonomyJobs.cancel();
   if (['selfExpression', 'qq', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))) { selfExpressionJobs.cancel(); void profileActions.cancel(); }
   if (['books', 'model', 'persona'].some(key => next[key] && JSON.stringify(next[key]) !== JSON.stringify(store.getSetting(key)))
     || next.autonomy && next.autonomy.interests !== store.getSetting('autonomy', {}).interests) bookJobs.cancel();
@@ -799,8 +809,8 @@ async function readAndRemember(url, scope, actor = 'owner', options = {}) {
   readingJobs.add(key); activeMutation++;
   try {
     const videoUrl = biliVideoUrl(url);
-    const page = videoUrl ? biliReadingPage(await dshRuntime.execute({ scope, actor, name: 'read_bili_video', args: { url: videoUrl }, signal: options.signal,
-      priority: options.background ? 'background' : 'normal', ...(options.background ? { onYield: options.onYield } : {}) }), videoUrl) : await readPage(url);
+    const page = videoUrl ? await biliVideoReader.read(videoUrl, { scope, actor, signal: options.signal, assertActive: options.assertActive,
+      background: options.background, onYield: options.onYield }) : await readPage(url);
     options.signal?.throwIfAborted(); options.assertActive?.();
     return { page, ...store.recordReading({ page, scope, actor }) };
   } finally { readingJobs.delete(key); activeMutation--; }
@@ -1348,7 +1358,12 @@ const server = http.createServer(async (req, res) => {
       if (!sessions.get(req)) return json(res, 401, { error: '请先登录创建人后台。' });
       const input = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? JSON.parse((await body(req, path.startsWith('/api/backups/') ? 40 * 1024 * 1024 : path === '/api/books/file' ? Math.ceil(BOOK_FILE_MAX_BYTES / 3) * 4 + 4096 : path === '/api/expressions' || path === '/api/books' ? 3 * 1024 * 1024 : 1024 * 1024)).toString('utf8') || '{}') : {};
       if (path === '/api/logout' && req.method === 'POST') { sessions.end(req, res); return json(res, 200, { ok: true }); }
-      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), activityStatus: activityJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), speechStatus: speechRuntime.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), heyboxSocialStatus: heyboxBrowser.status(), biliSocialStatus: biliSocialRuntime.status(), biliProfileStatus: biliProfileRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
+      if (path === '/api/bili/video/resume' && req.method === 'POST') {
+        if (biliVideoReader.status().busy) return json(res, 409, { error: '请等待当前视频任务退出后恢复。' });
+        biliMedia.resume(input);
+        return json(res, 200, { ok: true });
+      }
+      if (path === '/api/state' && req.method === 'GET') return json(res, 200, { settings: publicSettings(), stats: store.stats(), accounts: store.listAccounts(), readingStatus: store.getSetting('readingStatus', {}), autonomyStatus: autonomyJobs.status(), activityStatus: activityJobs.status(), bookStatus: bookJobs.status(), selfExpressionStatus: selfExpressionJobs.status(), proactiveStatus: proactiveJobs.status(), mateStatus: mateRuntime.status(), followups: store.listFollowups({ limit: 20 }).map(row => followupView(store, row)), mood: moodSnapshot(store), moodStatus: moodJobs.status(), chatMemoryStatus: chatMemoryJobs.status(), qqChatStatus: qqChatBudget.status(), feishuStatus: feishuChat.status(), feishuConnection: feishuRuntime.status(), backupStatus: backupJobs.status(), speechStatus: speechRuntime.status(), biliVideoStatus: biliVideoReader.status(), dshStatus: dshRuntime.status(), biliAccountStatus: biliAccount.status(), heyboxAccountStatus: heyboxAccount.status(), heyboxSocialStatus: heyboxBrowser.status(), biliSocialStatus: biliSocialRuntime.status(), biliProfileStatus: biliProfileRuntime.status(), modelUsage: store.getSetting('modelUsage', {}), modelBudget: modelBudget(store) });
       if (path === '/api/mate/reset' && req.method === 'POST') {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) return json(res, 400, { error: '重置陪伴节奏不接受额外参数。' });
         if (proactiveJobs.status().busy || mateRuntime.status().busy) return json(res, 409, { error: '请等待当前主动私聊判断完成后重置节奏。' });
@@ -1513,6 +1528,7 @@ const server = http.createServer(async (req, res) => {
         void feishuRuntime.stop().catch(() => {});
         await profileActions.cancel();
         await activityJobs.stop();
+        await biliVideoReader.cancelAndWait();
         store.importData(payload);
         store.setSetting('reading', { ...store.getSetting('reading'), enabled: false });
         store.setSetting('qq', { ...store.getSetting('qq'), enabled: false });
@@ -1590,7 +1606,7 @@ const timer = setInterval(() => { void backgroundPulse(); }, 30000);
 
 async function stopJobs() {
   await Promise.allSettled([activityJobs.stop(), backupJobs.stop(), autonomyJobs.stop(), selfExpressionJobs.stop(), bookJobs.stop(), proactiveJobs.stop(),
-    moodJobs.stop(), chatMemoryJobs.stop(), qqChatBatch.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(),
+    moodJobs.stop(), chatMemoryJobs.stop(), qqChatBatch.stop(), biliVideoReader.stop(), speechRuntime.stop(), dshRuntime.stop(), mateRuntime.stop(), feishuRuntime.stop(),
     feishuChat.stop(), biliSocialRuntime.stop(), heyboxBrowser.stop(), profileActions.stop(), biliProfileRuntime.stop(), backgroundPulsePromise]);
 }
 timer.unref();

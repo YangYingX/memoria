@@ -36,7 +36,7 @@ function nativeError(code) {
   if (readErrors.has(code)) return code;
   if (['CREDENTIAL_EXPIRED', 'CREDENTIAL_INVALID'].includes(code)) return 'PLATFORM_PAUSED';
   if (['HTTP_FAILED', 'BODY_READ_FAILED', 'INVALID_RESPONSE'].includes(code)) return 'NETWORK_FAILED';
-  if (['INVALID_SEGMENTS', 'INVALID_TIMESTAMP', 'INVALID_DURATION', 'READING_NOT_FOUND', 'INVALID_OFFSET'].includes(code)) return 'INVALID_SOURCE';
+  if (['API_UNAVAILABLE', 'INVALID_SEGMENTS', 'INVALID_TIMESTAMP', 'INVALID_DURATION', 'READING_NOT_FOUND', 'INVALID_OFFSET'].includes(code)) return 'INVALID_SOURCE';
   if (['TOO_MANY_SEGMENTS', 'SEGMENT_TOO_LONG', 'RESPONSE_TOO_LARGE'].includes(code)) return 'SOURCE_TOO_LARGE';
   return 'DSH_READ_FAILED';
 }
@@ -94,7 +94,7 @@ async function completeReading(execute, video) {
     || !Number.isSafeInteger(usage.candidates) || usage.candidates < 0 || usage.candidates > 3
     || usage.asr_seconds !== 0 || !Number.isFinite(usage.elapsed_ms) || usage.elapsed_ms < 0 || usage.tokens !== null
     || typeof first.cached !== 'boolean') fail('INVALID_SOURCE');
-  const result = { reading: { id: first.id, bvid: first.bvid, page: first.page, url: first.url,
+  const result = { reading: { id: first.id, bvid: first.bvid, page: first.page, cid: first.cid, url: first.url,
     title: first.title, author: first.author, route: first.route, coverage: first.coverage, duration: first.duration, segments },
     usage: { requests: usage.requests, candidates: usage.candidates, asr_seconds: 0, elapsed_ms: usage.elapsed_ms, tokens: null },
     visual: 'unavailable', cached: first.cached };

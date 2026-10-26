@@ -8,7 +8,7 @@ const activities = {
   companion: '自然地联系创建人，陪伴、聊天或延续合适的话题',
   books: '继续读书或找一部可取得正文的作品，分段阅读并记笔记',
   browse_heybox: '去小黑盒浏览公开帖子，延续兴趣或了解新话题',
-  browse_bilibili: '去B站获取可用的视频文字资料；当前不代表观看画面或听原声',
+  browse_bilibili: '去B站了解感兴趣的视频；按已启用能力取得文字、画面采样或部分语音转写，只依据实际取得的范围思考',
   expression: '考虑在已启用的平台表达想法、参与讨论或整理自己的资料，也可以不开口',
 };
 const record = value => value && typeof value === 'object' && !Array.isArray(value);

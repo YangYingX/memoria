@@ -1,6 +1,6 @@
 {
   "name": "memoria",
-  "version": "0.3.130",
+  "version": "0.3.131",
   "private": true,
   "description": "A local-first personal agent with scoped memories and verifiable experiences.",
   "type": "module",
@@ -13,7 +13,8 @@
     "dev": "node --watch src/server.js",
     "check": "node scripts/check.js",
     "browser:install": "playwright install chromium --only-shell",
-    "speech:prepare": "node scripts/prepare-speech.js"
+    "speech:prepare": "node scripts/prepare-speech.js",
+    "video:prepare": "node scripts/prepare-video.js"
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
